@@ -80,6 +80,7 @@ struct processor_config final {
 /// \brief Backing store config
 struct backing_store_config final {
     bool shared{false};        ///< Should changes be reflected in backing store?
+    bool create{false};        ///< Should backing store be created?
     bool truncate{false};      ///< Should backing store be truncated to correct size?
     std::string data_filename; ///< Backing store for associated memory address range
     std::string dht_filename;  ///< Backing store for corresponding dense hash-tree
@@ -92,8 +93,8 @@ struct backing_store_config_only final {
 
 /// \brief RAM state config
 struct ram_config final {
-    uint64_t length{0};                 ///< RAM length
-    backing_store_config backing_store; ///< Backing store
+    uint64_t length{0};                                   ///< RAM length
+    backing_store_config backing_store{.truncate = true}; ///< Backing store
 };
 
 /// \brief DTB state config
@@ -203,14 +204,15 @@ struct uarch_processor_config final {
 
 /// \brief Uarch config
 struct uarch_config final {
-    uarch_processor_config processor{}; ///< Uarch processor
-    uarch_ram_config ram{};             ///< Uarch RAM
+    uarch_processor_config processor{};                        ///< Uarch processor
+    uarch_ram_config ram{.backing_store = {.truncate = true}}; ///< Uarch RAM
 };
 
 /// \brief Hash tree config
 struct hash_tree_config final {
     std::string hasher{"keccak"}; ///< What hashing function to use?
     bool shared{false};           ///< Should changes be reflected in backing store?
+    bool create{false};           ///< Should backing store be created to correct size?
     bool truncate{false};         ///< Should backing store be truncated to correct size?
     std::string sht_filename;     ///< Backing storage for sparse hash-tree
     std::string phtc_filename;    ///< Backing storage for page hash-tree cache

@@ -93,27 +93,6 @@ using namespace std::string_literals;
 
 static const auto throw_invalid_argument = [](const char *err) { throw std::invalid_argument{err}; };
 
-/// \brief Creates a memory address range.
-/// \param d Description of address range for use in error messages.
-/// \param start Target physical address where range starts.
-/// \param length Length of range, in bytes.
-/// \param f Flags for address range.
-/// \param backing_store Backing store configuration for range.
-/// \returns New address range with flags already set.
-/// \details If \p backing_store.data_filename is non-empty and file is large enough to back entire address range,
-/// return a memory-mapped range, otherwise use calloc.
-static inline auto make_memory_address_range(const std::string &d, uint64_t start, uint64_t length, pmas_flags flags,
-    const backing_store_config &backing_store) {
-    if (backing_store.data_filename.empty() && backing_store.shared) {
-        throw std::invalid_argument{"shared address range requires non-empty memory filename when initializing " + d};
-    }
-    if (backing_store.data_filename.empty() ||
-        length > static_cast<uint64_t>(os_get_file_length(backing_store.data_filename.c_str()))) {
-        return make_callocd_memory_address_range(d, start, length, flags, backing_store.data_filename);
-    }
-    return make_mmapd_memory_address_range(d, start, length, flags, backing_store.data_filename, backing_store.shared);
-}
-
 void machine::check_address_range(const address_range &ar, register_where where) {
     if (!where.interpret && !where.merkle) {
         throw std::runtime_error{"address range "s + ar.get_description() + " must be registered somwhere"s};
@@ -151,15 +130,17 @@ static bool is_protected(PMA_ISTART_DID DID) {
 
 void machine::replace_memory_range(const memory_range_config &config) {
     for (auto &existing : m_ars) {
-        //??D Need to add check for new read-only property here
         if (existing->get_start() == config.start && existing->get_length() == config.length) {
             if (!existing->is_memory() || is_protected(existing->get_driver_id())) {
                 throw std::invalid_argument{"attempt to replace a protected range "s + existing->get_description()};
             }
+            if (existing->is_host_read_only()) {
+                throw std::invalid_argument{"attempt to replace a read-only range "s + existing->get_description()};
+            }
             // Replace range, preserving original flags.
             // This will automatically start with all pages dirty.
-            existing = make_moved_unique(make_memory_address_range(existing->get_description(), existing->get_start(),
-                existing->get_length(), existing->get_flags(), config.backing_store));
+            existing = make_moved_unique(memory_address_range{existing->get_description(), existing->get_start(),
+                existing->get_length(), existing->get_flags(), config.backing_store, config.read_only});
             return;
         }
     }
@@ -194,15 +175,11 @@ void machine::init_uarch(const uarch_config &c) {
         .DID = PMA_ISTART_DID::memory,
     };
     constexpr auto ram_description = "uarch RAM";
-    if (c.ram.backing_store.data_filename.empty()) {
-        m_us.ram = &register_address_range(
-            make_callocd_memory_address_range(ram_description, AR_UARCH_RAM_START, UARCH_RAM_LENGTH, uram_flags),
-            register_where{.merkle = true, .interpret = false});
+    m_us.ram = &register_address_range(
+        memory_address_range{ram_description, AR_UARCH_RAM_START, UARCH_RAM_LENGTH, uram_flags, c.ram.backing_store},
+        register_where{.merkle = true, .interpret = false});
+    if (c.ram.backing_store.data_filename.empty() || c.ram.backing_store.create) {
         memcpy(m_us.ram->get_host_memory(), uarch_pristine_ram, uarch_pristine_ram_len);
-    } else {
-        m_us.ram = &register_address_range(make_memory_address_range(ram_description, AR_UARCH_RAM_START,
-                                               UARCH_RAM_LENGTH, uram_flags, c.ram.backing_store),
-            register_where{.merkle = true, .interpret = false});
     }
 }
 
@@ -291,7 +268,7 @@ void machine::init_ram_ar(const ram_config &ram) {
     if (ram.length == 0) {
         throw std::invalid_argument("RAM length cannot be zero");
     }
-    register_address_range(make_memory_address_range("RAM"s, AR_RAM_START, ram.length, ram_flags, ram.backing_store),
+    register_address_range(memory_address_range{"RAM"s, AR_RAM_START, ram.length, ram_flags, ram.backing_store},
         register_where{.merkle = true, .interpret = true});
 }
 
@@ -299,17 +276,6 @@ void machine::init_flash_drive_ars(flash_drive_configs &flash_drive) {
     if (flash_drive.size() > FLASH_DRIVE_MAX) {
         throw std::invalid_argument{"too many flash drives"};
     }
-    // Flags for flash drives
-    static const pmas_flags flash_flags{
-        .M = true,
-        .IO = false,
-        .R = true,
-        .W = true,
-        .X = false,
-        .IR = true,
-        .IW = true,
-        .DID = PMA_ISTART_DID::flash_drive,
-    };
     // Register all flash drives
     int i = 0; // NOLINT(misc-const-correctness)
     for (auto &f : flash_drive) {
@@ -322,7 +288,7 @@ void machine::init_flash_drive_ars(flash_drive_configs &flash_drive) {
         const auto &image_filename = f.backing_store.data_filename;
         if (f.length == UINT64_C(-1)) {
             if (image_filename.empty()) {
-                throw std::system_error{errno, std::generic_category(),
+                throw std::runtime_error{
                     "unable to auto-detect length of "s.append(flash_description).append(" with empty image file")};
             }
             auto fp = make_unique_fopen(image_filename.c_str(), "rb");
@@ -341,8 +307,19 @@ void machine::init_flash_drive_ars(flash_drive_configs &flash_drive) {
             }
             f.length = length;
         }
+        // Flags for flash drives
+        static const pmas_flags flash_flags{
+            .M = true,
+            .IO = false,
+            .R = true,
+            .W = !f.read_only,
+            .X = false,
+            .IR = true,
+            .IW = !f.read_only,
+            .DID = PMA_ISTART_DID::flash_drive,
+        };
         register_address_range(
-            make_memory_address_range(flash_description, f.start, f.length, flash_flags, f.backing_store),
+            memory_address_range{flash_description, f.start, f.length, flash_flags, f.backing_store, f.read_only},
             register_where{.merkle = true, .interpret = true});
         i++;
     }
@@ -456,11 +433,11 @@ void machine::init_cmio_ars(const cmio_config &c) {
         .IW = true,
         .DID = PMA_ISTART_DID::cmio_rx_buffer,
     };
-    register_address_range(make_memory_address_range("CMIO tx buffer memory range"s, AR_CMIO_TX_BUFFER_START,
-                               AR_CMIO_TX_BUFFER_LENGTH, tx_flags, c.tx_buffer.backing_store),
+    register_address_range(memory_address_range{"CMIO tx buffer memory range"s, AR_CMIO_TX_BUFFER_START,
+                               AR_CMIO_TX_BUFFER_LENGTH, tx_flags, c.tx_buffer.backing_store},
         register_where{.merkle = true, .interpret = true});
-    register_address_range(make_memory_address_range("CMIO rx buffer memory range"s, AR_CMIO_RX_BUFFER_START,
-                               AR_CMIO_RX_BUFFER_LENGTH, rx_flags, c.rx_buffer.backing_store),
+    register_address_range(memory_address_range{"CMIO rx buffer memory range"s, AR_CMIO_RX_BUFFER_START,
+                               AR_CMIO_RX_BUFFER_LENGTH, rx_flags, c.rx_buffer.backing_store},
         register_where{.merkle = true, .interpret = true});
 }
 
@@ -503,7 +480,7 @@ void machine::init_plic_ar(const plic_config &p) {
 void machine::init_pmas_contents(const pmas_config &config, memory_address_range &pmas) const {
     static_assert(sizeof(pmas_state) == PMA_MAX * 2 * sizeof(uint64_t), "inconsistent PMAs state length");
     static_assert(AR_PMAS_LENGTH >= sizeof(pmas_state), "PMAs address range too short");
-    if (config.backing_store.data_filename.empty()) {
+    if (config.backing_store.data_filename.empty() || config.backing_store.create) {
         if (m_s.pmas.size() >= PMA_MAX - 1) { // Leave room for a sentinel empty address range after all others
             throw std::runtime_error{"too many address ranges"};
         }
@@ -516,8 +493,9 @@ void machine::init_pmas_contents(const pmas_config &config, memory_address_range
 }
 
 void machine::init_tlb_contents(const tlb_config &config) {
-    if (const auto &image_filename = config.backing_store.data_filename; !image_filename.empty()) {
-        auto shadow_tlb_ptr = make_unique_mmap<shadow_tlb_state>(image_filename.c_str(), 1, false /* not shared */);
+    if (!config.backing_store.data_filename.empty() && !config.backing_store.create) {
+        auto shadow_tlb_ptr =
+            make_unique_mmap<shadow_tlb_state>(1, os_mmap_flags{}, config.backing_store.data_filename);
         auto &shadow_tlb = *shadow_tlb_ptr;
         for (auto set_index : {TLB_CODE, TLB_READ, TLB_WRITE}) {
             for (uint64_t slot_index = 0; slot_index < TLB_SET_SIZE; ++slot_index) {
@@ -550,11 +528,11 @@ static inline auto make_dtb_address_range(const dtb_config &config) {
         .IW = true,
         .DID = PMA_ISTART_DID::memory,
     };
-    return make_memory_address_range("DTB"s, AR_DTB_START, AR_DTB_LENGTH, dtb_flags, config.backing_store);
+    return memory_address_range{"DTB"s, AR_DTB_START, AR_DTB_LENGTH, dtb_flags, config.backing_store};
 }
 
 void machine::init_dtb_contents(const machine_config &config, memory_address_range &dtb) {
-    if (config.dtb.backing_store.data_filename.empty()) {
+    if (config.dtb.backing_store.data_filename.empty() || config.dtb.backing_store.create) {
         dtb_init(config, dtb.get_host_memory(), dtb.get_length());
     }
 }
@@ -570,7 +548,7 @@ static inline auto make_pmas_address_range(const pmas_config &config) {
         .IW = false,
         .DID = PMA_ISTART_DID::memory,
     };
-    return make_memory_address_range("PMAs", AR_PMAS_START, AR_PMAS_LENGTH, m_pmas_flags, config.backing_store);
+    return memory_address_range{"PMAs", AR_PMAS_START, AR_PMAS_LENGTH, m_pmas_flags, config.backing_store};
 }
 
 // ??D It is best to leave the std::move() on r because it may one day be necessary!
@@ -2190,6 +2168,9 @@ void machine::write_memory(uint64_t paddr, const unsigned char *data, uint64_t l
     if (!ar.is_memory()) {
         throw std::invalid_argument{"address range to write is not entirely in single memory range"};
     }
+    if (ar.is_host_read_only()) {
+        throw std::invalid_argument{"address range is read-only in the host"};
+    }
     if (is_protected(ar.get_driver_id())) {
         throw std::invalid_argument{"attempt to write to protected memory range"};
     }
@@ -2215,6 +2196,9 @@ void machine::fill_memory(uint64_t paddr, uint8_t val, uint64_t length) {
     }
     if (!ar.is_memory()) {
         throw std::invalid_argument{"address range to fill is not entirely in memory PMA"};
+    }
+    if (ar.is_host_read_only()) {
+        throw std::invalid_argument{"address range is read-only in the host"};
     }
     if (is_protected(ar.get_driver_id())) {
         throw std::invalid_argument{"attempt fill to protected memory range"};
@@ -2346,7 +2330,7 @@ void machine::write_word(uint64_t paddr, uint64_t val) {
             << std::dec << paddr << ")";
         throw std::runtime_error{err.str()};
     }
-    if (!ar.is_writeable()) {
+    if (!ar.is_writeable() || ar.is_host_read_only()) {
         std::ostringstream err;
         err << "attempted memory write to read-only " << ar.get_description() << " at address 0x" << std::hex << paddr
             << "(" << std::dec << paddr << ")";
@@ -2531,7 +2515,7 @@ interpreter_break_reason machine::log_step(uint64_t mcycle_count, const std::str
 interpreter_break_reason machine::verify_step(const hash_type &root_hash_before, const std::string &filename,
     uint64_t mcycle_count, const hash_type &root_hash_after) {
     auto data_length = os_get_file_length(filename.c_str(), "step log file");
-    auto data = make_unique_mmap<unsigned char>(filename.c_str(), data_length, false /* not shared */);
+    auto data = make_unique_mmap<unsigned char>(data_length, os_mmap_flags{}, filename);
     replay_step_state_access::context context;
     replay_step_state_access a(context, data.get(), data_length, root_hash_before);
     uint64_t mcycle_end{};

@@ -163,7 +163,9 @@ class machine_flash_simple_fixture : public incomplete_machine_fixture {
 public:
     machine_flash_simple_fixture() {
         _machine_config["flash_drive"] = {{{"start", 0x80000000000000}, {"length", 0x3c00000}, {"read_only", false},
-            {"backing_store", {{"shared", false}, {"truncate", false}, {"data_filename", ""}, {"dht_filename", ""}}}}};
+            {"backing_store",
+                {{"shared", false}, {"create", false}, {"truncate", false}, {"data_filename", ""},
+                    {"dht_filename", ""}}}}};
     }
 
     machine_flash_simple_fixture(const machine_flash_simple_fixture &other) = delete;

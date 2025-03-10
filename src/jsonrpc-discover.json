@@ -1341,6 +1341,9 @@
           "length": {
             "$ref": "#/components/schemas/UnsignedInteger"
           },
+          "read_only": {
+            "type": "boolean"
+          },
           "backing_store": {
             "$ref": "#/components/schemas/BackingStoreConfig"
           }
@@ -1357,6 +1360,9 @@
             "type": "string"
           },
           "shared": {
+            "type": "boolean"
+          },
+          "create": {
             "type": "boolean"
           },
           "truncate": {
@@ -1645,6 +1651,12 @@
             "type": "string"
           },
           "shared": {
+            "type": "boolean"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "truncate": {
             "type": "boolean"
           },
           "sht_filename": {

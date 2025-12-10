@@ -693,6 +693,40 @@ struct i_sfloat {
         return ((a < b) ^ a_sign) ? b : a;
     }
 
+    /// \brief IEEE 754-2019 minimum operation (Zfa extension).
+    /// \details If either input is NaN, the result is canonical NaN.
+    static NO_INLINE F_UINT minm(F_UINT a, F_UINT b, uint32_t *pfflags) {
+        if (isnan(a) || isnan(b)) {
+            if (issignan(a) || issignan(b)) {
+                *pfflags |= FFLAGS_NV_MASK;
+            }
+            return F_QNAN;
+        }
+        const uint32_t a_sign = a >> (F_SIZE - 1);
+        const uint32_t b_sign = b >> (F_SIZE - 1);
+        if (a_sign != b_sign) {
+            return (a_sign != 0) ? a : b;
+        }
+        return ((a < b) ^ a_sign) ? a : b;
+    }
+
+    /// \brief IEEE 754-2019 maximum operation (Zfa extension).
+    /// \details If either input is NaN, the result is canonical NaN.
+    static NO_INLINE F_UINT maxm(F_UINT a, F_UINT b, uint32_t *pfflags) {
+        if (isnan(a) || isnan(b)) {
+            if (issignan(a) || issignan(b)) {
+                *pfflags |= FFLAGS_NV_MASK;
+            }
+            return F_QNAN;
+        }
+        const uint32_t a_sign = a >> (F_SIZE - 1);
+        const uint32_t b_sign = b >> (F_SIZE - 1);
+        if (a_sign != b_sign) {
+            return (a_sign != 0) ? b : a;
+        }
+        return ((a < b) ^ a_sign) ? b : a;
+    }
+
     /// \brief Equal operation.
     static NO_INLINE bool eq(F_UINT a, F_UINT b, uint32_t *pfflags) {
         if (unlikely(isnan(a) || isnan(b))) {
@@ -733,6 +767,211 @@ struct i_sfloat {
             return a_sign && (((a | b) << 1) != 0);
         }
         return (a_sign != 0) ? (a > b) : (a < b);
+    }
+
+    /// \brief Quiet less or equal than operation (Zfa extension).
+    /// \details Like le() but only signals invalid for signaling NaN, not quiet NaN.
+    static NO_INLINE bool leq(F_UINT a, F_UINT b, uint32_t *pfflags) {
+        if (unlikely(isnan(a) || isnan(b))) {
+            if (issignan(a) || issignan(b)) {
+                *pfflags |= FFLAGS_NV_MASK;
+            }
+            return false;
+        }
+        const uint32_t a_sign = a >> (F_SIZE - 1);
+        const uint32_t b_sign = b >> (F_SIZE - 1);
+        if (a_sign != b_sign) {
+            return a_sign || (((a | b) << 1) == 0);
+        }
+        return (a_sign != 0) ? (a >= b) : (a <= b);
+    }
+
+    /// \brief Quiet less than operation (Zfa extension).
+    /// \details Like lt() but only signals invalid for signaling NaN, not quiet NaN.
+    static NO_INLINE bool ltq(F_UINT a, F_UINT b, uint32_t *pfflags) {
+        if (unlikely(isnan(a) || isnan(b))) {
+            if (issignan(a) || issignan(b)) {
+                *pfflags |= FFLAGS_NV_MASK;
+            }
+            return false;
+        }
+        const uint32_t a_sign = a >> (F_SIZE - 1);
+        const uint32_t b_sign = b >> (F_SIZE - 1);
+        if (a_sign != b_sign) {
+            return a_sign && (((a | b) << 1) != 0);
+        }
+        return (a_sign != 0) ? (a > b) : (a < b);
+    }
+
+    /// \brief Round to integer operation (Zfa extension).
+    /// \details Rounds the floating-point number to an integer according to the rounding mode.
+    /// Zero and infinite inputs are copied unmodified.
+    /// \param set_inexact If true, sets inexact flag when result differs from input.
+    static NO_INLINE F_UINT fround(F_UINT a, FRM_modes rm, bool set_inexact, uint32_t *pfflags) {
+        const uint32_t a_sign = a >> (F_SIZE - 1);
+        int32_t a_exp = (a >> MANT_SIZE) & EXP_MASK;
+        F_UINT a_mant = a & MANT_MASK;
+
+        // Handle special cases: NaN
+        if (unlikely(a_exp == EXP_MASK)) {
+            if (a_mant != 0) {
+                // NaN: signal invalid for signaling NaN, return canonical NaN
+                if (issignan(a)) {
+                    *pfflags |= FFLAGS_NV_MASK;
+                }
+                return F_QNAN;
+            }
+            // Infinity: return unchanged
+            return a;
+        }
+
+        // Handle zero
+        if (a_exp == 0 && a_mant == 0) {
+            return a;
+        }
+
+        // Compute the effective exponent (unbiased)
+        // For normalized: exp_unbiased = a_exp - bias
+        // For denormalized: need to account for leading zeros
+        constexpr int32_t BIAS = EXP_MASK / 2;
+
+        if (a_exp == 0) {
+            // Denormalized number - normalize it first
+            a_mant = mant_normalize_subnormal(&a_exp, a_mant);
+        } else {
+            // Add implicit leading 1
+            a_mant |= static_cast<F_UINT>(1) << MANT_SIZE;
+        }
+
+        const int32_t exp_unbiased = a_exp - BIAS;
+
+        // If exponent >= MANT_SIZE, the number is already an integer
+        if (exp_unbiased >= MANT_SIZE) {
+            return a;
+        }
+
+        // If exponent < 0, the magnitude is less than 1
+        // Result will be 0 or ±1 depending on rounding
+        if (exp_unbiased < 0) {
+            // Check if any bits would be rounded away (for inexact flag)
+            const bool has_fraction = true; // magnitude < 1 always has fraction
+
+            // Determine if we round up to 1 or down to 0
+            bool round_up = false;
+            switch (rm) {
+                case FRM_RNE:
+                    // Round to nearest, ties to even
+                    // If exp_unbiased == -1 and mantissa > 0.5, round up
+                    // If exp_unbiased == -1 and mantissa == 0.5, round to even (0)
+                    // If exp_unbiased < -1, always round down
+                    if (exp_unbiased == -1) {
+                        // The value is between 0.5 and 1.0
+                        // mantissa bits determine if > 0.5
+                        round_up = (a_mant > (static_cast<F_UINT>(1) << MANT_SIZE));
+                    }
+                    break;
+                case FRM_RTZ:
+                    // Round towards zero - always round down for positive, up for negative magnitude
+                    round_up = false;
+                    break;
+                case FRM_RDN:
+                    // Round down (towards -inf)
+                    round_up = (a_sign != 0);
+                    break;
+                case FRM_RUP:
+                    // Round up (towards +inf)
+                    round_up = (a_sign == 0);
+                    break;
+                case FRM_RMM:
+                    // Round to nearest, ties to max magnitude
+                    round_up = (exp_unbiased >= -1);
+                    break;
+                default:
+                    break;
+            }
+
+            if (set_inexact && has_fraction) {
+                *pfflags |= FFLAGS_NX_MASK;
+            }
+
+            if (round_up) {
+                // Return ±1.0
+                return pack(a_sign, BIAS, 0);
+            }
+            // Return ±0.0
+            return pack(a_sign, 0, 0);
+        }
+
+        // exp_unbiased is in [0, MANT_SIZE - 1]
+        // The number has both integer and fractional parts
+        const int frac_bits = MANT_SIZE - exp_unbiased;
+        const F_UINT frac_mask = (static_cast<F_UINT>(1) << frac_bits) - 1;
+        const F_UINT frac_part = a_mant & frac_mask;
+        const F_UINT int_part = a_mant & ~frac_mask;
+
+        if (frac_part == 0) {
+            // Already an integer
+            return a;
+        }
+
+        if (set_inexact) {
+            *pfflags |= FFLAGS_NX_MASK;
+        }
+
+        // Determine rounding direction
+        bool round_up = false;
+        const F_UINT half = static_cast<F_UINT>(1) << (frac_bits - 1);
+
+        switch (rm) {
+            case FRM_RNE:
+                // Round to nearest, ties to even
+                if (frac_part > half) {
+                    round_up = true;
+                } else if (frac_part == half) {
+                    // Tie: round to even (round up if LSB of integer part is 1)
+                    round_up = ((int_part >> frac_bits) & 1) != 0;
+                }
+                break;
+            case FRM_RTZ:
+                // Round towards zero
+                round_up = false;
+                break;
+            case FRM_RDN:
+                // Round down (towards -inf)
+                round_up = (a_sign != 0);
+                break;
+            case FRM_RUP:
+                // Round up (towards +inf)
+                round_up = (a_sign == 0);
+                break;
+            case FRM_RMM:
+                // Round to nearest, ties to max magnitude
+                round_up = (frac_part >= half);
+                break;
+            default:
+                break;
+        }
+
+        F_UINT result_mant = int_part;
+        int32_t result_exp = a_exp;
+
+        if (round_up) {
+            result_mant += static_cast<F_UINT>(1) << frac_bits;
+            // Check for mantissa overflow
+            if (result_mant >= (static_cast<F_UINT>(1) << (MANT_SIZE + 1))) {
+                result_mant >>= 1;
+                result_exp++;
+                // Check for exponent overflow (infinity)
+                if (result_exp >= static_cast<int32_t>(EXP_MASK)) {
+                    return pack(a_sign, EXP_MASK, 0);
+                }
+            }
+        }
+
+        // Remove the implicit leading 1
+        result_mant &= MANT_MASK;
+
+        return pack(a_sign, result_exp, result_mant);
     }
 
     /// \brief Retrieves float class.

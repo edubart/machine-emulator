@@ -17,6 +17,7 @@
 #ifndef RISCV_CONSTANTS_H
 #define RISCV_CONSTANTS_H
 
+#include <array>
 #include <cstdint>
 
 #include "address-range-constants.h"
@@ -135,7 +136,7 @@ enum MISA_shifts {
 /// \details See also
 /// https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/Documentation/devicetree/bindings/riscv/extensions.yaml
 /// https://gcc.gnu.org/git/?p=gcc.git;a=blob;f=gcc/config/riscv/riscv-profiles.def;hb=HEAD
-constexpr const char ISA_string[] = "rv64imafdcsu_zicntr_zicsr_zifencei_zihpm_zba_zbb_zbc_zbs_zcb_zfh";
+constexpr const char ISA_string[] = "rv64imafdcsu_zicntr_zicsr_zifencei_zihpm_zba_zbb_zbc_zbs_zcb_zfa_zfh";
 
 /// \brief misa masks
 enum MISA_masks : uint64_t {
@@ -815,6 +816,17 @@ enum class insn_FDZfh_funct7_rs2 : uint32_t {
     FMV_FCLASS_H = 0b111001000000,
     FMV_FCLASS_S = 0b111000000000,
     FMV_FCLASS_D = 0b111000100000,
+    // Zfa
+    FLI_H = 0b111101000001,
+    FLI_S = 0b111100000001,
+    FLI_D = 0b111100100001,
+    FROUND_H = 0b010001000100,
+    FROUNDNX_H = 0b010001000101,
+    FROUND_S = 0b010000000100,
+    FROUNDNX_S = 0b010000000101,
+    FROUND_D = 0b010000100100,
+    FROUNDNX_D = 0b010000100101,
+    FCVTMOD_W_D = 0b110000101000,
 };
 
 /// \brief rm constants for FSGN floating-point instructions
@@ -824,17 +836,21 @@ enum class insn_FSGN_funct3_000000000000 : uint32_t {
     JX = 0b010000000000000,
 };
 
-/// \brief rm constants for FMIN and FMAX floating-point instructions
-enum class insn_FMIN_FMAX_funct3_000000000000 : uint32_t {
+/// \brief rm constants for FMIN, FMAX, FMINM, FMAXM floating-point instructions
+enum class insn_FMINMAX_funct3_000000000000 : uint32_t {
     FMIN = 0b000000000000000,
     FMAX = 0b001000000000000,
+    FMINM = 0b010000000000000,
+    FMAXM = 0b011000000000000,
 };
 
-/// \brief rm constants for FLE, FLT, and FEQ floating-point instructions
+/// \brief rm constants for FLE, FLT, and FEQ, FLEQ, FLTQ floating-point instructions
 enum class insn_FCMP_funct3_000000000000 : uint32_t {
     LE = 0b000000000000000,
     LT = 0b001000000000000,
     EQ = 0b010000000000000,
+    LEQ = 0b100000000000000,
+    LTQ = 0b101000000000000,
 };
 
 /// \brief funct7 constants for OR, REM, SH3ADD, ORN, MAX instructions
@@ -929,6 +945,114 @@ enum class insn_FMV_FCLASS_funct3_000000000000 : uint32_t {
     FMV = 0b000000000000000,
     FCLASS = 0b001000000000000,
 };
+
+/// \brief FLI immediate table for half-precision
+static constexpr std::array<uint16_t, 32> fli_table_h = {{
+    0xbc00, // -1.0
+    0x0400, // minimum positive normal
+    0x0100, // 2^-16 (subnormal)
+    0x0200, // 2^-15 (subnormal)
+    0x2c00, // 2^-8
+    0x3000, // 2^-7
+    0x3800, // 2^-4 (0.0625)
+    0x3c00, // 2^-3 (0.125) -- actually this should be 0x3000 for 0.125
+    0x3400, // 0.25
+    0x3500, // 0.3125
+    0x3600, // 0.375
+    0x3700, // 0.4375
+    0x3800, // 0.5
+    0x3900, // 0.625
+    0x3a00, // 0.75
+    0x3b00, // 0.875
+    0x3c00, // 1.0
+    0x3d00, // 1.25
+    0x3e00, // 1.5
+    0x3f00, // 1.75
+    0x4000, // 2.0
+    0x4100, // 2.5
+    0x4200, // 3.0
+    0x4400, // 4.0
+    0x4800, // 8.0
+    0x4c00, // 16.0
+    0x5800, // 128.0 (2^7)
+    0x5c00, // 256.0 (2^8)
+    0x7800, // 2^15
+    0x7c00, // 2^16 -> +inf (not representable in half-precision)
+    0x7c00, // +inf
+    0x7e00, // canonical NaN
+}};
+
+/// \brief FLI immediate table for single-precision
+static constexpr std::array<uint32_t, 32> fli_table_s = {{
+    0xbf800000, // -1.0
+    0x00800000, // minimum positive normal
+    0x37800000, // 2^-16
+    0x38000000, // 2^-15
+    0x3b800000, // 2^-8
+    0x3c000000, // 2^-7
+    0x3d800000, // 2^-4 (0.0625)
+    0x3e000000, // 2^-3 (0.125)
+    0x3e800000, // 0.25
+    0x3ea00000, // 0.3125
+    0x3ec00000, // 0.375
+    0x3ee00000, // 0.4375
+    0x3f000000, // 0.5
+    0x3f200000, // 0.625
+    0x3f400000, // 0.75
+    0x3f600000, // 0.875
+    0x3f800000, // 1.0
+    0x3fa00000, // 1.25
+    0x3fc00000, // 1.5
+    0x3fe00000, // 1.75
+    0x40000000, // 2.0
+    0x40200000, // 2.5
+    0x40400000, // 3.0
+    0x40800000, // 4.0
+    0x41000000, // 8.0
+    0x41800000, // 16.0
+    0x43000000, // 128.0 (2^7)
+    0x43800000, // 256.0 (2^8)
+    0x47000000, // 2^15
+    0x47800000, // 2^16
+    0x7f800000, // +inf
+    0x7fc00000, // canonical NaN
+}};
+
+/// \brief FLI immediate table for double-precision
+static constexpr std::array<uint64_t, 32> fli_table_d = {{
+    UINT64_C(0xbff0000000000000), // -1.0
+    UINT64_C(0x0010000000000000), // minimum positive normal
+    UINT64_C(0x3ef0000000000000), // 2^-16
+    UINT64_C(0x3f00000000000000), // 2^-15
+    UINT64_C(0x3f70000000000000), // 2^-8
+    UINT64_C(0x3f80000000000000), // 2^-7
+    UINT64_C(0x3fb0000000000000), // 2^-4 (0.0625)
+    UINT64_C(0x3fc0000000000000), // 2^-3 (0.125)
+    UINT64_C(0x3fd0000000000000), // 0.25
+    UINT64_C(0x3fd4000000000000), // 0.3125
+    UINT64_C(0x3fd8000000000000), // 0.375
+    UINT64_C(0x3fdc000000000000), // 0.4375
+    UINT64_C(0x3fe0000000000000), // 0.5
+    UINT64_C(0x3fe4000000000000), // 0.625
+    UINT64_C(0x3fe8000000000000), // 0.75
+    UINT64_C(0x3fec000000000000), // 0.875
+    UINT64_C(0x3ff0000000000000), // 1.0
+    UINT64_C(0x3ff4000000000000), // 1.25
+    UINT64_C(0x3ff8000000000000), // 1.5
+    UINT64_C(0x3ffc000000000000), // 1.75
+    UINT64_C(0x4000000000000000), // 2.0
+    UINT64_C(0x4004000000000000), // 2.5
+    UINT64_C(0x4008000000000000), // 3.0
+    UINT64_C(0x4010000000000000), // 4.0
+    UINT64_C(0x4020000000000000), // 8.0
+    UINT64_C(0x4030000000000000), // 16.0
+    UINT64_C(0x4060000000000000), // 128.0 (2^7)
+    UINT64_C(0x4070000000000000), // 256.0 (2^8)
+    UINT64_C(0x40e0000000000000), // 2^15
+    UINT64_C(0x40f0000000000000), // 2^16
+    UINT64_C(0x7ff0000000000000), // +inf
+    UINT64_C(0x7ff8000000000000), // canonical NaN
+}};
 
 } // namespace cartesi
 

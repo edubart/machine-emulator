@@ -1159,6 +1159,17 @@ template void ju_get_opt_field<std::string>(const nlohmann::json &j, const std::
     const std::string &path);
 
 template <typename K>
+void ju_get_opt_field(const nlohmann::json &j, const K &key, machine_hashes &value, const std::string &path) {
+    ju_get_opt_vector_like_field(j, key, value, path);
+}
+
+template void ju_get_opt_field<uint64_t>(const nlohmann::json &j, const uint64_t &key, machine_hashes &value,
+    const std::string &path);
+
+template void ju_get_opt_field<std::string>(const nlohmann::json &j, const std::string &key, machine_hashes &value,
+    const std::string &path);
+
+template <typename K>
 void ju_get_opt_field(const nlohmann::json &j, const K &key, not_default_constructible<hash_tree_proof> &value,
     const std::string &path) {
     value = {};

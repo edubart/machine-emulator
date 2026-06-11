@@ -1884,8 +1884,30 @@ void machine::write_word(uint64_t paddr, uint64_t val) {
     ar.get_dirty_page_tree().mark_dirty_page_and_up(offset);
 }
 
+void machine::check_pending_cmio_request(const_machine_hash_view revert_root_hash, uint16_t reason) const {
+    // Only advance-state responses are checked. They are the input boundary of the rollups
+    // flow, whose revert-on-reject scheme depends on the preconditions below. Inspect-state
+    // queries and GIO responses are not checked at all.
+    if (reason != HTIF_YIELD_REASON_ADVANCE_STATE) {
+        return;
+    }
+    // These checks run before any state changes, so a failed call leaves the machine unchanged.
+    // The machine must be waiting for an input on an rx-accepted manual yield.
+    if (read_reg(reg::iflags_Y) == 0 || read_reg(reg::htif_tohost_dev) != HTIF_DEV_YIELD ||
+        read_reg(reg::htif_tohost_cmd) != HTIF_YIELD_CMD_MANUAL ||
+        read_reg(reg::htif_tohost_reason) != HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED) {
+        throw std::invalid_argument{"machine is not waiting on an rx-accepted manual yield"};
+    }
+    // The recorded revert root hash must be the hash of the machine about to receive the
+    // input, the state a rejection later reverts to
+    if (!std::ranges::equal(revert_root_hash, get_root_hash())) {
+        throw std::invalid_argument{"revert root hash does not match the machine root hash"};
+    }
+}
+
 void machine::send_cmio_response(const_machine_hash_view revert_root_hash, uint16_t reason, const unsigned char *data,
     uint64_t length) {
+    check_pending_cmio_request(revert_root_hash, reason);
     const state_access a(*this);
     cartesi::send_cmio_response(a, revert_root_hash, reason, data, length);
 }
@@ -1896,6 +1918,7 @@ access_log machine::log_send_cmio_response(const_machine_hash_view revert_root_h
         throw std::runtime_error{
             "access logs can only be used with hash tree configured with Keccak-256 hash function"};
     }
+    check_pending_cmio_request(revert_root_hash, reason);
     auto root_hash_before = get_root_hash();
     access_log log(log_type);
     // Call send_cmio_response  with the recording state accessor
@@ -2260,6 +2283,7 @@ mcycle_root_hashes machine::collect_mcycle_root_hashes(uint64_t mcycle_end, uint
     uint64_t mcycle_target = saturating_add(mcycle_start, mcycle_period - mcycle_phase, mcycle_end);
     uint64_t mcycle_reached = read_reg(reg::mcycle);
     bool at_fixed_point = false;
+    machine_hash root_hash{};
 
     // Run until reaching next mcycle target
     while (mcycle_reached < mcycle_target) {
@@ -2307,8 +2331,13 @@ mcycle_root_hashes machine::collect_mcycle_root_hashes(uint64_t mcycle_end, uint
         // Add the current root hash to the back tree whenever we reach a period boundary or a fixed point
         // This ensures we only append at the correct intervals, even when mcycle_end does not align with the period
         if (result.mcycle_phase == 0 || at_fixed_point) {
+            // When the machine has rejected an input, the canonical root hash from the yield onward
+            // is the recorded revert root hash
+            const state_access sa(*this);
+            root_hash = is_rejected_manual_yield(sa) ? read_revert_root_hash() : m_ht.get_root_hash();
+
             // Append root hash relative to this period to the result
-            back_tree.push_back(m_ht.get_root_hash());
+            back_tree.push_back(root_hash);
 
             // When back tree is full, we can append the bundled root hash and reset it
             if (back_tree.full()) {
@@ -2329,9 +2358,9 @@ mcycle_root_hashes machine::collect_mcycle_root_hashes(uint64_t mcycle_end, uint
 
     // If the machine yielded manually or halted, then append bundled root hashes with padding
     if (at_fixed_point && log2_bundle_mcycle_count > 0) {
-        // Construct pad tree containing repetitions of the current root hash
-        const auto pad_hashes = back_merkle_tree::make_pad_hashes(m_ht.get_root_hash(), log2_bundle_mcycle_count,
-            m_c.hash_tree.hash_function);
+        // Construct pad tree containing repetitions of the last collected root hash
+        const auto pad_hashes =
+            back_merkle_tree::make_pad_hashes(root_hash, log2_bundle_mcycle_count, m_c.hash_tree.hash_function);
 
         // Pad back tree when partially filled and append its bundled root hash
         if (!back_tree.empty()) {
@@ -2353,8 +2382,78 @@ mcycle_root_hashes machine::collect_mcycle_root_hashes(uint64_t mcycle_end, uint
     return result;
 }
 
+/// \brief Appends the root hash after one uarch cycle to the collection result.
+/// \param result Collection result receiving hashes and bundled root hashes.
+/// \param back_tree Back tree bundling the root hashes.
+/// \param cycle_root_hash Root hash after the uarch cycle.
+static void append_uarch_cycle_root_hash(uarch_cycle_root_hashes &result, back_merkle_tree &back_tree,
+    const machine_hash &cycle_root_hash) {
+    back_tree.push_back(cycle_root_hash);
+
+    // When back tree is full, we can append the bundled root hash and reset it
+    if (back_tree.full()) {
+        result.hashes.emplace_back(back_tree.get_root_hash());
+        back_tree.clear();
+    }
+}
+
+/// \brief Appends the root hash after the uarch reset that ends one mcycle to the collection result.
+/// \param result Collection result receiving hashes and bundled root hashes.
+/// \param back_tree Back tree bundling the root hashes.
+/// \param log2_bundle_uarch_cycle_count Log base 2 of the amount of uarch cycle root hashes to bundle.
+/// \param halt_root_hash Root hash after the uarch halted, padding the bundles up to the reset entry.
+/// \param reset_root_hash Root hash after the uarch reset.
+static void append_uarch_reset_root_hash(uarch_cycle_root_hashes &result, back_merkle_tree &back_tree,
+    int32_t log2_bundle_uarch_cycle_count, const machine_hash &halt_root_hash, const machine_hash &reset_root_hash) {
+    if (log2_bundle_uarch_cycle_count > 0) {
+        const auto halt_pad_hashes = back_merkle_tree::make_pad_hashes(halt_root_hash, log2_bundle_uarch_cycle_count,
+            back_tree.get_hash_function());
+
+        // Pad back tree when partially filled and then append its bundled root hash
+        if (!back_tree.empty()) {
+            assert(!back_tree.full());
+            back_tree.pad_back(back_tree.get_remaining_leaf_count(), halt_pad_hashes);
+            result.hashes.emplace_back(back_tree.get_root_hash());
+            back_tree.clear();
+        }
+
+        // Append bundled root hash containing only repetitions of the halt root hash
+        result.hashes.emplace_back(halt_pad_hashes[log2_bundle_uarch_cycle_count]);
+
+        // Append bundled root hash containing repetitions of the halt root hash on the left
+        // and one reset root hash on the right
+        assert(back_tree.empty());
+        back_tree.pad_back((1 << log2_bundle_uarch_cycle_count) - 1, halt_pad_hashes);
+        back_tree.push_back(reset_root_hash);
+        assert(back_tree.full());
+        result.hashes.emplace_back(back_tree.get_root_hash());
+        back_tree.clear();
+    } else {
+        result.hashes.push_back(reset_root_hash);
+    }
+
+    // Add the index where reset happened
+    result.reset_indices.emplace_back(result.hashes.size() - 1);
+}
+
+/// \brief Appends the period of the reverted machine to the collection result.
+/// \param result Collection result receiving hashes and bundled root hashes.
+/// \param back_tree Back tree bundling the root hashes.
+/// \param log2_bundle_uarch_cycle_count Log base 2 of the amount of uarch cycle root hashes to bundle.
+/// \param revert_uarch_tail Root hashes after each uarch cycle of the reverted machine period,
+/// the last being the revert root hash itself, which is the reset entry of the period.
+static void append_revert_uarch_tail_period(uarch_cycle_root_hashes &result, back_merkle_tree &back_tree,
+    int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) {
+    assert(revert_uarch_tail.size() >= 2);
+    for (size_t i = 0; i + 1 < revert_uarch_tail.size(); ++i) {
+        append_uarch_cycle_root_hash(result, back_tree, revert_uarch_tail[i]);
+    }
+    append_uarch_reset_root_hash(result, back_tree, log2_bundle_uarch_cycle_count,
+        revert_uarch_tail[revert_uarch_tail.size() - 2], revert_uarch_tail.back());
+}
+
 uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle_end,
-    int32_t log2_bundle_uarch_cycle_count) {
+    int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) {
     const uint64_t mcycle_start = read_reg(reg::mcycle);
 
     // Check preconditions
@@ -2378,6 +2477,28 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
         throw std::runtime_error{"microarchitecture is not reset"};
     }
 
+    // A call that can execute instructions may end in a rejected manual yield, and a call on a
+    // machine already in that state must emit the period of the reverted machine. Both need the
+    // revert uarch tail, which is checked here, before anything executes, so a failed call
+    // leaves the machine unchanged and can be retried with the tail in hand. A call starting at
+    // any other fixed point can only perform a no-op mcycle that cannot reject, so it never
+    // consumes the tail.
+    const state_access sa(*this);
+    const bool start_rejected = is_rejected_manual_yield(sa);
+    const bool start_at_fixed_point =
+        read_reg(reg::iflags_H) != 0 || read_reg(reg::iflags_Y) != 0 || mcycle_start == UINT64_MAX;
+    if (start_rejected || !start_at_fixed_point) {
+        if (revert_uarch_tail.empty()) {
+            throw std::runtime_error{"revert uarch tail is required"};
+        }
+        if (revert_uarch_tail.size() < 2) {
+            throw std::runtime_error{"revert uarch tail is too short"};
+        }
+        if (revert_uarch_tail.back() != read_revert_root_hash()) {
+            throw std::runtime_error{"revert uarch tail does not end with the revert root hash"};
+        }
+    }
+
     // If the collection loop does not advance mcycle, set the break reason to indicate the target mcycle was reached
     uarch_cycle_root_hashes result;
     result.break_reason = interpreter_break_reason::reached_target_mcycle;
@@ -2385,15 +2506,26 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
     // Initialize back tree
     back_merkle_tree back_tree(log2_bundle_uarch_cycle_count, m_c.hash_tree.hash_function);
 
+    // When the machine has already rejected an input, the canonical timeline continues from the
+    // reverted machine, so the result is its period, taken from the revert uarch tail, and the
+    // machine is left untouched
+    if (start_rejected) {
+        append_revert_uarch_tail_period(result, back_tree, log2_bundle_uarch_cycle_count, revert_uarch_tail);
+        result.break_reason = interpreter_break_reason::yielded_manually;
+        assert(back_tree.empty());
+        return result;
+    }
+
     hash_tree::dirty_words_type reset_dirty_words;
     collect_uarch_cycle_hashes_state_access::context context{};
     const collect_uarch_cycle_hashes_state_access a(context, *this);
 
     // Reserve space before entering the loop to minimize dynamic memory allocations,
-    // the reserved sizes below are based on empirical benchmarks to balance performance and memory usage
+    // the reserved sizes below are based on empirical benchmarks to balance performance and memory usage,
+    // and are clamped to avoid over-allocation
     const uint64_t mcycle_count = mcycle_end - mcycle_start;
-    result.hashes.reserve(mcycle_count * 512);
-    result.reset_indices.reserve(mcycle_count);
+    result.hashes.reserve(std::clamp<uint64_t>(mcycle_count * 512, 1, 16384));
+    result.reset_indices.reserve(std::clamp<uint64_t>(mcycle_count, 1, 16384));
     context.dirty_words.reserve(8);
     reset_dirty_words.reserve(64);
 
@@ -2402,8 +2534,8 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
     uint64_t mcycle_target = saturating_add(mcycle_start, UINT64_C(1), mcycle_end);
     uint64_t mcycle_reached = read_reg(reg::mcycle);
 
-    // In case we start at fixed point, we will attempt to execute one extra mcycle which
-    bool at_fixed_point = read_reg(reg::iflags_H) != 0 || read_reg(reg::iflags_Y) != 0 || mcycle_start == UINT64_MAX;
+    // In case we start at fixed point, we will attempt to execute one extra mcycle
+    bool at_fixed_point = start_at_fixed_point;
     if (at_fixed_point) {
         mcycle_target = mcycle_reached;
     }
@@ -2450,13 +2582,7 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
             assert(uarch_break_reason == uarch_interpreter_break_reason::reached_target_cycle);
 
             // Append root hash to the result
-            back_tree.push_back(m_ht.get_root_hash());
-
-            // When back tree is full, we can append the bundled root hash and reset it
-            if (back_tree.full()) {
-                result.hashes.emplace_back(back_tree.get_root_hash());
-                back_tree.clear();
-            }
+            append_uarch_cycle_root_hash(result, back_tree, m_ht.get_root_hash());
         }
 
         // Sanity check to ensure the loop is working correctly, this should always be true
@@ -2492,41 +2618,14 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
             throw std::runtime_error{"update hash tree failed"};
         }
         reset_dirty_words.clear();
-        const auto reset_root_hash = m_ht.get_root_hash();
+
+        // When the machine has rejected an input, the reset folds in a revert, and the canonical
+        // root hash after it is the recorded revert root hash
+        const bool rejected = is_rejected_manual_yield(sa);
+        const auto reset_root_hash = rejected ? read_revert_root_hash() : m_ht.get_root_hash();
 
         // Add one hash after the uarch reset
-        if (log2_bundle_uarch_cycle_count > 0) {
-            const auto halt_pad_hashes = back_merkle_tree::make_pad_hashes(halt_root_hash,
-                log2_bundle_uarch_cycle_count, m_c.hash_tree.hash_function);
-
-            // Pad back tree when partially filled and then append its bundled root hash
-            if (!back_tree.empty()) {
-                assert(!back_tree.full());
-                back_tree.pad_back(back_tree.get_remaining_leaf_count(), halt_pad_hashes);
-                result.hashes.emplace_back(back_tree.get_root_hash());
-                back_tree.clear();
-            }
-
-            // Append bundled root hash containing only repetitions of the halt root hash
-            result.hashes.emplace_back(halt_pad_hashes[log2_bundle_uarch_cycle_count]);
-
-            // Append bundled root hash containing repetitions of the halt root hash on the left
-            // and one reset root hash on the right
-            assert(back_tree.empty());
-            back_tree.pad_back((1 << log2_bundle_uarch_cycle_count) - 1, halt_pad_hashes);
-            back_tree.push_back(reset_root_hash);
-            assert(back_tree.full());
-            result.hashes.emplace_back(back_tree.get_root_hash());
-            back_tree.clear();
-
-            // Add the index where reset happened
-            result.reset_indices.emplace_back(result.hashes.size() - 1);
-        } else {
-            result.hashes.push_back(reset_root_hash);
-
-            // Add the index where reset happened
-            result.reset_indices.emplace_back(result.hashes.size() - 1);
-        }
+        append_uarch_reset_root_hash(result, back_tree, log2_bundle_uarch_cycle_count, halt_root_hash, reset_root_hash);
 
         mcycle_reached = read_reg(reg::mcycle);
 
@@ -2540,6 +2639,14 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
             result.break_reason = interpreter_break_reason::yielded_manually;
         } else if (read_reg(reg::iflags_X) != 0) {
             result.break_reason = interpreter_break_reason::yielded_automatically;
+            break;
+        }
+
+        // When the machine has rejected an input, the canonical timeline continues from the
+        // reverted machine, so the period that follows comes from the revert uarch tail
+        // instead of the machine itself
+        if (rejected) {
+            append_revert_uarch_tail_period(result, back_tree, log2_bundle_uarch_cycle_count, revert_uarch_tail);
             break;
         }
 

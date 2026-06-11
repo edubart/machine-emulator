@@ -150,7 +150,7 @@ private:
     bool do_verify_hash_tree() const override;
     uarch_interpreter_break_reason do_run_uarch(uint64_t uarch_cycle_end) override;
     uarch_cycle_root_hashes do_collect_uarch_cycle_root_hashes(uint64_t mcycle_end,
-        int32_t log2_bundle_uarch_cycle_count) override;
+        int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) override;
     address_range_descriptions do_get_address_ranges() const override;
     void do_send_cmio_response(const_machine_hash_view revert_root_hash, uint16_t reason, const unsigned char *data,
         uint64_t length) override;

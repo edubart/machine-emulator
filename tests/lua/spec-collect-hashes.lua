@@ -19,6 +19,28 @@ local function expect_consistent_root_hash(machine)
     return root_hash
 end
 
+local function is_rejected_manual_yield(machine)
+    return machine:read_reg("iflags_Y") ~= 0
+        and machine:read_reg("htif_tohost_dev") == cartesi.HTIF_DEV_YIELD
+        and machine:read_reg("htif_tohost_cmd") == cartesi.HTIF_YIELD_CMD_MANUAL
+        and machine:read_reg("htif_tohost_reason") == cartesi.HTIF_YIELD_MANUAL_REASON_RX_REJECTED
+end
+
+-- Root hash that verifiers accept after a state transition ending in the machine state,
+-- which is the recorded revert root hash when the machine has rejected an input
+local function canonical_root_hash(machine)
+    if is_rejected_manual_yield(machine) then
+        return machine:read_revert_root_hash()
+    end
+    return machine:get_root_hash()
+end
+
+-- Tail accepted by machines whose revert leaf is pristine, required at entry but never consumed
+local pristine_revert_uarch_tail = {
+    string.rep("\x00", cartesi.HASH_SIZE),
+    string.rep("\x00", cartesi.HASH_SIZE),
+}
+
 local function expect_mcycle_root_hashes(machine, mcycle_end, mcycle_period, mcycle_phase, log2_bundle_mcycle_count)
     -- this reference implementation does not support the following conditions
     assert(mcycle_end >= 0 and mcycle_end <= math.maxinteger)
@@ -35,13 +57,13 @@ local function expect_mcycle_root_hashes(machine, mcycle_end, mcycle_period, mcy
         if machine:read_reg("mcycle") ~= mcycle_target then
             mcycle_phase = mcycle_period - (mcycle_target - machine:read_reg("mcycle"))
             if break_reason == cartesi.BREAK_REASON_HALTED or break_reason == cartesi.BREAK_REASON_YIELDED_MANUALLY then
-                table.insert(hashes, machine:get_root_hash())
+                table.insert(hashes, canonical_root_hash(machine))
                 at_fixed_point = true
             end
             break
         end
         mcycle_phase = 0
-        table.insert(hashes, machine:get_root_hash())
+        table.insert(hashes, canonical_root_hash(machine))
         if break_reason ~= cartesi.BREAK_REASON_REACHED_TARGET_MCYCLE then
             if break_reason == cartesi.BREAK_REASON_HALTED or break_reason == cartesi.BREAK_REASON_YIELDED_MANUALLY then
                 at_fixed_point = true
@@ -112,7 +134,8 @@ local function expect_next_mcycle_uarch_root_hashes(
     expect.equal(machine:read_reg("uarch_halt_flag"), 1)
     local halt_root_hash = expect_consistent_root_hash(machine)
     machine:reset_uarch()
-    local reset_root_hash = expect_consistent_root_hash(machine)
+    expect_consistent_root_hash(machine)
+    local reset_root_hash = canonical_root_hash(machine)
     expect.equal(machine:read_reg("uarch_cycle"), 0)
     expect.equal(machine:read_reg("mcycle"), mcycle)
     if log2_bundle_uarch_cycle_count and log2_bundle_uarch_cycle_count > 0 then
@@ -133,7 +156,32 @@ local function expect_next_mcycle_uarch_root_hashes(
     table.insert(reset_indices, #hashes)
 end
 
-local function expect_uarch_cycle_root_hashes(machine, mcycle_end, log2_bundle_uarch_cycle_count)
+-- Appends the period of the reverted machine, as given by the revert uarch tail
+local function expect_revert_uarch_tail_period(hashes, reset_indices, revert_uarch_tail, log2_bundle_uarch_cycle_count)
+    for i = 1, #revert_uarch_tail - 1 do
+        table.insert(hashes, revert_uarch_tail[i])
+    end
+    local halt_root_hash = revert_uarch_tail[#revert_uarch_tail - 1]
+    local reset_root_hash = revert_uarch_tail[#revert_uarch_tail]
+    if log2_bundle_uarch_cycle_count and log2_bundle_uarch_cycle_count > 0 then
+        local bundle_uarch_cycle_count = 1 << log2_bundle_uarch_cycle_count
+        -- add halt root hash padding until finishing a bundle
+        while #hashes % bundle_uarch_cycle_count ~= 0 do
+            table.insert(hashes, halt_root_hash)
+        end
+        -- add repetitions of the halt root hash
+        for _ = 1, 2 * bundle_uarch_cycle_count - 1 do
+            table.insert(hashes, halt_root_hash)
+        end
+        table.insert(hashes, reset_root_hash)
+        assert(#hashes % bundle_uarch_cycle_count == 0)
+    else
+        table.insert(hashes, reset_root_hash)
+    end
+    table.insert(reset_indices, #hashes)
+end
+
+local function expect_uarch_cycle_root_hashes(machine, mcycle_end, log2_bundle_uarch_cycle_count, revert_uarch_tail)
     -- this reference implementation does not support the following conditions
     assert(mcycle_end >= 0 and mcycle_end <= math.maxinteger, "unsupported call")
     assert(machine:read_reg("iflags_H") == 0, "unsupported call")
@@ -151,7 +199,19 @@ local function expect_uarch_cycle_root_hashes(machine, mcycle_end, log2_bundle_u
         end
         if machine:read_reg("iflags_Y") ~= 0 then
             break_reason = cartesi.BREAK_REASON_YIELDED_MANUALLY
-            expect_next_mcycle_uarch_root_hashes(machine, mcycle, hashes, reset_indices, log2_bundle_uarch_cycle_count)
+            if is_rejected_manual_yield(machine) then
+                -- the canonical timeline continues from the reverted machine,
+                -- whose period is given by the revert uarch tail
+                expect_revert_uarch_tail_period(hashes, reset_indices, revert_uarch_tail, log2_bundle_uarch_cycle_count)
+            else
+                expect_next_mcycle_uarch_root_hashes(
+                    machine,
+                    mcycle,
+                    hashes,
+                    reset_indices,
+                    log2_bundle_uarch_cycle_count
+                )
+            end
             break
         end
         if machine:read_reg("iflags_X") ~= 0 then
@@ -300,7 +360,7 @@ describe("collect hashes", function()
                         mcycle_phase = mcycle_phase,
                     }
                 )
-                expect.equal(machine:collect_uarch_cycle_root_hashes(mcycle_end), {
+                expect.equal(machine:collect_uarch_cycle_root_hashes(mcycle_end, 0, pristine_revert_uarch_tail), {
                     hashes = {},
                     reset_indices = {},
                     break_reason = cartesi.BREAK_REASON_REACHED_TARGET_MCYCLE,
@@ -324,7 +384,8 @@ describe("collect hashes", function()
 
                 local machine_uarch <close> = create_machine({ ram = { length = 4096 } })
                 machine_uarch:run(mcycle_start)
-                local collected_uarch = machine_uarch:collect_uarch_cycle_root_hashes(mcycle_end)
+                local collected_uarch =
+                    machine_uarch:collect_uarch_cycle_root_hashes(mcycle_end, 0, pristine_revert_uarch_tail)
                 expect.equal(machine_uarch:read_reg("mcycle"), mcycle_end)
                 expect.equal(machine_uarch:get_root_hash(), machine:get_root_hash())
                 expect.equal(#collected_uarch.reset_indices, mcycle_end - mcycle_start)
@@ -454,6 +515,64 @@ describe("collect hashes", function()
                 expect.equal(collected_uarch.hashes[collected_uarch.reset_indices[1]], expected_root_hash)
             end)
 
+            it("should require the revert uarch tail when collecting with a running machine", function()
+                local machine <close> = create_machine({ ram = { length = 4096 } })
+                local compare_machine <close> = cartesi.machine({ ram = { length = 4096 } })
+                expect.fail(function()
+                    machine:collect_uarch_cycle_root_hashes(2)
+                end, "revert uarch tail is required")
+                expect.fail(function()
+                    machine:collect_uarch_cycle_root_hashes(2, 0, { string.rep("\x11", cartesi.HASH_SIZE) })
+                end, "revert uarch tail is too short")
+                expect.fail(function()
+                    machine:collect_uarch_cycle_root_hashes(2, 0, {
+                        string.rep("\x11", cartesi.HASH_SIZE),
+                        string.rep("\x22", cartesi.HASH_SIZE),
+                    })
+                end, "revert uarch tail does not end with the revert root hash")
+                -- failing calls leave the machine unchanged, so retrying with the tail works
+                local collected = machine:collect_uarch_cycle_root_hashes(2, 0, pristine_revert_uarch_tail)
+                local expected_collected = expect_uarch_cycle_root_hashes(compare_machine, 2)
+                expect.equal(collected, expected_collected)
+            end)
+
+            it("should collect the revert uarch tail period when starting from a rejected machine", function()
+                local mcycle_end = 32
+                local revert_root_hash = string.rep("\x5a", cartesi.HASH_SIZE)
+                local revert_uarch_tail = {
+                    string.rep("\x01", cartesi.HASH_SIZE),
+                    string.rep("\x02", cartesi.HASH_SIZE),
+                    revert_root_hash,
+                }
+                local machine <close> = create_machine({ ram = { length = 4096 } })
+                machine:write_revert_root_hash(revert_root_hash)
+                machine:write_reg("iflags_Y", 1)
+                machine:write_reg("htif_tohost_dev", cartesi.HTIF_DEV_YIELD)
+                machine:write_reg("htif_tohost_cmd", cartesi.HTIF_YIELD_CMD_MANUAL)
+                machine:write_reg("htif_tohost_reason", cartesi.HTIF_YIELD_MANUAL_REASON_RX_REJECTED)
+                local expected_root_hash = machine:get_root_hash()
+
+                -- the tail is required even though the machine is at a fixed point
+                expect.fail(function()
+                    machine:collect_uarch_cycle_root_hashes(mcycle_end)
+                end, "revert uarch tail is required")
+
+                -- the machine is not touched, the period comes entirely from the tail
+                expect.equal(machine:collect_uarch_cycle_root_hashes(mcycle_end, 0, revert_uarch_tail), {
+                    hashes = revert_uarch_tail,
+                    reset_indices = { #revert_uarch_tail },
+                    break_reason = cartesi.BREAK_REASON_YIELDED_MANUALLY,
+                })
+                expect.equal(machine:get_root_hash(), expected_root_hash)
+
+                -- the mcycle collector collects no hashes when starting from a yielded machine
+                expect.equal(machine:collect_mcycle_root_hashes(mcycle_end, 32, 1), {
+                    hashes = {},
+                    break_reason = cartesi.BREAK_REASON_YIELDED_MANUALLY,
+                    mcycle_phase = 1,
+                })
+            end)
+
             it("should collect mcycles during mcycle overflow", function()
                 local mcycle_period = 32
                 local machine <close> = create_machine({ ram = { length = 4096 } })
@@ -488,7 +607,8 @@ describe("collect hashes", function()
             it("should collect uarch cycles during mcycle overflows", function()
                 local machine <close> = create_machine({ ram = { length = 4096 } })
                 machine:write_reg("mcycle", cartesi.MCYCLE_MAX - 1)
-                local collected_uarch = machine:collect_uarch_cycle_root_hashes(cartesi.MCYCLE_MAX)
+                local collected_uarch =
+                    machine:collect_uarch_cycle_root_hashes(cartesi.MCYCLE_MAX, 0, pristine_revert_uarch_tail)
                 expect.equal(collected_uarch.break_reason, cartesi.BREAK_REASON_REACHED_TARGET_MCYCLE)
                 local expected_root_hash = machine:get_root_hash()
                 expect.equal(collected_uarch.hashes[collected_uarch.reset_indices[1]], expected_root_hash)
@@ -783,12 +903,105 @@ describe("collect hashes", function()
                     local compare_machine <close> = cartesi.machine(add_machine_config)
                     machine:run(mcycle_start)
                     compare_machine:run(mcycle_start)
-                    local collected = machine:collect_uarch_cycle_root_hashes(mcycle_end, log2_uarch_cycle_mcycle_count)
+                    local collected = machine:collect_uarch_cycle_root_hashes(
+                        mcycle_end,
+                        log2_uarch_cycle_mcycle_count,
+                        pristine_revert_uarch_tail
+                    )
                     local expected_collected =
                         expect_uarch_cycle_root_hashes(compare_machine, mcycle_end, log2_uarch_cycle_mcycle_count)
                     expect.equal(collected, expected_collected)
                     expect.equal(machine:get_root_hash(), compare_machine:get_root_hash())
                 end
+            end)
+
+            it("should substitute the revert root hash when bundling across a rejected yield", function()
+                local log2_bundle_mcycle_count = 2
+                local mcycle_period = 4
+                local mcycle_end = 1024
+                local revert_root_hash = string.rep("\x5a", cartesi.HASH_SIZE)
+                local machine <close> = create_machine(yield_machine_config)
+                machine:write_revert_root_hash(revert_root_hash)
+                -- the bundles that follow a rejected yield contain only revert root hash repetitions
+                local revert_bundle_hash = revert_root_hash
+                for _ = 1, log2_bundle_mcycle_count do
+                    revert_bundle_hash = cartesi.keccak256(revert_bundle_hash, revert_bundle_hash)
+                end
+                local count_rejected_yields = 0
+                local last_collected = { mcycle_phase = 0 }
+                for _ = 1, 64 do
+                    local collected = machine:collect_mcycle_root_hashes(
+                        mcycle_end,
+                        mcycle_period,
+                        last_collected.mcycle_phase,
+                        log2_bundle_mcycle_count,
+                        last_collected.back_tree
+                    )
+                    if collected.break_reason == cartesi.BREAK_REASON_YIELDED_MANUALLY then
+                        if is_rejected_manual_yield(machine) then
+                            expect.equal(collected.hashes[#collected.hashes], revert_bundle_hash)
+                            count_rejected_yields = count_rejected_yields + 1
+                        end
+                        machine:write_reg("iflags_Y", 0)
+                    elseif collected.break_reason == cartesi.BREAK_REASON_HALTED then
+                        break
+                    end
+                    last_collected = collected
+                end
+                -- htif_yield.bin breaks twice on a rejected manual yield, once with the rx-rejected reason
+                -- and once with the tx-output automatic reason, which shares the same reason value
+                expect.equal(count_rejected_yields, 2)
+                expect.equal(machine:read_reg("iflags_H"), 1)
+            end)
+
+            it("should collect across a rejected yield using a tail collected in advance", function()
+                local machine <close> = create_machine(yield_machine_config)
+                local compare_machine <close> = cartesi.machine(yield_machine_config)
+                -- run both machines to the first manual yield, where the machine waits for a response
+                expect.equal(machine:run(1 << 62), cartesi.BREAK_REASON_YIELDED_MANUALLY)
+                compare_machine:run(1 << 62)
+                -- collecting on the waiting machine needs no tail and returns its period, which is
+                -- the tail for ranges that end rejected after the machine resumes
+                local revert_root_hash = machine:get_root_hash()
+                local bootstrap = machine:collect_uarch_cycle_root_hashes(machine:read_reg("mcycle"))
+                expect.equal(bootstrap.break_reason, cartesi.BREAK_REASON_YIELDED_MANUALLY)
+                expect.equal(#bootstrap.reset_indices, 1)
+                local revert_uarch_tail = bootstrap.hashes
+                expect.equal(revert_uarch_tail[#revert_uarch_tail], revert_root_hash)
+                expect.equal(machine:get_root_hash(), revert_root_hash)
+                -- record the revert root hash and resume the guest, standing in for
+                -- send_cmio_response, whose fromhost response fails this guest's ack checks
+                machine:write_revert_root_hash(revert_root_hash)
+                machine:write_reg("iflags_Y", 0)
+                compare_machine:write_revert_root_hash(revert_root_hash)
+                compare_machine:write_reg("iflags_Y", 0)
+                -- run until the guest rejects, collecting with the tail in hand
+                local count_rejected_yields = 0
+                for _ = 1, 32 do
+                    local collected = machine:collect_uarch_cycle_root_hashes(1 << 62, 0, revert_uarch_tail)
+                    local expected_collected =
+                        expect_uarch_cycle_root_hashes(compare_machine, 1 << 62, 0, revert_uarch_tail)
+                    expect.equal(collected, expected_collected)
+                    expect.equal(machine:get_root_hash(), compare_machine:get_root_hash())
+                    if collected.break_reason == cartesi.BREAK_REASON_YIELDED_MANUALLY then
+                        if is_rejected_manual_yield(machine) then
+                            -- the collected stream ends with the period collected before the response
+                            for i = 1, #revert_uarch_tail do
+                                expect.equal(
+                                    collected.hashes[#collected.hashes - #revert_uarch_tail + i],
+                                    revert_uarch_tail[i]
+                                )
+                            end
+                            count_rejected_yields = count_rejected_yields + 1
+                            break
+                        end
+                        machine:write_reg("iflags_Y", 0)
+                        compare_machine:write_reg("iflags_Y", 0)
+                    elseif collected.break_reason == cartesi.BREAK_REASON_HALTED then
+                        break
+                    end
+                end
+                expect.equal(count_rejected_yields, 1)
             end)
         end) -- describe remote/local
     end -- for remote/local create
@@ -836,6 +1049,17 @@ describe("collect hashes", function()
             local yield_last_mcycle = 500
             local yield_last_root_hash
             local yield_sparse_hashes = {}
+            -- htif_yield.bin breaks twice on a rejected manual yield, once with the rx-rejected reason
+            -- and once with the tx-output automatic reason, which shares the same reason value
+            local yield_rejected_count = 2
+            local yield_revert_root_hash = string.rep("\x5a", cartesi.HASH_SIZE)
+            -- a fabricated period for the reverted machine, collected as the tail after the rejected yield
+            local yield_revert_uarch_tail = {
+                string.rep("\x01", cartesi.HASH_SIZE),
+                string.rep("\x02", cartesi.HASH_SIZE),
+                string.rep("\x03", cartesi.HASH_SIZE),
+                yield_revert_root_hash,
+            }
 
             if hash_function == "keccak256" then
                 it("should fail when microarchitecture is not reset", function()
@@ -897,6 +1121,8 @@ describe("collect hashes", function()
                 local period_count = yield_last_mcycle // mcycle_period
                 local machine <close> = cartesi.machine(yield_machine_config)
                 local collect_machine <close> = cartesi.machine(yield_machine_config)
+                machine:write_revert_root_hash(yield_revert_root_hash)
+                collect_machine:write_revert_root_hash(yield_revert_root_hash)
                 expect.equal(machine:run(mcycle_start), cartesi.BREAK_REASON_REACHED_TARGET_MCYCLE)
                 expect.equal(machine:read_reg("mcycle"), mcycle_start)
                 collect_machine:run(mcycle_start)
@@ -904,6 +1130,7 @@ describe("collect hashes", function()
                 expect.equal(machine:get_root_hash(), collect_machine:get_root_hash())
                 local count_manual_yields = 0
                 local count_automatic_yields = 0
+                local count_rejected_yields = 0
                 local count_halts = 1
                 local halt_exit_code
                 for _ = 1, period_count * 2 do
@@ -920,6 +1147,11 @@ describe("collect hashes", function()
                         table.insert(yield_sparse_hashes, hash)
                     end
                     if collected.break_reason == cartesi.BREAK_REASON_YIELDED_MANUALLY then
+                        if is_rejected_manual_yield(machine) then
+                            -- the entry collected at the rejected yield is the substituted revert root hash
+                            expect.equal(collected.hashes[#collected.hashes], yield_revert_root_hash)
+                            count_rejected_yields = count_rejected_yields + 1
+                        end
                         collect_machine:write_reg("iflags_Y", 0)
                         machine:write_reg("iflags_Y", 0)
                         count_manual_yields = count_manual_yields + 1
@@ -936,6 +1168,7 @@ describe("collect hashes", function()
                 expect.equal(#yield_sparse_hashes, period_count + count_manual_yields + count_halts)
                 expect.equal(count_manual_yields, 8)
                 expect.equal(count_automatic_yields, 7)
+                expect.equal(count_rejected_yields, yield_rejected_count)
                 expect.equal(halt_exit_code, 42)
                 yield_last_root_hash = machine:get_root_hash()
             end)
@@ -959,7 +1192,8 @@ describe("collect hashes", function()
                     expect_consistent_root_hash(machine)
                     collect_machine:run(big_last_mcycle - mcycle_count)
                     expect.equal(machine:get_root_hash(), collect_machine:get_root_hash())
-                    local collected = collect_machine:collect_uarch_cycle_root_hashes(big_last_mcycle)
+                    local collected =
+                        collect_machine:collect_uarch_cycle_root_hashes(big_last_mcycle, 0, pristine_revert_uarch_tail)
                     local expected_collected = expect_uarch_cycle_root_hashes(machine, big_last_mcycle)
                     local halt_exit_code = machine:read_reg("htif_tohost_data") >> 1
                     expect.equal(collected, expected_collected)
@@ -981,6 +1215,8 @@ describe("collect hashes", function()
                     local period_count = yield_last_mcycle // mcycle_period
                     local machine <close> = cartesi.machine(yield_machine_config)
                     local collect_machine <close> = cartesi.machine(yield_machine_config)
+                    machine:write_revert_root_hash(yield_revert_root_hash)
+                    collect_machine:write_revert_root_hash(yield_revert_root_hash)
                     machine:run(mcycle_start)
                     expect.equal(machine:read_reg("mcycle"), mcycle_start)
                     collect_machine:run(mcycle_start)
@@ -990,23 +1226,34 @@ describe("collect hashes", function()
                     local sparse_hashes_count = 0
                     local count_manual_yields = 0
                     local count_automatic_yields = 0
+                    local count_rejected_yields = 0
                     local halt_exit_code
                     for _ = 1, period_count * 2 do
                         local mcycles_to_phase0 = mcycle_period
                             - ((machine:read_reg("mcycle") - mcycle_phase_offset) % mcycle_period)
                         local mcycle_target = machine:read_reg("mcycle") + mcycles_to_phase0
-                        local collected = collect_machine:collect_uarch_cycle_root_hashes(mcycle_target)
-                        local expected_collected = expect_uarch_cycle_root_hashes(machine, mcycle_target)
+                        local collected =
+                            collect_machine:collect_uarch_cycle_root_hashes(mcycle_target, 0, yield_revert_uarch_tail)
+                        local expected_collected =
+                            expect_uarch_cycle_root_hashes(machine, mcycle_target, 0, yield_revert_uarch_tail)
                         expect.equal(collect_machine:read_reg("mcycle"), machine:read_reg("mcycle"))
                         expect.equal(collected, expected_collected)
                         expect.equal(collect_machine:get_root_hash(), machine:get_root_hash())
                         mcycles_to_phase0 = (machine:read_reg("mcycle") - mcycle_phase_offset) % mcycle_period
                         local at_fixed_point = machine:read_reg("iflags_Y") ~= 0 or machine:read_reg("iflags_H") ~= 0
                         if mcycles_to_phase0 == 0 or at_fixed_point then
-                            expect.equal(yield_sparse_hashes[sparse_hashes_count + 1], machine:get_root_hash())
+                            expect.equal(yield_sparse_hashes[sparse_hashes_count + 1], canonical_root_hash(machine))
                             sparse_hashes_count = sparse_hashes_count + 1
                         end
                         if machine:read_reg("iflags_Y") == 1 then
+                            if is_rejected_manual_yield(machine) then
+                                -- the last period is the reverted machine period, ending on the revert root hash
+                                expect.equal(
+                                    collected.hashes[collected.reset_indices[#collected.reset_indices]],
+                                    yield_revert_root_hash
+                                )
+                                count_rejected_yields = count_rejected_yields + 1
+                            end
                             collect_machine:write_reg("iflags_Y", 0)
                             machine:write_reg("iflags_Y", 0)
                             count_manual_yields = count_manual_yields + 1
@@ -1021,6 +1268,7 @@ describe("collect hashes", function()
                     expect.equal(machine:get_root_hash(), yield_last_root_hash)
                     expect.equal(count_manual_yields, 8)
                     expect.equal(count_automatic_yields, 7)
+                    expect.equal(count_rejected_yields, yield_rejected_count)
                     expect.equal(halt_exit_code, 42)
                     expect.equal(sparse_hashes_count, #yield_sparse_hashes)
                 end)

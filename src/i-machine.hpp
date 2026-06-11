@@ -276,9 +276,12 @@ public:
 
     /// \brief Collects the root hashes after every \p uarch_cycle until \p mcycle_end machine cycle, implicitly
     /// resetting the uarch between mcycles.
-    uarch_cycle_root_hashes collect_uarch_cycle_root_hashes(uint64_t mcycle_end,
-        int32_t log2_bundle_uarch_cycle_count) {
-        return do_collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count);
+    /// \details The \p revert_uarch_tail holds the root hashes after each uarch cycle of the period of the
+    /// machine the recorded revert root hash reverts to, the last entry being the revert root hash itself.
+    /// It is required unless the machine starts at a fixed point other than a rejected manual yield.
+    uarch_cycle_root_hashes collect_uarch_cycle_root_hashes(uint64_t mcycle_end, int32_t log2_bundle_uarch_cycle_count,
+        const machine_hashes &revert_uarch_tail = {}) {
+        return do_collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count, revert_uarch_tail);
     }
 
     /// \brief Returns a list of descriptions for all PMA entries registered in the machine, sorted by start
@@ -384,7 +387,7 @@ private:
     virtual access_log do_log_reset_uarch(const access_log::type &log_type) = 0;
     virtual uarch_interpreter_break_reason do_run_uarch(uint64_t uarch_cycle_end) = 0;
     virtual uarch_cycle_root_hashes do_collect_uarch_cycle_root_hashes(uint64_t mcycle_end,
-        int32_t log2_bundle_uarch_cycle_count) = 0;
+        int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) = 0;
     virtual address_range_descriptions do_get_address_ranges() const = 0;
     virtual void do_send_cmio_response(const_machine_hash_view revert_root_hash, uint16_t reason,
         const unsigned char *data, uint64_t length) = 0;

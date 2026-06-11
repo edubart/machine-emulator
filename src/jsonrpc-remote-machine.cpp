@@ -980,12 +980,13 @@ static json jsonrpc_machine_collect_uarch_cycle_root_hashes(const json &j,
     if (!session->handler->machine) {
         return jsonrpc_response_invalid_request(j, "no machine");
     }
-    static const char *const param_name[] = {"mcycle_end", "log2_bundle_uarch_cycle_count"};
-    auto args = parse_args<uint64_t, uint64_t>(j, param_name);
+    static const char *const param_name[] = {"mcycle_end", "log2_bundle_uarch_cycle_count", "revert_uarch_tail"};
+    auto args = parse_args<uint64_t, uint64_t, cartesi::optional_param<cartesi::machine_hashes>>(j, param_name);
     auto mcycle_end = std::get<0>(args);
     auto log2_bundle_uarch_cycle_count = std::get<1>(args);
+    const auto revert_uarch_tail = std::get<2>(args).value_or(cartesi::machine_hashes{});
     const auto result = session->handler->machine->collect_uarch_cycle_root_hashes(mcycle_end,
-        static_cast<int>(log2_bundle_uarch_cycle_count));
+        static_cast<int>(log2_bundle_uarch_cycle_count), revert_uarch_tail);
     return jsonrpc_response_ok(j, result);
 }
 

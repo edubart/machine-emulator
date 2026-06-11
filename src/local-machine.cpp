@@ -210,8 +210,8 @@ uarch_interpreter_break_reason local_machine::do_run_uarch(uint64_t uarch_cycle_
 }
 
 uarch_cycle_root_hashes local_machine::do_collect_uarch_cycle_root_hashes(uint64_t mcycle_end,
-    int32_t log2_bundle_uarch_cycle_count) {
-    return get_machine()->collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count);
+    int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) {
+    return get_machine()->collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count, revert_uarch_tail);
 }
 
 address_range_descriptions local_machine::do_get_address_ranges() const {

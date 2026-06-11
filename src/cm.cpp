@@ -696,12 +696,15 @@ cm_error cm_collect_mcycle_root_hashes(cm_machine *m, uint64_t mcycle_end, uint6
 }
 
 cm_error cm_collect_uarch_cycle_root_hashes(cm_machine *m, uint64_t mcycle_end, int32_t log2_bundle_uarch_cycle_count,
-    const char **result) try {
+    const char *revert_uarch_tail, const char **result) try {
     if (result == nullptr) {
         throw std::invalid_argument("invalid result output");
     }
     auto *cpp_m = convert_from_c(m);
-    const auto cpp_res = cpp_m->collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count);
+    const auto cpp_revert_uarch_tail =
+        cartesi::from_json<cartesi::machine_hashes>(revert_uarch_tail, "revert_uarch_tail");
+    const auto cpp_res =
+        cpp_m->collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count, cpp_revert_uarch_tail);
     *result = cm_set_temp_string(cartesi::to_json(cpp_res).dump());
     return cm_result_success();
 } catch (...) {

@@ -126,6 +126,15 @@ private:
     /// \details The counter is key is the concatenation of \p domain with \p name.
     static std::string get_counter_key(const char *name, const char *domain = nullptr);
 
+    /// \brief Checks that the machine can receive a cmio response with the given revert root hash.
+    /// \param revert_root_hash Machine root hash to revert to in case the response is eventually rejected.
+    /// \param reason Reason for sending the response.
+    /// \details For advance-state responses, throws when the machine is not waiting on an rx-accepted
+    /// manual yield or when \p revert_root_hash differs from the machine root hash. Other responses
+    /// (inspect-state queries and GIO responses) are not checked. Called by the host send variants
+    /// before any state changes.
+    void check_pending_cmio_request(const_machine_hash_view revert_root_hash, uint16_t reason) const;
+
     /// \brief Checks if the machine has VirtIO devices.
     /// \returns True if at least one VirtIO device is present.
     bool has_virtio_devices() const;
@@ -231,6 +240,9 @@ public:
     /// Stores into result.back_tree the back tree context to continue collecting bundled root hashes.
     /// \detail The first hash added to \p result.hashes is the root hash after (\p mcycle_period - \p mcycle_phase)
     /// machine cycles (if the function managed to get that far before returning).
+    /// When the machine stops on a manual yield whose reason is rx-rejected, the root hash collected at the
+    /// yield and the padding that follows are substituted by the recorded revert root hash, which is the root
+    /// hash verifiers accept for these state transitions.
     mcycle_root_hashes collect_mcycle_root_hashes(uint64_t mcycle_end, uint64_t mcycle_period, uint64_t mcycle_phase,
         int32_t log2_bundle_mcycle_count, const std::optional<back_merkle_tree> &previous_back_tree = {});
 
@@ -257,6 +269,11 @@ public:
     /// the machine yields, or halts. Implicitly resetting the uarch between mcycles.
     /// \param mcycle_end End machine cycle value to execute, uarch cycle by uarch cycle.
     /// \param log2_bundle_uarch_cycle_count Log base 2 of the amount of uarch cycle root hashes to bundle.
+    /// \param revert_uarch_tail Root hashes after each uarch cycle of the period of the machine the recorded
+    /// revert root hash reverts to, the last entry being the revert root hash itself (the reset entry of that
+    /// period). It is obtained by calling this function with no bundling on that machine, while it waits for
+    /// a response. Required unless the machine starts at a fixed point other than a rejected manual yield,
+    /// in which case the call cannot consume it and ignores it.
     /// \returns The collected uarch cycle root hashes.
     /// Stores into result.hashes the root hashes after each uarch cycle.
     /// Stores into result.reset_indices the indices of the root hashes after each implicit uarch reset
@@ -264,7 +281,11 @@ public:
     /// Stores into result.break_reason the reason why the function returned.
     /// \detail The first hash added to \p result.hashes is the root hash after the first uarch cycle, the last is the
     /// root hash at the time function returns (for whatever reason), which always happens right after an uarch reset.
-    uarch_cycle_root_hashes collect_uarch_cycle_root_hashes(uint64_t mcycle_end, int32_t log2_bundle_uarch_cycle_count);
+    /// When the machine ends in a manual yield whose reason is rx-rejected, the root hash after the final uarch
+    /// reset is substituted by the recorded revert root hash, and one extra period, that of the reverted machine
+    /// as given by \p revert_uarch_tail, is collected after it.
+    uarch_cycle_root_hashes collect_uarch_cycle_root_hashes(uint64_t mcycle_end, int32_t log2_bundle_uarch_cycle_count,
+        const machine_hashes &revert_uarch_tail = {});
 
     /// \brief Advances one micro step and returns a state access log.
     /// \param log_type Type of access log to generate.
@@ -550,6 +571,9 @@ public:
 
     /// \brief Sends cmio response
     /// \param revert_root_hash Machine root hash to revert to in case the response is eventually rejected.
+    /// For advance-state responses, it must be the root hash of the machine itself, and the machine must be
+    /// waiting on an rx-accepted manual yield, both checked before any state changes. Other responses
+    /// (inspect-state queries and GIO responses) are not checked.
     /// \param reason Reason for sending response.
     /// \param data Response data.
     /// \param length Length of response data.
@@ -657,6 +681,9 @@ public:
 
     /// \brief Sends cmio response and returns an access log
     /// \param revert_root_hash Machine root hash to revert to in case the response is eventually rejected.
+    /// For advance-state responses, it must be the root hash of the machine itself, and the machine must be
+    /// waiting on an rx-accepted manual yield, both checked before any state changes. Other responses
+    /// (inspect-state queries and GIO responses) are not checked.
     /// \param reason Reason for sending response.
     /// \param data Response data.
     /// \param length Length of response data.

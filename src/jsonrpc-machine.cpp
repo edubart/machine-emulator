@@ -883,9 +883,11 @@ uarch_interpreter_break_reason jsonrpc_machine::do_run_uarch(uint64_t uarch_cycl
 }
 
 uarch_cycle_root_hashes jsonrpc_machine::do_collect_uarch_cycle_root_hashes(uint64_t mcycle_end,
-    int32_t log2_bundle_uarch_cycle_count) {
+    int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) {
     uarch_cycle_root_hashes result;
-    request("machine.collect_uarch_cycle_root_hashes", std::tie(mcycle_end, log2_bundle_uarch_cycle_count), result);
+    const base64_machine_hashes b64_revert_uarch_tail(revert_uarch_tail);
+    request("machine.collect_uarch_cycle_root_hashes",
+        std::tie(mcycle_end, log2_bundle_uarch_cycle_count, b64_revert_uarch_tail), result);
     return result;
 }
 

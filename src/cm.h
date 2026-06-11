@@ -818,6 +818,10 @@ CM_API cm_error cm_run(cm_machine *m, uint64_t mcycle_end, cm_break_reason *brea
 /// If "break_reason" is "yielded_manually", "halted", or if mcycle reaches CM_MCYCLE_MAX (maximum mcycle value),
 /// this means that execution stopped at a fixed point.
 ///
+/// If execution stopped on a manual yield whose reason is rx-rejected, the root hash collected at the yield
+/// and the padding that follows are substituted by the recorded revert root hash, which is the root hash
+/// verifiers accept for these state transitions.
+///
 /// When \p log2_bundle_mcycle_count is greater than 0 and execution stops at a fixed point, then
 /// the next-to-last hash in "hashes" represents a bundle that is completed by padding with repetitions of the final
 /// root hash, and the last hash in "hashes" represents a bundle consisting entirely of repetitions of that same final
@@ -847,6 +851,12 @@ CM_API cm_error cm_run_uarch(cm_machine *m, uint64_t uarch_cycle_end, cm_uarch_b
 /// \param mcycle_end End machine cycle value to execute, uarch cycle by uarch cycle.
 /// \param log2_bundle_uarch_cycle_count Log base 2 of the amount of uarch cycle root hashes to bundle.
 /// If greater than 0, it collects subtree root hashes for 2^log2_bundle_uarch_cycle_count root hashes.
+/// \param revert_uarch_tail Optional JSON array (of hashes as base64-encoded strings) with the root hashes
+/// after each uarch cycle of the period of the machine the recorded revert root hash reverts to, the last
+/// entry being the revert root hash itself (can be NULL).
+/// It is obtained by calling this function with no bundling on that machine, while it waits for a response.
+/// Required unless the machine starts at a fixed point other than a rejected manual yield, in which case
+/// the call cannot consume it and ignores it.
 /// \param result Receives an JSON object as a string, guaranteed to remain valid only until
 /// the next CM_API function is called from the same thread.
 /// The field "hashes" is an array (of hashes as base64-encoded strings) with the root hashes after each uarch cycle.
@@ -878,8 +888,13 @@ CM_API cm_error cm_run_uarch(cm_machine *m, uint64_t uarch_cycle_end, cm_uarch_b
 /// In these cases, the function will attempt to execute one additional mcycle at this fixed point,
 /// and collect the resulting root hashes as well. As a result, all root hashes collected after the next-to-last
 /// reset index correspond to this fixed point.
+///
+/// The rejected manual yield is the exception to the paragraph above. When execution stops on a manual yield
+/// whose reason is rx-rejected, the root hash after the final uarch reset is substituted by the recorded
+/// revert root hash, and instead of executing one additional mcycle, the function collects one extra period,
+/// that of the reverted machine, as given by \p revert_uarch_tail.
 CM_API cm_error cm_collect_uarch_cycle_root_hashes(cm_machine *m, uint64_t mcycle_end,
-    int32_t log2_bundle_uarch_cycle_count, const char **result);
+    int32_t log2_bundle_uarch_cycle_count, const char *revert_uarch_tail, const char **result);
 
 /// \brief Resets the entire microarchitecture state to pristine values.
 /// \param m Pointer to a non-empty machine object (holds a machine instance).
@@ -905,6 +920,9 @@ CM_API cm_error cm_receive_cmio_request(const cm_machine *m, uint8_t *cmd, uint1
 /// \brief Sends a cmio response.
 /// \param m Pointer to a non-empty machine object (holds a machine instance).
 /// \param revert_root_hash Machine root hash to revert to in case the response is eventually rejected.
+/// For advance-state responses, it must be the root hash of the machine itself, and the machine must be
+/// waiting on an rx-accepted manual yield, both checked before any state changes. Other responses
+/// (inspect-state queries and GIO responses) are not checked.
 /// \param reason Reason for sending the response.
 /// \param data Response data to send.
 /// \param length Length of response data.
@@ -952,6 +970,9 @@ CM_API cm_error cm_log_reset_uarch(cm_machine *m, int32_t log_type, const char *
 /// \brief Sends a cmio response logging all accesses to the state.
 /// \param m Pointer to a non-empty machine object (holds a machine instance).
 /// \param revert_root_hash Machine root hash to revert to in case the response is eventually rejected.
+/// For advance-state responses, it must be the root hash of the machine itself, and the machine must be
+/// waiting on an rx-accepted manual yield, both checked before any state changes. Other responses
+/// (inspect-state queries and GIO responses) are not checked.
 /// \param reason Reason for sending the response.
 /// \param data Response data to send.
 /// \param length Length of response data.

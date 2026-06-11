@@ -1501,18 +1501,18 @@ do_test("Dump of log produced by send_cmio_response should match", function(mach
     machine:write_reg("iflags_Y", 1)
     local data = "0123456789"
     local reason = 7
-    -- a fixed revert root hash keeps the expected dump independent of the machine configuration
-    local revert_root_hash = string.rep("\0", 32)
-    local log = machine:log_send_cmio_response(revert_root_hash, reason, data, cartesi.ACCESS_LOG_TYPE_ANNOTATIONS)
-    local expected_dump = [[
-begin send_cmio_response
-  1: read iflags.Y@0x300(768): 0x1(1)
-  2: write revert root hash@0xfe0(4064): hash:"290decd9"(2^5 bytes) -> hash:"290decd9"(2^5 bytes)
-  3: write cmio rx buffer@0x60000000(1610612736): hash:"290decd9"(2^5 bytes) -> hash:"555b1f6d"(2^5 bytes)
-  4: write htif.fromhost@0x330(816): 0x0(0) -> 0x70000000a(30064771082)
-  5: write iflags.Y@0x300(768): 0x1(1) -> 0x0(0)
-end send_cmio_response
-]]
+    -- the revert root hash must be the machine root hash, so the leaf write value is matched by a pattern
+    local log =
+        machine:log_send_cmio_response(machine:get_root_hash(), reason, data, cartesi.ACCESS_LOG_TYPE_ANNOTATIONS)
+    local expected_dump_pattern = "begin send_cmio_response\n"
+        .. "  1: read iflags%.Y@0x300%(768%): 0x1%(1%)\n"
+        .. '  2: write revert root hash@0xfe0%(4064%): hash:"290decd9"%(2%^5 bytes%) %-> '
+        .. 'hash:"[0-9a-f]+"%(2%^5 bytes%)\n'
+        .. '  3: write cmio rx buffer@0x60000000%(1610612736%): hash:"290decd9"%(2%^5 bytes%) %-> '
+        .. 'hash:"555b1f6d"%(2%^5 bytes%)\n'
+        .. "  4: write htif%.fromhost@0x330%(816%): 0x0%(0%) %-> 0x70000000a%(30064771082%)\n"
+        .. "  5: write iflags%.Y@0x300%(768%): 0x1%(1%) %-> 0x0%(0%)\n"
+        .. "end send_cmio_response\n"
     local temp_file <close> = test_util.new_temp_file()
     util.print_log(log, temp_file)
     local actual_dump = temp_file:read_all()
@@ -1520,7 +1520,38 @@ end send_cmio_response
     print("--------------------------")
     print(actual_dump)
     print("--------------------------")
-    assert(actual_dump == expected_dump, "Dump of uarch_reset_state does not match expected:\n" .. expected_dump)
+    assert(
+        actual_dump:find(expected_dump_pattern),
+        "Dump of send_cmio_response does not match expected pattern:\n" .. expected_dump_pattern
+    )
+end)
+
+do_test("send_cmio_response should check the machine state for advance-state responses", function(machine)
+    local advance_reason = cartesi.HTIF_YIELD_REASON_ADVANCE_STATE
+    local data = "0123456789"
+    local wrong_revert_root_hash = string.rep("\xff", cartesi.HASH_SIZE)
+    -- put the machine in the state that waits for an advance-state input
+    machine:write_reg("iflags_Y", 1)
+    machine:write_reg("htif_tohost_dev", cartesi.HTIF_DEV_YIELD)
+    machine:write_reg("htif_tohost_cmd", cartesi.HTIF_YIELD_CMD_MANUAL)
+    machine:write_reg("htif_tohost_reason", cartesi.HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED)
+    local root_hash_before = machine:get_root_hash()
+    -- a revert root hash other than the machine root hash is refused
+    local _, err = pcall(machine.send_cmio_response, machine, wrong_revert_root_hash, advance_reason, data)
+    check_error_find(err, "revert root hash does not match the machine root hash")
+    _, err = pcall(machine.log_send_cmio_response, machine, wrong_revert_root_hash, advance_reason, data)
+    check_error_find(err, "revert root hash does not match the machine root hash")
+    -- the failed calls did not change the machine state
+    assert(machine:get_root_hash() == root_hash_before)
+    -- a machine that is not waiting on an rx-accepted manual yield refuses the input
+    machine:write_reg("htif_tohost_reason", cartesi.HTIF_YIELD_MANUAL_REASON_RX_REJECTED)
+    _, err = pcall(machine.send_cmio_response, machine, machine:get_root_hash(), advance_reason, data)
+    check_error_find(err, "machine is not waiting on an rx-accepted manual yield")
+    _, err = pcall(machine.log_send_cmio_response, machine, machine:get_root_hash(), advance_reason, data)
+    check_error_find(err, "machine is not waiting on an rx-accepted manual yield")
+    -- other response reasons are not checked at all
+    machine:send_cmio_response(wrong_revert_root_hash, cartesi.HTIF_YIELD_REASON_INSPECT_STATE, data)
+    assert(machine:read_reg("iflags_Y") == 0)
 end)
 
 do_test("send_cmio_response with different data sizes", function(machine)

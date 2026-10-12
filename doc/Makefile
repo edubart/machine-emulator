@@ -11,9 +11,9 @@ include $(DEPENDENCIES_LOCK)
 export MACHINE_GUEST_TOOLS_TAG
 export MACHINE_GUEST_TOOLS_DEB_SHA256
 export MACHINE_GUEST_TOOLS_TARBALL_SHA256
-export MACHINE_LINUX_IMAGE_TAG
-export MACHINE_LINUX_IMAGE_FILENAME
-export MACHINE_LINUX_IMAGE_SHA256
+export LINUX_TAG
+export LINUX_VERSION
+export LINUX_SHA256
 
 # Docker image platform
 BUILD_PLATFORM ?=
@@ -31,7 +31,7 @@ export LUA_PATH := $(CURDIR)/?.lua;$(RECIPES_DIR)/?.lua;$(LUA_PATH);;
 STYLUA=stylua
 STYLUA_FLAGS=--indent-type Spaces --respect-ignores
 
-.PHONY: build-docs-image prepare-readme clean format-lua check-format-lua check-lua
+.PHONY: build-docs-image prepare-readme clean format-lua check-format-lua check-lua test-prt-repeat
 .DELETE_ON_ERROR:
 
 # Lua linting/formatting for the recipe snippets and pandoc filters. The
@@ -150,9 +150,9 @@ docs-image-exec: check-docs-image
 		-e MACHINE_GUEST_TOOLS_TAG \
 		-e MACHINE_GUEST_TOOLS_DEB_SHA256 \
 		-e MACHINE_GUEST_TOOLS_TARBALL_SHA256 \
-		-e MACHINE_LINUX_IMAGE_TAG \
-		-e MACHINE_LINUX_IMAGE_FILENAME \
-		-e MACHINE_LINUX_IMAGE_SHA256 \
+		-e LINUX_TAG \
+		-e LINUX_VERSION \
+		-e LINUX_SHA256 \
 		-v $(CURDIR):/work \
 		-v $(DEPENDENCIES_LOCK):/dependencies.lock:ro \
 		-w /work \
@@ -172,9 +172,9 @@ run-docs-image: check-docs-image
 		-e MACHINE_GUEST_TOOLS_TAG \
 		-e MACHINE_GUEST_TOOLS_DEB_SHA256 \
 		-e MACHINE_GUEST_TOOLS_TARBALL_SHA256 \
-		-e MACHINE_LINUX_IMAGE_TAG \
-		-e MACHINE_LINUX_IMAGE_FILENAME \
-		-e MACHINE_LINUX_IMAGE_SHA256 \
+		-e LINUX_TAG \
+		-e LINUX_VERSION \
+		-e LINUX_SHA256 \
 		-v $(CURDIR):/work \
 		-v $(DEPENDENCIES_LOCK):/dependencies.lock:ro \
 		-w /work \
@@ -189,9 +189,9 @@ build-docs-image: | ensure-rootfs-docs
 	base=$$(docker image inspect --format '{{ index .Config.Labels "io.cartesi.machine-emulator.base-image" }}' cartesi/machine-emulator:$(TAG)); \
 	docker build $(DOCKER_PLATFORM) \
 	    --build-arg TAG=$(TAG) \
-	    --build-arg MACHINE_LINUX_IMAGE_TAG=$(MACHINE_LINUX_IMAGE_TAG) \
-	    --build-arg MACHINE_LINUX_IMAGE_FILENAME=$(MACHINE_LINUX_IMAGE_FILENAME) \
-	    --build-arg MACHINE_LINUX_IMAGE_SHA256=$(MACHINE_LINUX_IMAGE_SHA256) \
+	    --build-arg LINUX_TAG=$(LINUX_TAG) \
+	    --build-arg LINUX_VERSION=$(LINUX_VERSION) \
+	    --build-arg LINUX_SHA256=$(LINUX_SHA256) \
 	    $${base:+--build-arg BUILDER_BASE=$$base} \
 	    -t $(DOCS_IMAGE):$(TAG) .
 
@@ -207,6 +207,49 @@ prepare-readme:
 
 $(REPLACE_CACHE_DIR):
 	mkdir -p $@
+
+# Standalone recipe tests never read template.d or render the documentation.
+RECIPE_TEST_ENV ?= no
+GAME_TEST_DIR := $(REPLACE_CACHE_DIR)/game-tests
+.PHONY: test-prt-protocol test-vg test-vg-execution test-prt-game test-prt-repeat
+ifeq ($(RECIPE_TEST_ENV),yes)
+test-prt-protocol:
+	bash $(RECIPES_DIR)/game-runner-test.sh
+	@work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
+	    cd "$$work" && lua5.4 $(RECIPES_DIR)/prt-test.lua && \
+	    lua5.4 $(RECIPES_DIR)/game-transport-test.lua && \
+	    lua5.4 $(RECIPES_DIR)/vg-clock-test.lua
+
+$(GAME_TEST_DIR)/initial-hash: $(RECIPES_DIR)/game-test-fixtures.sh $(RECIPES_DIR)/calc.sh
+	mkdir -p $(GAME_TEST_DIR)
+	cd $(GAME_TEST_DIR) && bash $(RECIPES_DIR)/game-test-fixtures.sh
+
+test-vg: $(GAME_TEST_DIR)/initial-hash
+	cd $(GAME_TEST_DIR) && lua5.4 $(RECIPES_DIR)/game-transport-test.lua && \
+	    lua5.4 $(RECIPES_DIR)/vg-clock-test.lua && lua5.4 $(RECIPES_DIR)/vg-test.lua
+test-vg-execution: $(GAME_TEST_DIR)/initial-hash
+	cd $(GAME_TEST_DIR) && lua5.4 $(RECIPES_DIR)/vg-test.lua execution
+
+# The machine-backed PRT suite also records the reference tournament. test-prt-game always
+# runs it. test-prt-repeat records only when no recording exists, then compares a fresh run.
+define record-prt-tournament
+mkdir -p $(GAME_TEST_DIR)/prt-machine
+cd $(GAME_TEST_DIR)/prt-machine && bash $(RECIPES_DIR)/prt-machine-test.sh $(GAME_TEST_DIR)
+endef
+
+test-prt-game: $(GAME_TEST_DIR)/initial-hash
+	$(record-prt-tournament)
+
+$(GAME_TEST_DIR)/prt-run/verdict: $(GAME_TEST_DIR)/initial-hash
+	$(record-prt-tournament)
+
+test-prt-repeat: $(GAME_TEST_DIR)/prt-run/verdict
+	bash $(RECIPES_DIR)/prt-repeat-test.sh $(GAME_TEST_DIR)/rolling-calculator-template \
+	    $(GAME_TEST_DIR) $(GAME_TEST_DIR)/prt-run
+else
+test-prt-protocol test-vg test-vg-execution test-prt-game test-prt-repeat:
+	$(MAKE) docs-image-exec CONTAINER_COMMAND="make $@ RECIPE_TEST_ENV=yes"
+endif
 
 ifeq ($(DEV_ENV_HAS_DOCGEN),yes)
 
@@ -225,7 +268,7 @@ template.d: README.md.template replace.lua | $(REPLACE_CACHE_DIR)
 	    -M docs_image_id="$(DOCS_IMAGE_ID)" \
 	    --lua-filter replace.lua README.md.template -o $@
 
-ifeq (,$(filter clean,$(MAKECMDGOALS)))
+ifeq (,$(filter clean test-prt-protocol test-vg test-vg-execution test-prt-game test-prt-repeat,$(MAKECMDGOALS)))
 -include template.d
 endif
 
@@ -237,9 +280,10 @@ endif
 # Diagrams are committed SVGs under images/, like README.md itself, with no background of
 # their own so they inherit the page. state-tree's ink colors depend on the theme, so it is
 # built in a light and a dark variant that the template selects with a <picture>;
-# outputs-merkle-tree reads on both themes, so a single variant serves both.
+# outputs-merkle-tree and fixed-point-tree read on both themes, so a single variant serves both.
 DOC_DIAGRAMS := \
     images/outputs-merkle-tree.svg \
+    images/fixed-point-tree.svg \
     images/state-tree-light.svg images/state-tree-dark.svg
 
 # outputs-merkle-tree pins its node positions for a perfectly symmetric binary tree (dot's own
@@ -247,6 +291,10 @@ DOC_DIAGRAMS := \
 # and runs no layout. Held nodes are filled and the unmaterialized interiors are transparent
 # outlines, so its colors read on both themes from one variant.
 images/outputs-merkle-tree.svg: images/outputs-merkle-tree.dot
+	neato -n -Tsvg $< -o $@
+
+# fixed-point-tree uses the same pinned positions and style as outputs-merkle-tree.
+images/fixed-point-tree.svg: images/fixed-point-tree.dot
 	neato -n -Tsvg $< -o $@
 
 # state-tree draws an actual machine's state hash-tree over the address space. It

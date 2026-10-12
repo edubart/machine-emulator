@@ -163,8 +163,23 @@ do
         encode_command({ action = "accept", terminal_mcycle = cartesi.MCYCLE_MAX }),
         machine:get_root_hash()
     )
+    assert(machine:run(cartesi.MCYCLE_MAX) == cartesi.BREAK_REASON_YIELDED_MANUALLY)
+    assert(machine:read_reg("mcycle") == cartesi.MCYCLE_MAX)
+    assert(machine:read_reg("htif_tohost_reason") == cartesi.HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED)
+end
+
+-- A terminal cycle of zero lies past the unsigned counter boundary for this guest's
+-- relative countdown. Execution overflows before it can reach the terminal yield.
+do
+    local machine <close> = cartesi.machine(artifact_dir .. "/templates/mcycle-boundary")
+    machine:send_cmio_response(
+        cartesi.HTIF_YIELD_REASON_ADVANCE_STATE,
+        encode_command({ action = "accept", terminal_mcycle = 0 }),
+        machine:get_root_hash()
+    )
     assert(machine:run(cartesi.MCYCLE_MAX) == cartesi.BREAK_REASON_MCYCLE_OVERFLOW)
     assert(machine:read_reg("mcycle") == cartesi.MCYCLE_MAX)
+    assert(machine:read_reg("iflags_Y") == 0 and machine:read_reg("iflags_H") == 0)
 end
 
 -- Probe the calibrated exact-cycle tail before publishing any boundary cases.
@@ -199,8 +214,8 @@ local function add_case(case)
 
     local hash_path = "results/" .. case.id .. ".bin"
     local advance = {
-        "input_index_begin:0",
-        "input_index_end:" .. #input_paths,
+        "input_file_index_begin:0",
+        "input_file_index_end:" .. #input_paths,
         "output:",
         "rejected_output:",
         "output_proof:",
@@ -208,25 +223,31 @@ local function add_case(case)
         "outputs_merkle_root:",
         "outputs_merkle_root_proof:",
         "check_outputs_merkle_root:false",
-        "log2_mcycle_computation_hash_period:" .. case.log2_period,
     }
     if #input_paths > 0 then
         advance[#advance + 1] = "input:inputs/" .. case.id .. "-%i.bin"
     end
+    local computation = {
+        "filename:" .. hash_path,
+        "log2_mcycle_period:" .. case.log2_period,
+    }
     if case.level == "mcycle" then
-        advance[#advance + 1] = "mcycle_computation_hash:" .. hash_path
-        advance[#advance + 1] = "log2_bundle_mcycle_count:" .. (case.log2_bundle_mcycle or 0)
+        computation[#computation + 1] = "log2_bundle_mcycle_count:" .. (case.log2_bundle_mcycle or 0)
     else
-        advance[#advance + 1] = "uarch_cycle_computation_hash:" .. hash_path
-        advance[#advance + 1] = "mcycle_period_index:" .. case.period_index
-        advance[#advance + 1] = "log2_bundle_uarch_cycle_count:" .. (case.log2_bundle_uarch or 16)
+        computation[#computation + 1] = "mcycle_period_index:" .. case.period_index
+        computation[#computation + 1] = "log2_bundle_uarch_cycle_count:" .. (case.log2_bundle_uarch or 16)
     end
 
     local argv = {
         "cartesi-machine.lua",
         "--load=templates/" .. case.template,
         "--cmio-advance-state=" .. table.concat(advance, ","),
+        "--" .. (case.level == "mcycle" and "mcycle" or "uarch-cycle") .. "-computation-hash=" .. table.concat(
+            computation,
+            ","
+        ),
     }
+
     if case.remote then
         argv[#argv + 1] = "--remote-spawn"
         argv[#argv + 1] = "--remote-address=127.0.0.1:0"
@@ -464,13 +485,26 @@ local mcycle_cases = {
     },
     {
         id = "mcycle-at-input-maximum",
-        description = "Exact saturated input maximum with overflow precedence",
+        description = "Accepted yield at the exact saturated input maximum",
+        comment = expected_hash_structure(
+            "no periodic sampling point is reached.",
+            "The accepted state root hash at MCYCLE_MAX pads every reserved position; the yield takes precedence."
+        ),
+        template = "mcycle-boundary",
+        commands = { { action = "accept", terminal_mcycle = cartesi.MCYCLE_MAX } },
+        category = "success-hash",
+        terminal_mcycle = "18446744073709551615",
+        max_mcycle = "0xffffffffffffffff",
+    },
+    {
+        id = "mcycle-overflow",
+        description = "Mcycle overflow before the terminal yield",
         comment = expected_hash_structure(
             "no periodic sampling point is reached.",
             "The mcycle-overflow fixed-point state root hash pads every reserved position."
         ),
         template = "mcycle-boundary",
-        commands = { { action = "accept", terminal_mcycle = cartesi.MCYCLE_MAX } },
+        commands = { { action = "accept", terminal_mcycle = 0 } },
         category = "nonzero-hash",
         terminal_mcycle = "18446744073709551615",
         stderr_contains = "Mcycle overflow",
@@ -672,7 +706,7 @@ add_uarch_case({
         "mcycle-overflow fixed-point, reset-delimited mcycle subtree root."
     ),
     template = "mcycle-boundary",
-    commands = { { action = "accept", terminal_mcycle = cartesi.MCYCLE_MAX } },
+    commands = { { action = "accept", terminal_mcycle = 0 } },
     category = "nonzero-hash",
     terminal_mcycle = "18446744073709551615",
     period_index = 0,
@@ -696,15 +730,16 @@ add_uarch_case({
 })
 add_uarch_case({
     id = "uarch-near-limit-tail",
-    description = "Near-limit custom revert tail is captured, reset, and reused on rejection",
+    description = "Collector setup changes the custom uarch boundary and input delivery refuses it",
     comment = expected_hash_structure(
-        "four mcycle subtree roots advance the main processor to the rejected manual yield.",
-        "The captured near-limit revert uarch tail's subtree root fills the remaining positions."
+        "none. Capturing the custom tail resets the uarch PC and changes the expected input boundary.",
+        "A direct collector test checks tail capture and reuse on rejection separately."
     ),
     template = "near-limit-uarch-tail",
     commands = { { action = "reject", terminal_mcycle = window_start + 4 } },
-    category = "success-hash",
-    terminal_mcycle = window_start + 4,
+    category = "error-no-hash",
+    stderr_contains = "revert root hash does not match the machine root hash",
+    oracle = "near-limit-uarch-tail",
     remote = true,
 })
 add_uarch_case({

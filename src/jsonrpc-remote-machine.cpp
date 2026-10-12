@@ -982,6 +982,24 @@ static json jsonrpc_machine_collect_mcycle_root_hashes(const json &j, const std:
     return jsonrpc_response_ok(j, result);
 }
 
+/// \brief JSONRPC handler for the machine.collect_mcycle_bundle method
+/// \param j JSON request object
+/// \param session HTTP session
+/// \returns JSON response object
+static json jsonrpc_machine_collect_mcycle_bundle(const json &j, const std::shared_ptr<http_session> &session) {
+    if (!session->handler->machine) {
+        return jsonrpc_response_invalid_request(j, "no machine");
+    }
+    static const char *const param_name[] = {"bundle_offset", "log2_mcycle_period", "log2_bundle_mcycle_count"};
+    auto args = parse_args<uint64_t, uint64_t, uint64_t>(j, param_name);
+    auto bundle_offset = std::get<0>(args);
+    auto log2_mcycle_period = std::get<1>(args);
+    auto log2_bundle_mcycle_count = std::get<2>(args);
+    const auto result = session->handler->machine->collect_mcycle_bundle(bundle_offset, log2_mcycle_period,
+        static_cast<int>(log2_bundle_mcycle_count));
+    return jsonrpc_response_ok(j, cartesi::base64_machine_hashes(result));
+}
+
 /// \brief JSONRPC handler for the machine.collect_uarch_cycle_root_hashes method
 /// \param j JSON request object
 /// \param session HTTP session
@@ -999,6 +1017,24 @@ static json jsonrpc_machine_collect_uarch_cycle_root_hashes(const json &j,
     const auto result = session->handler->machine->collect_uarch_cycle_root_hashes(mcycle_end,
         static_cast<int>(log2_bundle_uarch_cycle_count), revert_uarch_tail);
     return jsonrpc_response_ok(j, result);
+}
+
+/// \brief JSONRPC handler for the machine.collect_uarch_cycle_bundle method
+/// \param j JSON request object
+/// \param session HTTP session
+/// \returns JSON response object
+static json jsonrpc_machine_collect_uarch_cycle_bundle(const json &j, const std::shared_ptr<http_session> &session) {
+    if (!session->handler->machine) {
+        return jsonrpc_response_invalid_request(j, "no machine");
+    }
+    static const char *const param_name[] = {"bundle_offset", "log2_bundle_uarch_cycle_count", "revert_uarch_tail"};
+    auto args = parse_args<uint64_t, uint64_t, cartesi::optional_param<cartesi::machine_hashes>>(j, param_name);
+    auto bundle_offset = std::get<0>(args);
+    auto log2_bundle_uarch_cycle_count = std::get<1>(args);
+    const auto revert_uarch_tail = std::get<2>(args).value_or(cartesi::machine_hashes{});
+    const auto result = session->handler->machine->collect_uarch_cycle_bundle(bundle_offset,
+        static_cast<int>(log2_bundle_uarch_cycle_count), revert_uarch_tail);
+    return jsonrpc_response_ok(j, cartesi::base64_machine_hashes(result));
 }
 
 /// \brief JSONRPC handler for the machine.destroy method
@@ -1659,9 +1695,12 @@ static json jsonrpc_machine_send_cmio_response_handler(const json &j, const std:
     static const char *const param_name[] = {"reason", "data", "revert_root_hash"};
     auto args = parse_args<uint16_t, std::string, cartesi::optional_param<cartesi::machine_hash>>(j, param_name);
     auto bin = cartesi::decode_base64(std::get<1>(args));
+    if (bin.size() > UINT32_MAX) {
+        throw std::domain_error("CMIO response data length exceeds uint32_t");
+    }
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     session->handler->machine->send_cmio_response(std::get<0>(args), reinterpret_cast<unsigned char *>(bin.data()),
-        bin.size(), std::get<2>(args));
+        static_cast<uint32_t>(bin.size()), std::get<2>(args));
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     return jsonrpc_response_ok(j);
 }
@@ -1675,11 +1714,15 @@ static json jsonrpc_machine_log_send_cmio_response_handler(const json &j,
     auto args = parse_args<uint16_t, std::string, cartesi::machine_hash,
         cartesi::not_default_constructible<cartesi::access_log::type>>(j, param_name);
     auto bin = cartesi::decode_base64(std::get<1>(args));
+    if (bin.size() > UINT32_MAX) {
+        throw std::domain_error("CMIO response data length exceeds uint32_t");
+    }
     // NOLINTBEGIN(bugprone-unchecked-optional-access)
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     return jsonrpc_response_ok(j,
         session->handler->machine->log_send_cmio_response(std::get<0>(args),
-            reinterpret_cast<unsigned char *>(bin.data()), bin.size(), std::get<2>(args), std::get<3>(args).value()));
+            reinterpret_cast<unsigned char *>(bin.data()), static_cast<uint32_t>(bin.size()), std::get<2>(args),
+            std::get<3>(args).value()));
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     // NOLINTEND(bugprone-unchecked-optional-access)
 }
@@ -1695,11 +1738,14 @@ static json jsonrpc_machine_verify_send_cmio_response_handler(const json &j,
         cartesi::not_default_constructible<cartesi::access_log>, cartesi::machine_hash>(j, param_name);
 
     auto bin = cartesi::decode_base64(std::get<1>(args));
+    if (bin.size() > UINT32_MAX) {
+        throw std::domain_error("CMIO response data length exceeds uint32_t");
+    }
     // NOLINTBEGIN(bugprone-unchecked-optional-access)
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     auto obtained_root_hash =
         cartesi::machine::verify_send_cmio_response(std::get<0>(args), reinterpret_cast<unsigned char *>(bin.data()),
-            bin.size(), std::get<2>(args), std::get<3>(args).value(), std::get<4>(args));
+            static_cast<uint32_t>(bin.size()), std::get<2>(args), std::get<3>(args).value(), std::get<4>(args));
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     // NOLINTEND(bugprone-unchecked-optional-access)
     return jsonrpc_response_ok(j, cartesi::base64_machine_hash(obtained_root_hash));
@@ -1756,7 +1802,9 @@ static json jsonrpc_dispatch_method(const json &j, const std::shared_ptr<http_se
         {"delay_next_request", jsonrpc_delay_next_request_handler},
         {"rpc.discover", jsonrpc_rpc_discover_handler},
         {"machine.collect_mcycle_root_hashes", jsonrpc_machine_collect_mcycle_root_hashes},
+        {"machine.collect_mcycle_bundle", jsonrpc_machine_collect_mcycle_bundle},
         {"machine.collect_uarch_cycle_root_hashes", jsonrpc_machine_collect_uarch_cycle_root_hashes},
+        {"machine.collect_uarch_cycle_bundle", jsonrpc_machine_collect_uarch_cycle_bundle},
         {"machine.create", jsonrpc_machine_create_handler},
         {"machine.is_empty", jsonrpc_machine_is_empty_handler},
         {"machine.load", jsonrpc_machine_load_handler},

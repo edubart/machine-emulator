@@ -117,7 +117,7 @@ brew install cartesi-machine
 
 ##### System Requirements
 
-- C++ Compiler with support for C++23 (tested with GCC >= 14.x and Clang >= 19.x).
+- C++ Compiler with support for C++23 (tested with GCC >= 14.x and Clang >= 20.x).
 - GNU Make >= 3.81
 - Boost >= 1.83
 - Lua >= 5.4.6 (optional, required for scripting support and interactive terminal)
@@ -133,7 +133,8 @@ sudo apt-get install build-essential git wget libgomp-dev libboost1.83-dev liblu
 ###### MacPorts Requirements
 
 ```sh
-sudo port install clang libomp boost181 wget pkgconfig lua54 libslirp
+sudo port install clang-20 libomp boost187 wget pkgconfig lua54 libslirp
+sudo port select --set clang mp-clang-20
 ```
 
 ###### Homebrew Requirements
@@ -190,8 +191,8 @@ sudo make install PREFIX=/usr/local
 
 After installation, to boot a Linux system with the `cartesi-machine` command, you will need to also download:
 
-- Guest [Linux image](https://github.com/cartesi/machine-linux-image) and place it at `$PREFIX/share/cartesi/images/linux.bin`
-- Guest [rootfs image](https://github.com/cartesi/machine-rootfs-image) and place it at `$PREFIX/share/cartesi/images/rootfs.ext2`.
+- Guest [Linux image](https://github.com/cartesi/linux/releases) and place it at `$PREFIX/share/cartesi/images/linux.bin`
+- Guest [rootfs image](https://github.com/cartesi/machine-guest-tools/releases) and place it at `$PREFIX/share/cartesi/images/rootfs.ext2`.
 
 ### Usage
 
@@ -252,9 +253,8 @@ The following projects have been using the emulator:
 ## Related Projects
 
 The Cartesi Machine emulator is directly related to the following important projects that are also maintained by us:
-- [Cartesi Machine Guest Tools](https://github.com/cartesi/machine-guest-tools) - System utilities used inside guest machines.
-- [Cartesi Machine Linux Image](https://github.com/cartesi/machine-linux-image) - Linux kernel image used by guest machines.
-- [Cartesi Machine Rootfs Image](https://github.com/cartesi/machine-rootfs-image) - Root filesystem image used by guest machines.
+- [Cartesi Machine Guest Tools](https://github.com/cartesi/machine-guest-tools) - System utilities used inside guest machines, and the root filesystem image that includes them.
+- [Cartesi Linux](https://github.com/cartesi/linux) - Linux kernel image used by guest machines.
 - [Cartesi Machine Solidity Step](https://github.com/cartesi/machine-solidity-step) - Solidity smart contracts of machine microarchitecture step for on-chain fraud-proofs validation.
 
 ## Benchmarks

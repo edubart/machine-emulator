@@ -171,6 +171,12 @@ local function check_empty_mcycle(case)
         filesystem.read_file(artifact_dir .. "/" .. case.result) == double_hash(machine:get_root_hash(), height),
         case.id .. ": empty-epoch independent reconstruction differs"
     )
+    local forest = hash_tree.frontier_forest(height, "keccak256")
+    hash_tree.frontier_forest_pad_back(forest, machine:get_root_hash(), 1 << height)
+    assert(
+        hash_tree.frontier_forest_get_root_hash(forest) == double_hash(machine:get_root_hash(), height),
+        case.id .. ": forest-assembled empty epoch differs"
+    )
 end
 
 local function check_small_mcycle(case)
@@ -192,6 +198,13 @@ local function check_small_mcycle(case)
     assert(
         filesystem.read_file(artifact_dir .. "/" .. case.result) == hash_tree.frontier_get_root_hash(frontier),
         case.id .. ": independently assembled mcycle tree differs"
+    )
+    local forest = hash_tree.frontier_forest(height, "keccak256")
+    hash_tree.frontier_forest_push_back(forest, sample_hash)
+    hash_tree.frontier_forest_pad_back(forest, final_hash, (1 << height) - 1)
+    assert(
+        hash_tree.frontier_forest_get_root_hash(forest) == hash_tree.frontier_get_root_hash(frontier),
+        case.id .. ": forest-assembled mcycle tree differs"
     )
 end
 
@@ -232,6 +245,42 @@ local function uarch_period_root(collected, log2_period, log2_bundles_per_mcycle
         )
     end
     return hash_tree.frontier_get_root_hash(frontier)
+end
+
+-- The frontier-forest counterpart of uarch_mcycle_root: one mcycle group assembled from the
+-- real bundles, the repeated halt bundle, and the reset-ending bundle, as a complete forest.
+local function forest_uarch_mcycle_group(collected, mcycle_index, log2_bundles_per_mcycle)
+    local mcycle_hashes_begin = collected.mcycle_hash_offsets[mcycle_index]
+    local mcycle_hashes_end = collected.mcycle_hash_offsets[mcycle_index + 1]
+    local group = hash_tree.frontier_forest(log2_bundles_per_mcycle, "keccak256")
+    hash_tree.frontier_forest_append(group, collected.hashes, mcycle_hashes_begin, mcycle_hashes_end - 2)
+    local execution_count = mcycle_hashes_end - mcycle_hashes_begin - 2
+    hash_tree.frontier_forest_pad_back(
+        group,
+        collected.hashes[mcycle_hashes_end - 2],
+        (1 << log2_bundles_per_mcycle) - 1 - execution_count
+    )
+    hash_tree.frontier_forest_push_back(group, collected.hashes[mcycle_hashes_end - 1])
+    return group
+end
+
+-- The frontier-forest counterpart of uarch_period_root: groups append as complete forests,
+-- and a fixed point repeats the last group across the remainder of the period.
+local function forest_uarch_period_root(collected, log2_period, log2_bundles_per_mcycle)
+    local period = 1 << log2_period
+    local group_count = math.min(#collected.mcycle_hash_offsets - 1, period)
+    local forest = hash_tree.frontier_forest(log2_period + log2_bundles_per_mcycle, "keccak256")
+    for i = 1, group_count do
+        hash_tree.frontier_forest_push_back(forest, forest_uarch_mcycle_group(collected, i, log2_bundles_per_mcycle))
+    end
+    if group_count < period then
+        hash_tree.frontier_forest_pad_back(
+            forest,
+            forest_uarch_mcycle_group(collected, group_count, log2_bundles_per_mcycle),
+            period - group_count
+        )
+    end
+    return hash_tree.frontier_forest_get_root_hash(forest)
 end
 
 local function check_small_uarch(case)
@@ -278,6 +327,11 @@ local function check_small_uarch(case)
         filesystem.read_file(artifact_dir .. "/" .. case.result) == hash_tree.frontier_get_root_hash(period_frontier),
         case.id .. ": independently assembled uarch tree differs"
     )
+    assert(
+        forest_uarch_period_root(collected, case.geometry.log2_mcycle_period, log2_bundles_per_mcycle)
+            == hash_tree.frontier_get_root_hash(period_frontier),
+        case.id .. ": forest-assembled uarch tree differs"
+    )
 end
 
 local function check_uarch_mcycle_overflow(case)
@@ -306,6 +360,50 @@ local function check_uarch_mcycle_overflow(case)
         filesystem.read_file(artifact_dir .. "/" .. case.result)
             == uarch_period_root(collected, case.geometry.log2_mcycle_period, log2_bundles_per_mcycle),
         case.id .. ": independently assembled overflow window differs"
+    )
+    assert(
+        forest_uarch_period_root(collected, case.geometry.log2_mcycle_period, log2_bundles_per_mcycle)
+            == uarch_period_root(collected, case.geometry.log2_mcycle_period, log2_bundles_per_mcycle),
+        case.id .. ": forest-assembled overflow window differs"
+    )
+end
+
+-- This fixture starts at a custom uarch PC. Capturing its tail resets that PC, so the CLI
+-- correctly refuses to deliver an input against the old boundary hash. Exercise the exceptional
+-- transition explicitly here, then check that rejection reuses the saved near-limit tail.
+local function check_near_limit_uarch_tail(case)
+    local machine <close> = cartesi.machine(artifact_dir .. "/" .. case.template)
+    local initial_root_hash = machine:get_root_hash()
+    local initial_mcycle = machine:read_reg("mcycle")
+    local tail = machine:collect_uarch_cycle_root_hashes(cartesi.MCYCLE_MAX, 0).hashes
+    local revert_root_hash = machine:get_root_hash()
+    assert(revert_root_hash ~= initial_root_hash, "custom uarch reset did not change the boundary")
+    assert(machine:read_reg("mcycle") == initial_mcycle, "tail collection advanced mcycle")
+    assert(#tail == cartesi.UARCH_CYCLE_MAX, "tail did not halt at the last valid uarch cycle")
+    assert(tail[#tail] == revert_root_hash, "tail does not end at the new boundary")
+
+    local input = filesystem.read_file(artifact_dir .. "/" .. case.inputs[1])
+    machine:send_cmio_response(cartesi.HTIF_YIELD_REASON_ADVANCE_STATE, input, revert_root_hash)
+    local period = 1 << case.geometry.log2_mcycle_period
+    local window_start = initial_mcycle + case.geometry.mcycle_period_index * period
+    assert(machine:run(window_start) == cartesi.BREAK_REASON_REACHED_TARGET_MCYCLE)
+    local log2_bundle = case.geometry.log2_bundle_uarch_cycle_count
+    local collected = machine:collect_uarch_cycle_root_hashes(window_start + period, log2_bundle, tail)
+    assert(collected.break_reason == cartesi.BREAK_REASON_YIELDED_MANUALLY)
+    assert(machine:read_reg("htif_tohost_reason") == cartesi.HTIF_YIELD_MANUAL_REASON_RX_REJECTED)
+    assert(machine:read_reg("mcycle") == window_start + 4, "input rejected at the wrong mcycle")
+
+    local log2_span = cartesi.ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE
+    local frontier = hash_tree.frontier(log2_span, "keccak256")
+    for i = 1, #tail - 1 do
+        hash_tree.frontier_push_back(frontier, tail[i])
+    end
+    hash_tree.frontier_pad_back(frontier, tail[#tail - 1], (1 << log2_span) - #tail)
+    hash_tree.frontier_push_back(frontier, revert_root_hash)
+    local last_group = #collected.mcycle_hash_offsets - 1
+    assert(
+        uarch_mcycle_root(collected, last_group, log2_span - log2_bundle) == hash_tree.frontier_get_root_hash(frontier),
+        "rejected input did not reuse the near-limit tail"
     )
 end
 
@@ -337,6 +435,9 @@ for _, case in ipairs(manifest) do
     end
     if results[case.id] and case.oracle == "uarch-mcycle-overflow" then
         check_uarch_mcycle_overflow(case)
+    end
+    if results[case.id] and case.oracle == "near-limit-uarch-tail" then
+        check_near_limit_uarch_tail(case)
     end
     if results[case.id] then
         io.stderr:write(string.format("%s: passed\n", case.id))

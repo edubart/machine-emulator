@@ -820,7 +820,7 @@ CM_API cm_error cm_write_console_input(cm_machine *m, const uint8_t *data, uint6
 /// \param break_reason Receives reason for returning (can be NULL). Set to CM_BREAK_REASON_FAILED on failure.
 /// \returns 0 for success, non zero code for error.
 /// \details You may want to receive cmio requests depending on the run break reason. The break reason precedence is
-/// cycle overflow, halt, manual yield, then reaching the target mcycle.
+/// halt, manual yield, cycle overflow, then reaching the target mcycle.
 CM_API cm_error cm_run(cm_machine *m, uint64_t mcycle_end, cm_break_reason *break_reason);
 
 /// \brief Collects state root hashes after every 2^\p log2_mcycle_period machine cycles
@@ -890,6 +890,23 @@ CM_API cm_error cm_run(cm_machine *m, uint64_t mcycle_end, cm_break_reason *brea
 CM_API cm_error cm_collect_mcycle_root_hashes(cm_machine *m, uint64_t mcycle_end, uint64_t log2_mcycle_period,
     uint64_t mcycle_phase, int32_t log2_bundle_mcycle_count, const char *previous_partial_bundle, const char **result);
 
+/// \brief Collects the state root hashes covered by one bundle of periodic samples taken from the current mcycle.
+/// \param m Pointer to a non-empty machine object (holds a machine instance).
+/// \param bundle_offset Zero-based offset of the bundle among the consecutive bundles starting at the current mcycle.
+/// \param log2_mcycle_period Log base 2 of the number of machine cycles between sampling points.
+/// \param log2_bundle_mcycle_count Log base 2 of the number of state root hashes covered by each bundle.
+/// \param result Receives a JSON array of 2^\p log2_bundle_mcycle_count base64-encoded state root hashes as a string,
+/// guaranteed to remain valid only until the next CM_API function is called from the same thread.
+/// \returns 0 for success, non zero code for error.
+/// \detail Each bundle spans 2^(\p log2_mcycle_period + \p log2_bundle_mcycle_count) machine cycles. Execution first
+/// advances to the start of the bundle, then collects a state root hash after every 2^\p log2_mcycle_period machine
+/// cycles. If execution reaches a fixed point before the bundle is complete, the remaining positions are filled with
+/// copies of the fixed-point state root hash, following the same rules as cm_collect_mcycle_root_hashes(). A machine
+/// already at a fixed point returns copies of its state root hash and remains unchanged. Execution continues through
+/// automatic yields and ignores console I/O errors.
+CM_API cm_error cm_collect_mcycle_bundle(cm_machine *m, uint64_t bundle_offset, uint64_t log2_mcycle_period,
+    int32_t log2_bundle_mcycle_count, const char **result);
+
 /// \brief Runs the machine microarchitecture until CM_REG_UARCH_CYCLE reaches uarch_cycle_end or it halts.
 /// \param m Pointer to a non-empty machine object (holds a machine instance).
 /// \param uarch_cycle_end End micro cycle value.
@@ -957,6 +974,25 @@ CM_API cm_error cm_run_uarch(cm_machine *m, uint64_t uarch_cycle_end, cm_uarch_b
 CM_API cm_error cm_collect_uarch_cycle_root_hashes(cm_machine *m, uint64_t mcycle_end,
     int32_t log2_bundle_uarch_cycle_count, const char *revert_uarch_tail, const char **result);
 
+/// \brief Collects the state root hashes covered by one bundle of uarch cycles of the current mcycle.
+/// \param m Pointer to a non-empty machine object (holds a machine instance).
+/// \param bundle_offset Zero-based offset of the bundle among the 2^(CM_ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE -
+/// \p log2_bundle_uarch_cycle_count) bundles of the mcycle.
+/// \param log2_bundle_uarch_cycle_count Log base 2 of the number of state root hashes covered by the bundle.
+/// \param revert_uarch_tail Same as in cm_collect_uarch_cycle_root_hashes() (can be NULL).
+/// \param result Receives a JSON array of 2^\p log2_bundle_uarch_cycle_count base64-encoded state root hashes as a
+/// string, guaranteed to remain valid only until the next CM_API function is called from the same thread.
+/// \returns 0 for success, non zero code for error.
+/// \detail The mcycle expands to 2^CM_ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE state root hashes, one after each uarch
+/// cycle. Once the uarch halts, its state root hash repeats up to the final position, which holds the state root hash
+/// after the uarch reset, following the same rules as cm_collect_uarch_cycle_root_hashes() without bundling. The
+/// bundle covers the positions starting at \p bundle_offset * 2^\p log2_bundle_uarch_cycle_count.
+///
+/// The machine is left as cm_collect_uarch_cycle_root_hashes() leaves it with \p mcycle_end set to the mcycle
+/// following the current one. In particular, a machine already at a fixed point remains unchanged.
+CM_API cm_error cm_collect_uarch_cycle_bundle(cm_machine *m, uint64_t bundle_offset,
+    int32_t log2_bundle_uarch_cycle_count, const char *revert_uarch_tail, const char **result);
+
 /// \brief Resets the entire microarchitecture state to pristine values.
 /// \param m Pointer to a non-empty machine object (holds a machine instance).
 /// \returns 0 for success, non zero code for error.
@@ -986,14 +1022,15 @@ CM_API cm_error cm_receive_cmio_request(const cm_machine *m, uint8_t *cmd, uint1
 /// \param data Response data to send.
 /// \param length Length of response data.
 /// \param revert_root_hash Machine root hash to revert to in case the response is eventually rejected.
-/// Required for advance-state responses, and only then recorded in the machine state. It must be the
-/// root hash of the machine itself, and the machine must be waiting on an rx-accepted manual yield,
-/// both checked before any state changes. Other responses (inspect-state queries and GIO responses)
-/// refuse it, so it must be NULL.
+/// For advance-state responses, required to match the machine root hash when an rx-accepted manual
+/// yield is pending, and ignored otherwise. Other responses (inspect-state queries and GIO responses)
+/// require NULL. Validation happens before delivery, including when data exceeds the rx buffer;
+/// validation errors leave the machine unchanged. Recorded only for advance-state delivery.
 /// \returns 0 for success, non zero code for error.
-/// \details This method should only be called as a response to cmio requests with manual yield command,
-/// where the reason is either accepted or a GIO request, may fail otherwise.
-CM_API cm_error cm_send_cmio_response(cm_machine *m, uint16_t reason, const uint8_t *data, uint64_t length,
+/// \details After validation, the response is a no-op if no manual yield is pending, its data
+/// exceeds the rx buffer, or an advance-state response finds a yield other than rx-accepted.
+/// These no-ops match the logged transition and leave the machine state unchanged.
+CM_API cm_error cm_send_cmio_response(cm_machine *m, uint16_t reason, const uint8_t *data, uint32_t length,
     const cm_hash *revert_root_hash);
 
 // ------------------------------------
@@ -1048,7 +1085,7 @@ CM_API cm_error cm_log_reset_uarch(cm_machine *m, int32_t log_type, const char *
 /// is not waiting on a manual yield, when an advance-state response finds the machine yielded with
 /// a reason other than rx-accepted (e.g., it rejected an input or threw an exception), or when the
 /// response data does not fit in the rx buffer.
-CM_API cm_error cm_log_send_cmio_response(cm_machine *m, uint16_t reason, const uint8_t *data, uint64_t length,
+CM_API cm_error cm_log_send_cmio_response(cm_machine *m, uint16_t reason, const uint8_t *data, uint32_t length,
     const cm_hash *revert_root_hash, int32_t log_type, const char **log);
 
 // ------------------------------------
@@ -1092,7 +1129,7 @@ CM_API cm_error cm_verify_reset_uarch(const cm_machine *m, const cm_hash *root_h
 /// \param revert_root_hash The revert root hash recorded when the log was generated.
 /// \param obtained_root_hash Receives the state hash after response, for the caller to check (can be NULL).
 /// \returns 0 for success, non zero code for error.
-CM_API cm_error cm_verify_send_cmio_response(const cm_machine *m, uint16_t reason, const uint8_t *data, uint64_t length,
+CM_API cm_error cm_verify_send_cmio_response(const cm_machine *m, uint16_t reason, const uint8_t *data, uint32_t length,
     const cm_hash *root_hash_before, const char *log, const cm_hash *revert_root_hash, cm_hash *obtained_root_hash);
 
 // ------------------------------------

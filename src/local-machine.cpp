@@ -104,6 +104,11 @@ mcycle_root_hashes local_machine::do_collect_mcycle_root_hashes(uint64_t mcycle_
         log2_bundle_mcycle_count, previous_partial_bundle);
 }
 
+machine_hashes local_machine::do_collect_mcycle_bundle(uint64_t bundle_offset, uint64_t log2_mcycle_period,
+    int32_t log2_bundle_mcycle_count) {
+    return get_machine()->collect_mcycle_bundle(bundle_offset, log2_mcycle_period, log2_bundle_mcycle_count);
+}
+
 interpreter_break_reason local_machine::do_log_step(uint64_t mcycle_count, const std::string &filename) {
     return m_machine->log_step(mcycle_count, filename);
 }
@@ -222,6 +227,11 @@ uarch_cycle_root_hashes local_machine::do_collect_uarch_cycle_root_hashes(uint64
     return get_machine()->collect_uarch_cycle_root_hashes(mcycle_end, log2_bundle_uarch_cycle_count, revert_uarch_tail);
 }
 
+machine_hashes local_machine::do_collect_uarch_cycle_bundle(uint64_t bundle_offset,
+    int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) {
+    return get_machine()->collect_uarch_cycle_bundle(bundle_offset, log2_bundle_uarch_cycle_count, revert_uarch_tail);
+}
+
 address_range_descriptions local_machine::do_get_address_ranges() const {
     return get_machine()->get_address_ranges();
 }
@@ -230,12 +240,12 @@ machine_cmio_request local_machine::do_receive_cmio_request(std::span<uint8_t> d
     return get_machine()->receive_cmio_request(data);
 }
 
-void local_machine::do_send_cmio_response(uint16_t reason, const unsigned char *data, uint64_t length,
+void local_machine::do_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     std::optional<const_machine_hash_view> revert_root_hash) {
     get_machine()->send_cmio_response(reason, data, length, revert_root_hash);
 }
 
-access_log local_machine::do_log_send_cmio_response(uint16_t reason, const unsigned char *data, uint64_t length,
+access_log local_machine::do_log_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     const_machine_hash_view revert_root_hash, const access_log::type &log_type) {
     return get_machine()->log_send_cmio_response(reason, data, length, revert_root_hash, log_type);
 }
@@ -267,7 +277,7 @@ machine_hash local_machine::do_verify_reset_uarch(const_machine_hash_view root_h
     return machine::verify_reset_uarch(root_hash_before, log);
 }
 
-machine_hash local_machine::do_verify_send_cmio_response(uint16_t reason, const unsigned char *data, uint64_t length,
+machine_hash local_machine::do_verify_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     const_machine_hash_view root_hash_before, const access_log &log, const_machine_hash_view revert_root_hash) const {
     return machine::verify_send_cmio_response(reason, data, length, root_hash_before, log, revert_root_hash);
 }

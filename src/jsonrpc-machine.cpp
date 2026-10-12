@@ -691,6 +691,14 @@ mcycle_root_hashes jsonrpc_machine::do_collect_mcycle_root_hashes(uint64_t mcycl
     return result;
 }
 
+machine_hashes jsonrpc_machine::do_collect_mcycle_bundle(uint64_t bundle_offset, uint64_t log2_mcycle_period,
+    int32_t log2_bundle_mcycle_count) {
+    machine_hashes result;
+    request("machine.collect_mcycle_bundle", std::tie(bundle_offset, log2_mcycle_period, log2_bundle_mcycle_count),
+        result);
+    return result;
+}
+
 interpreter_break_reason jsonrpc_machine::do_log_step(uint64_t mcycle_count, const std::string &filename) {
     interpreter_break_reason result = interpreter_break_reason::failed;
     request("machine.log_step", std::tie(mcycle_count, filename), result);
@@ -925,6 +933,15 @@ uarch_cycle_root_hashes jsonrpc_machine::do_collect_uarch_cycle_root_hashes(uint
     return result;
 }
 
+machine_hashes jsonrpc_machine::do_collect_uarch_cycle_bundle(uint64_t bundle_offset,
+    int32_t log2_bundle_uarch_cycle_count, const machine_hashes &revert_uarch_tail) {
+    machine_hashes result;
+    const base64_machine_hashes b64_revert_uarch_tail(revert_uarch_tail);
+    request("machine.collect_uarch_cycle_bundle",
+        std::tie(bundle_offset, log2_bundle_uarch_cycle_count, b64_revert_uarch_tail), result);
+    return result;
+}
+
 address_range_descriptions jsonrpc_machine::do_get_address_ranges() const {
     address_range_descriptions result;
     request("machine.get_address_ranges", std::tie(), result);
@@ -953,7 +970,7 @@ machine_cmio_request jsonrpc_machine::do_receive_cmio_request(std::span<uint8_t>
             !data.empty() ? std::span<const uint8_t>{data.first(result.available_length)} : std::span<const uint8_t>{}};
 }
 
-void jsonrpc_machine::do_send_cmio_response(uint16_t reason, const unsigned char *data, uint64_t length,
+void jsonrpc_machine::do_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     std::optional<const_machine_hash_view> revert_root_hash) {
     bool result = false;
     std::string b64 = cartesi::encode_base64(std::span<const unsigned char>{data, length});
@@ -965,7 +982,7 @@ void jsonrpc_machine::do_send_cmio_response(uint16_t reason, const unsigned char
     }
 }
 
-access_log jsonrpc_machine::do_log_send_cmio_response(uint16_t reason, const unsigned char *data, uint64_t length,
+access_log jsonrpc_machine::do_log_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     const_machine_hash_view revert_root_hash, const access_log::type &log_type) {
     not_default_constructible<access_log> result;
     auto b64_revert_root_hash = encode_base64(revert_root_hash);
@@ -1019,7 +1036,7 @@ machine_hash jsonrpc_machine::do_verify_reset_uarch(const_machine_hash_view root
     return result;
 }
 
-machine_hash jsonrpc_machine::do_verify_send_cmio_response(uint16_t reason, const unsigned char *data, uint64_t length,
+machine_hash jsonrpc_machine::do_verify_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     const_machine_hash_view root_hash_before, const access_log &log, const_machine_hash_view revert_root_hash) const {
     machine_hash result;
     std::string b64_data = cartesi::encode_base64(std::span<const unsigned char>{data, length});

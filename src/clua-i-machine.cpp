@@ -340,6 +340,27 @@ static const nlohmann::json &clua_get_field_schema(lua_State *L, const std::stri
     return clua_resolve_type_schema(L, schema.at(field_name).template get<std::string_view>(), user_schema_dict);
 }
 
+/// \brief Resolves the schema of an array item.
+/// \details A string-valued "items" applies to every item. An array-valued "items" describes
+/// a fixed-length tuple and applies each type name to the item in the corresponding position.
+static const nlohmann::json &clua_get_array_item_schema(lua_State *L, const std::size_t index,
+    const nlohmann::json &schema, const nlohmann::json &user_schema_dict) {
+    static const nlohmann::json empty_schema;
+    if (!schema.contains("items")) {
+        return empty_schema;
+    }
+    const auto &items = schema.at("items");
+    const auto &item = items.is_array() ? items.at(index) : items;
+    return clua_resolve_type_schema(L, item.template get<std::string_view>(), user_schema_dict);
+}
+
+/// \brief Rejects arrays whose length differs from a fixed-length tuple schema.
+static void clua_check_array_schema_size(const std::size_t size, const nlohmann::json &schema) {
+    if (schema.contains("items") && schema.at("items").is_array() && schema.at("items").size() != size) {
+        throw std::runtime_error{"array length does not match tuple schema"};
+    }
+}
+
 static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx, const nlohmann::json &schema,
     const nlohmann::json &user_schema_dict, int ctxidx) {
     nlohmann::json &j = *clua_push_new_managed_toclose_ptr(L, nlohmann::json(), ctxidx);
@@ -349,10 +370,12 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
             const int64_t len = clua_get_array_table_len(L, idx);
             if (len >= 0) { // array
                 j = nlohmann::json::array();
-                const auto &field_schema = clua_get_field_schema(L, "items", schema, user_schema_dict);
+                clua_check_array_schema_size(static_cast<std::size_t>(len), schema);
                 for (int64_t i = 1; i <= len; ++i) {
                     lua_geti(L, idx, i);
-                    j.push_back(clua_push_managed_toclose_json_ref(L, -1, field_schema, user_schema_dict, ctxidx));
+                    const auto &item_schema =
+                        clua_get_array_item_schema(L, static_cast<std::size_t>(i - 1), schema, user_schema_dict);
+                    j.push_back(clua_push_managed_toclose_json_ref(L, -1, item_schema, user_schema_dict, ctxidx));
                     lua_pop(L, 2); // pop value, child j reference
                 }
             } else { // object
@@ -414,11 +437,13 @@ static void clua_push_json_value(lua_State *L, const nlohmann::json &j, const nl
     const nlohmann::json &user_schema_dict, int ctxidx) {
     switch (j.type()) {
         case nlohmann::json::value_t::array: {
-            const auto &field_schema = clua_get_field_schema(L, "items", schema, user_schema_dict);
+            clua_check_array_schema_size(j.size(), schema);
             lua_createtable(L, static_cast<int>(j.size()), 0);
             int64_t i = 1;
             for (auto it = j.begin(); it != j.end(); ++it, ++i) {
-                clua_push_json_value(L, *it, field_schema, user_schema_dict, ctxidx);
+                const auto &item_schema =
+                    clua_get_array_item_schema(L, static_cast<std::size_t>(i - 1), schema, user_schema_dict);
+                clua_push_json_value(L, *it, item_schema, user_schema_dict, ctxidx);
                 lua_rawseti(L, -2, i);
             }
             break;
@@ -1144,13 +1169,14 @@ static int machine_obj_index_send_cmio_response(lua_State *L) {
     size_t length{0};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const auto *data = reinterpret_cast<const unsigned char *>(luaL_checklstring(L, 3, &length));
+    luaL_argcheck(L, length <= UINT32_MAX, 3, "CMIO response data length exceeds uint32_t");
     cm_hash revert_root_hash{};
     const cm_hash *revert_root_hash_ptr = nullptr;
     if (!lua_isnoneornil(L, 4)) {
         clua_check_cm_hash(L, 4, &revert_root_hash);
         revert_root_hash_ptr = &revert_root_hash;
     }
-    if (cm_send_cmio_response(m.get(), reason, data, length, revert_root_hash_ptr) != 0) {
+    if (cm_send_cmio_response(m.get(), reason, data, static_cast<uint32_t>(length), revert_root_hash_ptr) != 0) {
         return luaL_error(L, "%s", cm_get_last_error_message());
     }
     return 0;
@@ -1164,11 +1190,13 @@ static int machine_obj_index_log_send_cmio_response(lua_State *L) {
     size_t length{0};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const auto *data = reinterpret_cast<const unsigned char *>(luaL_checklstring(L, 3, &length));
+    luaL_argcheck(L, length <= UINT32_MAX, 3, "CMIO response data length exceeds uint32_t");
     cm_hash revert_root_hash{};
     clua_check_cm_hash(L, 4, &revert_root_hash);
     const int log_type = static_cast<int>(luaL_optinteger(L, 5, 0));
     const char *log = nullptr;
-    if (cm_log_send_cmio_response(m.get(), reason, data, length, &revert_root_hash, log_type, &log) != 0) {
+    if (cm_log_send_cmio_response(m.get(), reason, data, static_cast<uint32_t>(length), &revert_root_hash, log_type,
+            &log) != 0) {
         return luaL_error(L, "%s", cm_get_last_error_message());
     }
     clua_fromjson(L, log, "AccessLog");
@@ -1222,6 +1250,22 @@ static int machine_obj_index_collect_mcycle_root_hashes(lua_State *L) {
     return 1;
 }
 
+/// \brief This is the machine:collect_mcycle_bundle() method implementation.
+/// \param L Lua state.
+static int machine_obj_index_collect_mcycle_bundle(lua_State *L) {
+    lua_settop(L, 4);
+    auto &m = clua_check<clua_managed_cm_ptr<cm_machine>>(L, 1);
+    const uint64_t bundle_offset = luaL_checkinteger(L, 2);
+    const uint64_t log2_mcycle_period = luaL_checkinteger(L, 3);
+    const auto log2_bundle_mcycle_count = static_cast<int32_t>(luaL_checkinteger(L, 4));
+    const char *result = nullptr;
+    if (cm_collect_mcycle_bundle(m.get(), bundle_offset, log2_mcycle_period, log2_bundle_mcycle_count, &result) != 0) {
+        return luaL_error(L, "%s", cm_get_last_error_message());
+    }
+    clua_fromjson(L, result, "Base64Array");
+    return 1;
+}
+
 /// \brief This is the machine:collect_uarch_cycle_root_hashes() method implementation.
 /// \param L Lua state.
 static int machine_obj_index_collect_uarch_cycle_root_hashes(lua_State *L) {
@@ -1236,6 +1280,23 @@ static int machine_obj_index_collect_uarch_cycle_root_hashes(lua_State *L) {
         return luaL_error(L, "%s", cm_get_last_error_message());
     }
     clua_fromjson(L, result, "UarchCycleRootHashes");
+    return 1;
+}
+
+/// \brief This is the machine:collect_uarch_cycle_bundle() method implementation.
+/// \param L Lua state.
+static int machine_obj_index_collect_uarch_cycle_bundle(lua_State *L) {
+    lua_settop(L, 4);
+    auto &m = clua_check<clua_managed_cm_ptr<cm_machine>>(L, 1);
+    const uint64_t bundle_offset = luaL_checkinteger(L, 2);
+    const auto log2_bundle_uarch_cycle_count = static_cast<int32_t>(luaL_checkinteger(L, 3));
+    const char *revert_uarch_tail = !lua_isnil(L, 4) ? clua_tojson(L, 4, -1, "Base64Array") : nullptr;
+    const char *result = nullptr;
+    if (cm_collect_uarch_cycle_bundle(m.get(), bundle_offset, log2_bundle_uarch_cycle_count, revert_uarch_tail,
+            &result) != 0) {
+        return luaL_error(L, "%s", cm_get_last_error_message());
+    }
+    clua_fromjson(L, result, "Base64Array");
     return 1;
 }
 
@@ -1345,14 +1406,15 @@ static int machine_obj_index_verify_send_cmio_response(lua_State *L) {
     size_t length{0};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const auto *data = reinterpret_cast<const unsigned char *>(luaL_checklstring(L, 3, &length));
+    luaL_argcheck(L, length <= UINT32_MAX, 3, "CMIO response data length exceeds uint32_t");
     cm_hash root_hash_before{};
     clua_check_cm_hash(L, 4, &root_hash_before);
     const char *log = clua_tojson(L, 5, -1, "AccessLog");
     cm_hash revert_root_hash{};
     clua_check_cm_hash(L, 6, &revert_root_hash);
     cm_hash obtained_root_hash{};
-    if (cm_verify_send_cmio_response(m.get(), reason, data, length, &root_hash_before, log, &revert_root_hash,
-            &obtained_root_hash) != 0) {
+    if (cm_verify_send_cmio_response(m.get(), reason, data, static_cast<uint32_t>(length), &root_hash_before, log,
+            &revert_root_hash, &obtained_root_hash) != 0) {
         return luaL_error(L, "%s", cm_get_last_error_message());
     }
     clua_push_cm_hash(L, &obtained_root_hash);
@@ -1368,11 +1430,26 @@ static int machine_obj_index_swap(lua_State *L) {
     return 0;
 }
 
+/// \brief Moves the machine into a new handle, leaving self as an empty local handle.
+/// \details The returned handle owns the machine and its cleanup policy, so closing self is harmless.
+/// \param L Lua state.
+static int machine_obj_index_move(lua_State *L) {
+    auto &m = clua_check<clua_managed_cm_ptr<cm_machine>>(L, 1);
+    auto &new_m = clua_push_to(L, clua_managed_cm_ptr<cm_machine>(nullptr));
+    if (cm_new(&new_m.get()) != 0) {
+        return luaL_error(L, "%s", cm_get_last_error_message());
+    }
+    std::swap(m.get(), new_m.get());
+    return 1;
+}
+
 /// \brief Contents of the machine object metatable __index table.
 static const auto machine_obj_index = cartesi::clua_make_luaL_Reg_array({
     {.name = "create", .func = machine_obj_index_create},
     {.name = "collect_mcycle_root_hashes", .func = machine_obj_index_collect_mcycle_root_hashes},
+    {.name = "collect_mcycle_bundle", .func = machine_obj_index_collect_mcycle_bundle},
     {.name = "collect_uarch_cycle_root_hashes", .func = machine_obj_index_collect_uarch_cycle_root_hashes},
+    {.name = "collect_uarch_cycle_bundle", .func = machine_obj_index_collect_uarch_cycle_bundle},
     {.name = "destroy", .func = machine_obj_index_destroy},
     {.name = "get_default_config", .func = machine_obj_index_get_default_config},
     {.name = "get_initial_config", .func = machine_obj_index_get_initial_config},
@@ -1392,6 +1469,7 @@ static const auto machine_obj_index = cartesi::clua_make_luaL_Reg_array({
     {.name = "log_send_cmio_response", .func = machine_obj_index_log_send_cmio_response},
     {.name = "log_step", .func = machine_obj_index_log_step},
     {.name = "log_step_uarch", .func = machine_obj_index_log_step_uarch},
+    {.name = "move", .func = machine_obj_index_move},
     {.name = "read_console_output", .func = machine_obj_index_read_console_output},
     {.name = "read_memory", .func = machine_obj_index_read_memory},
     {.name = "read_reg", .func = machine_obj_index_read_reg},

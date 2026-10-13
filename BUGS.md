@@ -54,13 +54,13 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-10 | Medium | CLI | `--load-config` ignores command-line fallbacks for missing fields: different machine and template hash | `cli-load-config-fallback` |
 | CM-11 | Medium | CLI | `--revert-mode=stored` silently undoes `--replace-memory-range`; printed initial hash is not the machine that runs | `cli-revert-stored-replace` |
 | CM-12 | Medium | Lua bindings | Nested JSON/table conversion overflows the Lua stack (heap buffer overflow) | `lua-json-stack-overflow` |
-| CM-13 | Medium | VirtIO | Cyclic virtqueue descriptor chain hangs the host forever | `virtio-descriptor-loop` *(test pending)* |
+| CM-13 | Medium | VirtIO | Cyclic virtqueue descriptor chain hangs the host forever | `virtio-descriptor-loop` |
 | CM-14 | Medium | VirtIO 9P | Guest can create symlinks pointing outside the shared directory and follow them on the host | — (code review) |
-| CM-15 | Medium | JSON-RPC | Deeply nested JSON request crashes the server | `jsonrpc-deep-nesting` *(test pending)* |
-| CM-16 | Medium | JSON-RPC | A batch containing `fork` keeps executing in the child: duplicated operations, 2^N servers | `jsonrpc-batch-fork` *(test pending)* |
-| CM-17 | Medium | JSON-RPC | Unbounded allocation sized by request (`read_memory`, `read_virtual_memory`, `read_console_output`) | `jsonrpc-unbounded-read` *(test pending)* |
-| CM-18 | Medium | JSON-RPC | Fault-generated SIGBUS makes the server spin forever | `jsonrpc-sigbus-spin` *(test pending)* |
-| CM-19 | Medium | C API | `const` queries (`cm_get_root_hash`, `cm_get_proof`) mutate shared state without synchronization | `const-api-thread-safety` *(test pending)* |
+| CM-15 | Medium | JSON-RPC | Deeply nested JSON request crashes the server | `jsonrpc-deep-nesting` |
+| CM-16 | Medium | JSON-RPC | A batch containing `fork` keeps executing in the child: duplicated operations, 2^N servers | `jsonrpc-batch-fork` |
+| CM-17 | Medium | JSON-RPC | Unbounded allocation sized by request (`read_memory`, `read_virtual_memory`, `read_console_output`) | `jsonrpc-unbounded-read` |
+| CM-18 | Medium | JSON-RPC | Fault-generated SIGBUS makes the server spin forever | `jsonrpc-sigbus-spin` |
+| CM-19 | Medium | C API | `const` queries (`cm_get_root_hash`, `cm_get_proof`) mutate shared state without synchronization | `const-api-thread-safety` |
 | CM-L* | Low | various | Lower-severity defects (see the last section) | see table |
 
 ---
@@ -420,5 +420,5 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-L14 | CLI | `--print-uarch-cycle-root-hashes=count:N` without `start:` prints nothing for a machine loaded past mcycle N | `src/cartesi-machine.lua:2432`, `3831` | `cli-uarch-hashes-count` *(test pending)* |
 | CM-L15 | CLI | `parse_ipv4` shifts the second octet by 18 instead of 16 (`127.1.2.3` → `127.4.2.3`) | `src/cartesi-machine.lua:1370` | `cli-parse-ipv4` *(test pending)* |
 | CM-L16 | CLI (gdb stub) | GDB `M` (memory write) replies are inverted: error on success, OK on failure | `src/cartesi/gdbstub.lua:412` | `gdbstub-write-reply` *(test pending)* |
-| CM-L17 | JSON-RPC | `delay_next_request` accepts any delay and freezes the single-threaded server for all clients | `src/jsonrpc-remote-machine.cpp:1058`, `1959` | `jsonrpc-delay-unbounded` *(test pending)* |
-| CM-L18 | JSON-RPC client | Spawned servers inherit the client's sockets (no close-on-exec); concurrent spawns on fixed ports can fail with `EADDRINUSE` | `posix_spawnp` without file actions; Asio sockets without `SOCK_CLOEXEC` | `spawn-socket-leak` *(test pending)* |
+| CM-L17 | JSON-RPC | `delay_next_request` accepts any delay and freezes the single-threaded server for all clients | `src/jsonrpc-remote-machine.cpp:1058`, `1959` | `jsonrpc-delay-unbounded` |
+| CM-L18 | JSON-RPC client | Spawned servers inherit the client's sockets (no close-on-exec); concurrent spawns on fixed ports can fail with `EADDRINUSE` | `posix_spawnp` without file actions; Asio sockets without `SOCK_CLOEXEC` | `spawn-socket-leak` |

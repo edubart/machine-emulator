@@ -21,6 +21,8 @@ trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 skip() { echo "SKIP: $*"; exit 77; }
+# A broken build must not look like "bug present" (exit 1): report it as a test error.
+build_failed() { echo "ERROR: failed to build $*"; exit 2; }
 need_lib() { [ -f "$SRC_DIR/libcartesi.so" ] || skip "build the emulator first (make)"; }
 need_riscv() { command -v "${RISCV_PREFIX}gcc" >/dev/null 2>&1 || skip "missing ${RISCV_PREFIX}gcc"; }
 need_images() { [ -f "$IMAGES_DIR/linux.bin" ] && [ -f "$IMAGES_DIR/rootfs.ext2" ] || skip "missing test images (make -C tests images)"; }
@@ -35,12 +37,12 @@ build_cxx_static() { # out src...
     out="$1"; shift
     "$CXX" -std=gnu++23 -O1 -g -fno-strict-aliasing -fno-strict-overflow -I"$SRC_DIR" -I"$REPO_DIR/third-party/ankerl" \
         -I"$REPO_DIR/third-party/llvm-flang-uint128" -I"$REPO_DIR/third-party/nlohmann-json" -D_FILE_OFFSET_BITS=64 \
-        "$@" -o "$WORK_DIR/$out" "$SRC_DIR/libcartesi.a" -lslirp -fopenmp
+        "$@" -o "$WORK_DIR/$out" "$SRC_DIR/libcartesi.a" -lslirp -fopenmp || build_failed "$out"
 }
 # Assemble a bare-metal RISC-V program linked at 0x80000000 into a raw binary
 build_rv() { # out.bin src...
     out="$1"; shift
     "${RISCV_PREFIX}gcc" -march=rv64gc -mabi=lp64d -nostdlib -nostartfiles -static -Wl,-Ttext=0x80000000 \
-        -Wl,--no-warn-rwx-segments "$@" -o "$WORK_DIR/${out%.bin}.elf"
-    "${RISCV_PREFIX}objcopy" -O binary "$WORK_DIR/${out%.bin}.elf" "$WORK_DIR/$out"
+        -Wl,--no-warn-rwx-segments "$@" -o "$WORK_DIR/${out%.bin}.elf" || build_failed "$out"
+    "${RISCV_PREFIX}objcopy" -O binary "$WORK_DIR/${out%.bin}.elf" "$WORK_DIR/$out" || build_failed "$out"
 }

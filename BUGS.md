@@ -71,6 +71,7 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-26 | Low | step logs / reproducibility guard | `cm_log_step` accepts unreproducible machines: logs that disagree with `cm_run`, non-atomic failures, process abort on a VirtIO queue notify | `log-step-unreproducible` |
 | CM-27 | Medium | JSON-RPC client / C API / Lua bindings | `cm_clone_empty` on a remote machine (Lua `remote(config)`, the documented remote recipe) forks a server whose handle has cleanup NOTHING and no timeout: every machine created this way, and every failed create, leaks a server process | `remote-clone-empty-leak` |
 | CM-28 | Medium | DTB / machine config / store-load | DTB unit addresses, `/aliases` targets and stored file names are formatted with the host process's C++ global locale: locale-dependent template root hash, snapshots unloadable across locales | `dtb-locale-dependence` |
+| CM-29 | Medium | store / load / hash tree | A saved dirty-page tree (`.dpt`) is trusted over a dense hash tree (`.dht`) that was never computed: the root hash stops depending on the range contents | `dpt-without-dht` |
 | CM-L* | Low | various | Lower-severity defects (see the last section) | see table |
 
 ---
@@ -912,6 +913,34 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 
 ---
 
+## CM-29 — A saved `.dpt` is trusted over a `.dht` that was never computed
+
+- **Severity:** Medium (upper end); High where templates are built with `dpt_filename` but no `dht_filename`.
+- **Area:** store / load / hash tree. **Category:** wrong root hash.
+- **Where:** `src/memory-address-range.cpp:72-75` (the dense hash tree is zero-filled when `dht_filename` is empty, while
+  the dirty-page tree is still loaded from `dpt_filename`); `src/dirty-page-tree.hpp:106-115` (persisted clean marks are
+  kept); `src/machine-address-ranges.cpp:172-182` and `207-221` (a missing `.dht` is silently recreated as zeros for
+  `SHARING_ALL` loads and when creating a machine in a directory); `src/hash-tree.cpp:389` and `502-527` (only dirty
+  pages are rehashed; the all-zero dense root is copied into the main tree).
+- **Problem:** when a range has a dirty-page tree with pages marked clean but its dense hash tree was never computed, no
+  page is rehashed and the range's node hash is 32 zero bytes. The root hash no longer depends on the range data:
+  different drive contents produce the same root hash, proofs are wrong, and no error is reported. The CLI help
+  (`src/cartesi-machine.lua:235-239`) states that omitting `dht_filename` makes "the hash tree ... be built from
+  scratch", which is not what happens when `dpt_filename` is given. Triggers: (a) `dpt_filename` without
+  `dht_filename`; (b) creating a machine in a directory from such a config; (c) a stored machine whose `.dht` was lost,
+  loaded with `SHARING_ALL` — after which every later load, including `SHARING_NONE`, is wrong as well.
+- **Evidence:** three different drive contents gave the same root hash `d847bc04…`; after deleting a stored drive's
+  `.dht`, `--load=dir,sharing:all --initial-hash` printed `0xd6b6c724…` instead of the stored `0xd34c04fc…`.
+  `cm_verify_hash_tree` returns false. Test: `tests/bugs/dpt-without-dht`.
+- **Scenario:** a template or snapshot built with this configuration publishes a root hash that does not commit to its
+  data; honest proofs for that state cannot be produced.
+- **Possible solution:** in the `memory_address_range` constructor, mark every page dirty when the dense hash tree root
+  is all zeros (validated: no correct root hash changes, `tests/lua/spec-backing-stores.lua` passes); additionally,
+  refuse (or reset the `.dpt`) instead of recreating a missing `.dht` as zeros next to a saved `.dpt`.
+- **Risks:** silently wrong commitments; directories already written by an unpatched build stay inconsistent.
+
+---
+
 ## Traceability of later findings
 
 Original audit IDs of the findings confirmed after the first draft, the `BUGS.md` entry that covers each, and the raw
@@ -942,6 +971,9 @@ reports in `tests/bugs/reports/` with the full evidence.
 | cli-hashes-1 | CM-L28 | Low | CLI | `uarch-hashes-print-reject` | `hunters/cli-hashes.md`, `verifiers/verify-final.md` |
 | cli-hashes-2 | CM-L29 | Low | Lua helper | `hash-tree-empty-data-root` | `hunters/cli-hashes.md`, `verifiers/verify-final.md` |
 | lua-lifecycle-2 | CM-L30 | Low | Lua bindings | `lua-converter-error-leak` | `hunters/lua-lifecycle.md`, `verifiers/verify-final.md` |
+| GAPS-1 | CM-29 | Medium (upper end) | store / load / hash tree | `dpt-without-dht` | `hunters/gaps.md`, `verifiers/verify-gaps.md` |
+| GAPS-2 | CM-L31 | Low | Lua helper | `evmu-empty-dynamic-array` | `hunters/gaps.md`, `verifiers/verify-gaps.md` |
+| GAPS-3 | CM-L32 | Low | backing stores | `readonly-flash-short-image` | `hunters/gaps.md`, `verifiers/verify-gaps.md` |
 
 Refuted or by design (not bugs): ROLLUP-FLOW-2 (documented and tested), R-1 revert hash check in
 `verify_send_cmio_response` (documented; mirrors the on-chain verifier).
@@ -982,3 +1014,5 @@ Refuted or by design (not bugs): ROLLUP-FLOW-2 (documented and tested), R-1 reve
 | CM-L28 | CLI | `--print-uarch-cycle-root-hashes` on a machine that reaches an rx-rejected manual yield outside cmio mode (e.g. a snapshot loaded mid-input) prints a fabricated post-rejection group: two entries equal to the revert root hash, the second labelled with an mcycle that never happens, instead of the canonical group (one entry per uarch cycle of the reverted machine, 43 in the test) that `cm_collect_uarch_cycle_root_hashes` with the real tail and `--uarch-cycle-computation-hash` use. Diagnostic output only | fixed `fake_revert_uarch_tail = {R, R}`, on the premise that a rejection "never happens outside cmio mode" (`src/cartesi-machine.lua:3838-3846`); emitted by `append_revert_uarch_tail_period` (`src/machine.cpp:2615-2625`) as documented in `src/cm.h:970-973` | `uarch-hashes-print-reject` |
 | CM-L29 | Lua helper (`cartesi.hash-tree`) | `get_data_root_hash("", log2_size)` returns `nil` instead of the pristine root, although the data "need not fill the tree"; the documented recipe then raises in `verify_splice` when the output NVRAM is empty (`string.unpack("z", …)` returns `""`). Fails closed: a valid empty value is rejected, nothing invalid is accepted | `src/cartesi/hash-tree.lua:45-68` (no leaves, so the pairing loop creates no parents and `:67` returns `nil`); recipe `doc/recipes/slice-calculator-output.lua:26`, `:36` | `hash-tree-empty-data-root` |
 | CM-L30 | Lua bindings | Every input rejected by a Lua conversion helper (`cartesi.fromjson`/`tojson`/`frombase64`/`fromhex`/`tobase64`/`tohex`, and machine methods that convert config tables) leaks its C++ exception object, about 400 bytes: `luaL_error` is called inside a C++ `catch`, and with Lua built as C its `longjmp` skips `__cxa_end_catch`. Unbounded growth for long-lived Lua services that validate untrusted input (the `doc/recipes/game-transport.lua:583` pattern); LeakSanitizer does not report it | `src/clua-cartesi.cpp:116-184` (also `cartesi_mod_new`, `:193`); `clua_tojson` and `clua_fromjson` (`src/clua-i-machine.cpp:616-618`, `:631-633`); also `:228-233`, `:1159-1161` | `lua-converter-error-leak` |
+| CM-L31 | Lua helper (`evmu`) | `evmu.decode_calldata` rejects valid calldata with empty dynamic arrays of dynamic elements (`bytes[]`, `string[]`, `(T,bytes)[]`): `last_offset` is never set ("calldata too long") | `src/cartesi/evmu.lua:732`, `821` | `evmu-empty-dynamic-array` |
+| CM-L32 | backing stores | A read-only flash drive whose image is shorter than the drive but ends on a page boundary is refused ("possible non zero partial page"); the writable variant is accepted | `src/os-mapped-memory.cpp:217-226` | `readonly-flash-short-image` |

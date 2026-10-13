@@ -10,7 +10,7 @@ Environment for all commands: `eval $(make -C /home/user/machine-emulator -s --n
 |----|-------|--------|----------|
 | DEVICES2-1 | The host API can turn on HTIF console getchar in a *reproducible* machine (`cm_write_reg(htif_iconsole)`, `cm_set_runtime_config(console.input_source)`). Afterwards `cm_run` returns host console bytes to the guest, while the uarch, `cm_log_step`/`cm_verify_step` and `cm_collect_mcycle_root_hashes` return "no character". So their root hashes diverge, and `cm_store` writes a directory that `cm_load` rejects | PROVEN | Low |
 | DEVICES2-R1 | Device / special-range MMIO matrix: 8 execution paths agree on every test, with per-mcycle root hashes compared | REJECTED (no divergence) | - |
-| DEVICES2-R2 | Guest-visible device semantics match the reference model built from the device sources in every recorded access | REJECTED (no deviation) | - |
+| DEVICES2-R2 | Guest-visible device semantics match the reference model built from the device sources (1203 records incl. 467 from random programs) | REJECTED (no deviation) | - |
 | DEVICES2-R3 | Console-output and automatic-yield breaks do not change the state. The fast path breaks on every putchar; uarch, step and collect never break | REJECTED (no divergence) | - |
 | DEVICES2-R4 | Sanitizer (ASan+UBSan) pass of the device paths | REJECTED (clean) | - |
 | DEVICES2-O1..O3 | Deterministic spec deviations that are consistent across paths. Noted, not reported | Observations | Low |
@@ -126,6 +126,9 @@ Guest programs, all generated (`gen.py`, `gen_vm.py`, `fuzz.py`):
   cm_create with input_source=from_buffer: TTY stdin is only supported in unreproducible machines
   cm_set_runtime_config(from_buffer) accepted; guest read fromhost=0x010000000000005b (host byte 'Z'+1=0x5b)
   ```
+  Full-shadow variant, checked from Lua: read the 0x8000-byte shadow, set the `htif_iconsole` word to 3, and
+  `write_memory(0, shadow)`. `read_reg("htif_iconsole")` then returns 3, and `cm_run` makes the guest read fromhost
+  `0x100000000000005`.
 - **Possible solution:** Enforce the invariant at runtime as well as at construction, and make the interactive accessor honour it.
   - `device_state_access::do_getchar` (or `machine::getchar`) returns `{-1, false}` when `!is_unreproducible()`. This mirrors `poll_external_interrupts`.
   - `machine::write_reg(reg::htif_iconsole, v)` and the full-shadow `write_memory` path reject the `HTIF_CONSOLE_CMD_GETCHAR` bit on reproducible machines.
@@ -138,16 +141,52 @@ Guest programs, all generated (`gen.py`, `gen_vm.py`, `fuzz.py`):
 ---
 
 ### DEVICES2-R1: Device / special-range MMIO matrix (REJECTED, no divergence)
-RESULTS_R1
+- Status: REJECTED (no divergence found). Area: devices / step-log / uarch / hash collection. Category: divergence.
+- Reproduce: `sh <SCRATCH>/work/devices2/run_matrix.sh` (all paths; tens of minutes on a loaded host; `quick` = path A + model check in ~20 s).
+- Evidence (actual runs; every line `RESULT: all paths agree`, i.e. identical root hash, 25 registers and result area in
+  every path, and identical **per-mcycle** root-hash sequences where listed):
+  | program | paths | per-mcycle sequences compared | outcome |
+  |---|---|---|---|
+  | `t_main` (639 tests, 21607 mcycles) | A B C(final) D(`DSTEP=256`, 85 verified logs) E F | B vs E: 21607 hashes | agree, root `dc6322fcc96bbdfc` |
+  | `t_plic` (46 tests, 1078 mcycles) | A B C D(`DSTEP=1`) E F | B vs C vs D vs E: 1078 hashes each | agree, root `6b7f067465d24ae4` |
+  | `t_vm` (51 tests, 1696 mcycles) | A B C D(`DSTEP=8`) E F | B vs C vs E: 1696 each | agree, root `0e4ecffb0a9a4700` |
+  | `small` (59 mcycles, PLIC preset) | A B C D E F **G H** | B vs C vs D vs E vs G vs H: 59 each; **69,398 uarch steps each logged with `cm_log_step_uarch` and accepted by `cm_verify_step_uarch`**, 59 `cm_verify_reset_uarch` | agree, root `7ca9e0ae33b8b9a1` |
+  | `console` x3 runtime configs (340 mcycles) | A B C D E F H | B vs C vs D vs E vs H: 340 each | agree, root `ea88f065bde954f3` (same for all 3 configs) |
+  | `fz1..fz3` random (≈5500 mcycles each) | A C(final) E F | - | agree, 157/157/153 records match the model |
+- What this rules out (for reproducible machines): accessor-specific differences in any device register access
+  (htif tohost/fromhost/ihalt/iconsole/iyield, clint mtimecmp/mtime/msip→mip, plic girqpend/girqsrvd and claim/complete
+  side effects incl. `ilog2`/`__builtin_clz` compiled for rv64i in the uarch), in PMA lookup for holes/sentinel and
+  for non-PMA ranges (shadow, shadow uarch, uarch RAM), in mock-range reconstruction (`make_mock_address_range` for
+  CLINT/PLIC/HTIF/memory in replay and uarch), in AMO/LR/SC/FP/compressed access to devices, in `success_and_serve_interrupts`
+  propagation from device writes (MSIP via sw/amoor.w/amoswap.w/sc.w/c.sw/fsw is taken exactly one instruction later in
+  every path), in the fetch path across PMA/page boundaries (DTB→RAM, RAM→hole), in the fetch cache with self-modifying
+  DTB code, and in stale-TLB behaviour when a RAM page is remapped to a device without `sfence.vma`.
 
 ### DEVICES2-R2: Device semantics vs. reference model (REJECTED, no deviation)
-RESULTS_R2
+- Status: REJECTED (no deviation). `check.py` compares 1203 records (639 + 46 + 51 directed, 467 random) with a
+  reference model written from the device sources and the RISC-V access/misalignment/PMA rules: `deviations from model: 0`
+  for every program. Highlights verified by execution: HTIF only 64-bit at offsets 0..0x20 (others: load access fault 5 /
+  store access fault 7; misaligned 4/6 take precedence), ihalt/iconsole/iyield read-only, unknown devices/commands
+  ignored without ack, automatic yield sets X and acks; CLINT msip 32-bit only (bit0 sets/clears MSIP, `ld/sd/sb/sh` fault),
+  mtimecmp/mtime 64-bit only, mtime read-only (= mcycle/8192 at the access), other offsets fault; PLIC 32-bit aligned only,
+  priorities 1..31 read 1, enabled reads 0xfffffffe (sign-extended by `lw`), claim returns highest pending id and masks it
+  until complete, complete of 0/32/-1 ignored, bit 40 of girqpend invisible; PMA array readable, never writable or
+  executable; shadow/TLB/shadow-uarch/uarch-RAM/holes/VirtIO window/addresses ≥ 2^56 fault on load/store/AMO/fetch;
+  CMIO rx read-only, rx/tx non-executable; DTB RWX; Sv39: PTE permission faults (12/13/15) take precedence over PMA
+  access faults (1/5/7), A/D bits are set on device pages too.
 
 ### DEVICES2-R3: Console-output / automatic-yield breaks (REJECTED, no divergence)
-RESULTS_R3
+- Status: REJECTED (no divergence). `console/prog.S` issues 40 HTIF putchars and 5 automatic yields, run with
+  `{"output_destination":"to_buffer","output_flush_mode":"every_char","output_buffer_size":4}`, `to_null`, and
+  `to_buffer` size 1 `when_full`. The fast path (A, B, E) breaks with `console_output` (and `yielded_automatically`)
+  while record/replay/uarch never break; the per-mcycle hash sequences of B, C, D, E, H are identical and the final root
+  is the same for all three console configurations (`ea88f065bde954f3`).
 
 ### DEVICES2-R4: Sanitizer pass (REJECTED, clean)
-RESULTS_R4
+- Status: REJECTED (clean). `cmp5_asan` (harness linked against `<SCRATCH>/asan/src/libcartesi.so`) ran `t_main`
+  (paths A, E, F), `t_vm` (A, E, F) and `t_plic` (A, D, E, F): no AddressSanitizer or UBSan report from the library; the
+  only reports were harness-side (leaked result buffers and a signed shift in the harness base64 decoder, since fixed).
+  The ASan path-A root for `t_main` equals the release one (`dc6322fcc96bbdfc`).
 
 ### Observations (Low, deterministic and identical in every path; not reported as findings)
 - **O1.** A guest store to `mtimecmp` always clears MTIP (`clint-address-range.cpp`). MTIP is re-evaluated only at the next RTC tick (up to 8191 mcycles later), even when the new `mtimecmp` is already ≤ mtime. The SiFive CLINT keeps MTIP asserted while `mtime >= mtimecmp`. This is a tick-based design and is identical in all paths. It is related to interp-priv-5.
@@ -157,3 +196,10 @@ RESULTS_R4
   - The PMA array is guest-readable and every write faults.
   - CMIO rx is read-only and both rx and tx are non-executable, even with X PTEs.
   - A 4-byte instruction straddling the DTB→RAM PMA boundary executes; one straddling RAM end faults with `mtval` = second half, `mepc` = start (correct per the privileged spec).
+
+## Files
+- Harness and generators: `<SCRATCH>/work/devices2/{cmp4.c,gen.py,gen_vm.py,fuzz.py,check.py,build.sh,run_matrix.sh}`
+- Programs and outputs: `t_main/`, `t_plic/`, `t_vm/`, `small/`, `console/`, `fz1..fz3/` (each with `prog.S`, `expect.json`, `out*.txt`)
+- DEVICES2-1 reproducer: `<SCRATCH>/work/devices2/getchar/run.sh` (+ `setrc.c`)
+- Note for re-runs on a loaded host: set `OMP_NUM_THREADS=1` (done in `run_matrix.sh`); the hash-tree OpenMP barrier
+  spin-waits made per-mcycle `cm_get_root_hash` ~10x slower under the shared load.

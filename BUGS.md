@@ -1,7 +1,7 @@
 # Cartesi Machine Emulator — Bug Report (v0.22.0)
 
 > **Status: work in progress.** This file is updated as the audit continues; entries marked *(test pending)* will get
-> their regression test in a later commit.
+> their regression test in a later commit. Raw hunter and verifier reports are in `tests/bugs/reports/`.
 
 ## Scope and method
 
@@ -397,6 +397,32 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 - **Possible solution:** internal locking for these entry points, or document that a machine object must not be used
   concurrently (even through `const` functions).
 - **Risks:** heap corruption in multi-threaded node code.
+
+## Additional confirmed findings (detailed entries in progress)
+
+These were confirmed by the independent verification pass after the entries above were written. Until their full
+entries are added here, see the listed reports in `tests/bugs/reports/` for problem, evidence, scenario, fix and risks.
+
+| Original ID | Severity (verifier) | Area | Test | Reports |
+|---|---|---|---|---|
+| ROLLUP-FLOW-1 | Critical | step logs / RISC Zero replay | `log-step-automatic-yield` | `hunters/rollup-flow.md`, `verifiers/verify-step.md` |
+| STEP-PROOF-1 (= HT-11) | High | hash tree / step logs | `step-log-padding-assert` | `hunters/step-proof.md`, `verifiers/verify-step.md` |
+| HT-1 (+ HT-4) | High | hash tree / stored machines | *(test pending)* | `hunters/hash-tree.md`, `verifiers/verify-hashtree.md` |
+| HT-3 (+ CONC-2, extends CM-08) | High | hash tree / page-hash cache, uarch-cycle hash collection | `shared-hash-tree-cache-pollution` | `hunters/hash-tree.md`, `verifiers/verify-hashtree.md`, `verifiers/verify-conc.md` |
+| DYNAMIC-1 | High | shadow TLB validation | *(test pending)* | `hunters/dynamic.md`, `verifiers/verify-dynamic.md` |
+| STEP-PROOF-5 (= HT-10) | Medium | hash tree / proofs | `proof-padding-stale` | `hunters/step-proof.md`, `verifiers/verify-step.md` |
+| ASSERTS-1 | Medium | uarch | `uarch-require-abort` | `hunters/asserts.md`, `verifiers/verify-asserts.md` |
+| HT-2 | Medium (root cause of CM-06's non-tampering cases) | hash tree / store | `stored-hash-tree-stale` | `verifiers/verify-hashtree.md`, `verifiers/verify-capi.md` |
+| ASSERTS-2 | Low (part of CM-02) | uarch-cycle hash collection | — | `hunters/asserts.md`, `verifiers/verify-asserts.md` |
+| REPRO-2 | Low | step logs / reproducibility guard | *(test pending)* | `hunters/repro-guards.md`, `verifiers/verify-repro.md` |
+| REPRO-1 | Low | reproducibility flag | *(test pending)* | `hunters/repro-guards.md`, `verifiers/verify-repro.md` |
+| REPRO-4 | Low | unreproducible WFI fast-forward | *(test pending)* | `hunters/repro-guards.md`, `verifiers/verify-repro.md` |
+| STEP-PROOF-4 | Low | CMIO response | `send-cmio-response-partial-update` | `hunters/step-proof.md`, `verifiers/verify-step.md` |
+| STEP-PROOF-3 | Low | access-log verification (UB) | — | `hunters/step-proof.md`, `verifiers/verify-step.md` |
+| HT-5, HT-6, HT-7, HT-8 | Low | hash tree | *(tests pending)* | `hunters/hash-tree.md`, `verifiers/verify-hashtree.md` |
+
+Refuted or by design (not bugs): ROLLUP-FLOW-2 (documented and tested), R-1 revert hash check in
+`verify_send_cmio_response` (documented; mirrors the on-chain verifier).
 
 ---
 

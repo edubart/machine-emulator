@@ -74,7 +74,7 @@ Work dir: `<SCRATCH>/work/portability/` (`<SCRATCH>` = `<SCRATCH>`)
     #6 execute_C_SDSP interpret.cpp:5503
     #10 machine::run machine.cpp:2221  /  #12 cm_run cm.cpp:737
   ```
-  Reproduce: `cd <SCRATCH>/work/portability/fuzzx && ./fuzz-cross crash-53671679624243069f3171ae9d97a628c31d523c` (or `fuzz-cross-asan` for the ASan report). `fuzz-cross2` drops TLB slots whose PMA lacks the R/W/X permission of their set and passes on the same input.
+  Reproduce: `cd <SCRATCH>/work/portability/fuzzx && ./fuzz-cross crash-53671679624243069f3171ae9d97a628c31d523c` (or `fuzz-cross-asan` for the ASan report). With `FILTER_TLB=1` the harness drops TLB slots whose PMA lacks the R/W/X permission of their set; the same input then passes all four comparisons, and so did all 551 inputs (400 seed-corpus files + 150 files of the corpus grown by the sanitized `fuzz-interpret` run): big `cm_run` == per-mcycle uarch == per-mcycle `cm_run` == single multi-cycle `log_step`+`verify_step`, i.e. no other divergence (`cross2.log`).
 
 ---
 
@@ -98,10 +98,10 @@ Work dir: `<SCRATCH>/work/portability/` (`<SCRATCH>` = `<SCRATCH>`)
 
 ### PORTABILITY-4: UB / uninitialized-memory scans (no finding)
 - Status: REJECTED (nothing found on deterministic paths)
-- GCC ASan+UBSan build (`<SCRATCH>/asan`, `-O1`, no `-fno-strict-overflow`, `_GLIBCXX_ASSERTIONS`): 266 tests + 150 random programs in run mode, tests/random in cmp (uarch C++ interpreter) mode: no runtime error.
+- GCC ASan+UBSan build (`<SCRATCH>/asan`, `-O1`, no `-fno-strict-overflow`, `_GLIBCXX_ASSERTIONS`): 266 tests + 150 random v1 + 60 random v2 programs in run mode, 9 tests + 8 v2 programs in cmp mode (uarch C++ interpreter under sanitizers): no runtime error.
 - Sanitized native ZK replay (`<SCRATCH>/work/portability/zkasan`, ZKARCHITECTURE code path, ASan+UBSan+`_GLIBCXX_ASSERTIONS`): 80 random-program logs, 266 test logs, 6 Linux logs: no report.
 - Clang-18 ASan+UBSan (+`-fsanitize=builtin` for `__builtin_clz/ctz(0)`, `float-divide-by-zero`, `local-bounds`) build of libcartesi (`<SCRATCH>/work/portability/v/clangsan`): 266 tests + 100 random v1 + 60 random v2 programs: no report.
 - libFuzzer `tests/fuzz/fuzz-interpret.cpp` (hostile registers/CSRs/page tables/TLB entries) on the clang ASan+UBSan build, seeded with 400 seed-corpus files, 25 minutes: 318,384 executions, 3,837 new units, 3,638 edges, no crash or sanitizer report (`<SCRATCH>/work/portability/fuzz/fuzz.log`).
-- valgrind memcheck (`--track-origins`) on cmp runs (interpret + uarch C++ + hashing): no uninitialised-value report.
+- valgrind memcheck (`--track-origins`) on cmp runs (interpret + uarch C++ + hashing): 20 random programs + the first 13 sampled test programs (`results/valgrind.txt`): no invalid access / uninitialised-value report.
 - Native `__int128` vs emulated `Fortran::common::Int128` (`<SCRATCH>/work/portability/u128/run.sh`): every soft-float op (f32/f64 add/sub/mul/div/sqrt/fma variants, min/max/cmp/class, all int<->float conversions, f32<->f64), MULH/MULHSU/MULHU expressions verbatim from interpret.cpp, `mul_u`, `divrem_u` (both the host `a % b` and the uarch/ZK `a - b*q` forms) and `sqrtrem_u`; 20M+ random/special inputs, GCC -O0/-O2, clang -O3, GCC and clang UBSan: 0 mismatches, 0 UB reports.
 - Static review notes (no defect): all signed shifts rely on C++20 semantics (all targets build with -std=c++23/gnu++23); signed arithmetic in interpret.cpp and uarch-step.cpp goes through `__builtin_*_overflow`; every `__builtin_clz` call is guarded (`ilog2` with constant masks, `plic ilog2(ipmask!=0)`, `uint32Log2(dataLength>0)`, soft-float `clz` handles 0); risc0 `__clzdi2(0)` relies on libgcc `__clzsi2(0)==32` but is never called with 0; masks are `enum : uint64_t` (no 32-bit `~` truncation, including on ILP32); `tlb_is_hit`'s `~(sizeof(T)-1)` is correct on ILP32; Solidity-converted files have at most one state access per statement (access-log order is compiler independent) and no unchecked raw arithmetic that could overflow; hashed state structs have no implicit padding; dirty-word sets are sorted before hashing (container iteration order cannot leak into hashes); interpreter `assert`s that are live only in the uarch/ZK builds (`assert_no_brk`, `get_highest_priority_irq_num`, soft-float `normalize`) were checked to be unreachable (mip/mie/mideleg are WARL-masked on every read).

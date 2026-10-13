@@ -1,7 +1,7 @@
 # Cartesi Machine Emulator — Bug Report (v0.22.0)
 
-> **Status:** emulator findings are verified and documented below. Findings from the on-chain Solidity step angle
-> (`cartesi/machine-solidity-step` PR #104) are still under independent verification and will be added when confirmed.
+> **Status:** final. All emulator findings below were confirmed by an independent verifier and have a regression test
+> unless stated otherwise. The on-chain Solidity step angle is summarized in its own section with per-finding verification status.
 > Raw hunter and verifier reports are in `tests/bugs/reports/`.
 
 ## Scope and method
@@ -994,6 +994,33 @@ references in all differential checks (runner, dispute proofs, Linux template, m
 | Not reachable | all other entries (Dave does not use JSON-RPC, fork, `cm_replace_memory_range`, multi-cycle `cm_log_step`, the RISC Zero replay, `CM_SHARING_CONFIG`, shared hash trees, virtual-memory APIs or VirtIO) |
 
 Details and file:line evidence in Dave: `tests/bugs/reports/hunters/dave-flows.md` and `tests/bugs/reports/verifiers/verify-dave.md`.
+
+---
+
+## On-chain Solidity step (machine-solidity-step PR #104)
+
+The Solidity step generated from this branch (`cartesi/machine-solidity-step` PR #104, v0.16.0-test2) was regenerated
+from these sources (byte-identical to the PR) and exercised with Foundry against logs produced by the official
+v0.22.0-test2 library (whose `UARCH_PRISTINE_STATE_HASH` matches the Solidity constant). Eight angles were hunted; most
+hypotheses were rejected with evidence (access-log consumption, CMIO data hashing and length tiers, `imcyclemax`
+saturation, revert-hash substitution, pristine replay of thousands of uarch steps, MetaStep leaf layout vs. the uarch
+collectors). The bug hunt was wound down before every finding received its independent verification; the table states
+the verification status of each.
+
+| ID | Severity | Component | Finding | Verification |
+|---|---|---|---|---|
+| SOL-ONCHAIN-1 | High (template precondition) | interface | `MetaStep` executes the uarch committed in the state, not `cm_run`: on-chain confirmation of CM-02 (and of CM-03's `set_index = 3` case, mirrored on-chain) | Confirmed (independent reproducer through the unmodified PR #104 `MetaStep`) |
+| SOL-ONCHAIN-3 | High | emulator | CM-21's padding assert aborts the multi-cycle step-log (ZK) prover but not the uarch/`MetaStep` path | Confirmed |
+| SOL-ONCHAIN-2 | Low | emulator | `collect_uarch_cycle_root_hashes`' partial uarch reset differs from the on-chain `UArchReset` for non-pristine uarch RAM (CM-L20) | Confirmed |
+| SOL-CONSTANTS-PINNING-1 | Medium | interface | The uarch pristine image/hash depends on the riscv toolchain used to build the uarch, and nothing pins or exposes it in the C API; a from-source node built with a different toolchain silently computes uarch resets the chain rejects (this audit's own local build reproduced the mismatch: `8c396c5e…` vs. the Solidity constant `fa022ea7…`) | Hunter-proven; not independently verified |
+| SOL-ONCHAIN-4 | Medium (as CM-24) | interface | Misaligned uarch pc: default C++ build aborts, Solidity reverts, `release=yes` C++ accepts — consistent with CM-24 (whose verifier already checked the on-chain revert) | Hunter-proven; covered by CM-24's verification |
+| SOL-ONCHAIN-5 | Critical (conditional, as CM-01) | interface | CM-01 on-chain: `MetaStep` follows per-mcycle uarch semantics, so coarse-chunked fast-path commitments lose under partial delegation | Not proven on-chain by the hunter; the emulator-side divergence is confirmed in CM-01 |
+| SOL-PROOF-CODEC-1 | Low | Solidity | `Memory.validateStrideLength` is off by one for the last 32-byte leaf of the address space (needs a non-pristine uarch) | Hunter-proven; not independently verified |
+| SOL-TRANSPILE-EQUIV-1 | Low | transpiler | `EmulatorCompat.writeTlbECALL` uses checked arithmetic (reverts on overflow) where `uarch-step.cpp` wraps, and omits the slot/set range check (CM-03 class) | Hunter-proven; not independently verified |
+| SOL-METASTEP-LAYOUT-1 | Low | emulator | `collect_uarch_cycle_root_hashes` throws for a uarch span that `MetaStep` defines (halting ECALL on uarch cycle 2^20−1 of a non-pristine uarch) | Hunter-proven; not independently verified |
+| SOL-CMIO-REVERT-1 | Low | interface | `revertRootHash` is bound neither by `SendCmioResponse.sol` nor by `log/verify_send_cmio_response`; only the caller binds it (the deployed Dave caller and the reference referee do) | Hunter-proven; documented behaviour |
+
+Reports: `tests/bugs/reports/solidity/`.
 
 ---
 

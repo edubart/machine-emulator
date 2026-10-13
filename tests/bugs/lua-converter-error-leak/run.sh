@@ -23,13 +23,15 @@ for c in capi_error fromjson tojson frombase64 fromhex; do
     rejected=$(timeout 60 env EXCOUNT_OUT="$WORK_DIR/count.txt" LD_PRELOAD="$WORK_DIR/excount.so" "$LUA" \
         "$TEST_DIR/cases.lua" "$c" "$N")
     rc=$?
-    [ "$rc" -eq 0 ] && [ "$rejected" = "$N" ] || { echo "ERROR: cases.lua $c failed (exit $rc, rejected '$rejected' of $N)"; exit 2; }
+    case "$rejected" in ''|*[!0-9]*) rc=2;; esac
+    [ "$rc" -eq 0 ] || { echo "ERROR: cases.lua $c failed (exit $rc)"; exit 2; }
     read -r allocated released <"$WORK_DIR/count.txt" || { echo "ERROR: no counts for $c"; exit 2; }
     leaked=$((allocated - released))
     printf "  %-11s rejected=%d  exceptions allocated=%5d released=%5d never released=%5d\n" "$c" "$rejected" \
         "$allocated" "$released" "$leaked"
     if [ "$c" = capi_error ]; then
         # control: the C API's own catch releases its exceptions; it also shows that the interposer sees them
+        [ "$rejected" -eq "$N" ] || { echo "ERROR: the control input was not rejected"; exit 2; }
         [ "$allocated" -gt 0 ] || skip "the interposer saw no C++ exception (libstdc++ not interposable here)"
         [ "$leaked" -eq 0 ] || { echo "ERROR: control leaked exceptions"; exit 2; }
     elif [ "$leaked" -gt 0 ]; then

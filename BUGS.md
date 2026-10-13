@@ -69,6 +69,8 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-24 | Medium | uarch | uarch `require()` is an `assert()`: a misaligned uarch access aborts the process, including static `cm_verify_step_uarch` | `uarch-require-abort` |
 | CM-25 | Medium | hash tree / proofs | Word-level proofs and node hashes in the power-of-two padding of a range are built from a stale page-cache entry | `proof-padding-stale` |
 | CM-26 | Low | step logs / reproducibility guard | `cm_log_step` accepts unreproducible machines: logs that disagree with `cm_run`, non-atomic failures, process abort on a VirtIO queue notify | `log-step-unreproducible` |
+| CM-27 | Medium | JSON-RPC client / C API / Lua bindings | `cm_clone_empty` on a remote machine (Lua `remote(config)`, the documented remote recipe) forks a server whose handle has cleanup NOTHING and no timeout: every machine created this way, and every failed create, leaks a server process | `remote-clone-empty-leak` |
+| CM-28 | Medium | DTB / machine config / store-load | DTB unit addresses, `/aliases` targets and stored file names are formatted with the host process's C++ global locale: locale-dependent template root hash, snapshots unloadable across locales | `dtb-locale-dependence` |
 | CM-L* | Low | various | Lower-severity defects (see the last section) | see table |
 
 ---
@@ -155,6 +157,43 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
   runs) prevents it. Also replace the assertion with `throw std::runtime_error{"uarch did not advance exactly one
   mcycle"}` as a last line of defence (validated: all variants return this error, the `release=yes` loop stops, the
   pristine control is unchanged); this throw happens after the uarch ran, so the machine is left modified.
+
+### Addendum to CM-02 — a uarch store to the `uarch_x0` shadow word is refused by the host but accepted by the step verifiers
+
+- **Severity:** Low as a separate item. It needs a custom uarch RAM image, CM-02's input class, and is another
+  host-only check in `machine::write_word` of the kind described in CM-23.
+- **Area:** uarch / uarch step verification. **Category:** divergence between the host uarch driver and the
+  verifiers / spec deviation (x0 not hardwired to zero).
+- **Where:** `readX` (`src/uarch-solidity-compat.hpp:91-94`), and its transpiled Solidity counterpart, returns the
+  `uarch_x0` shadow word (0x400018) for register 0. A uarch store to that word goes through `writeUint64`
+  (`src/uarch-step.cpp:68-72`) to the state access. On the host, `uarch_state_access` and `uarch_record_state_access`
+  call `machine::write_word` (`src/uarch-state-access.hpp:92-95`, `src/uarch-record-state-access.hpp:241-246`), which
+  forwards uarch shadow words to `write_reg` (`src/machine.cpp:1937-1945`), and `write_reg(uarch_x0)` throws "register
+  is read-only" (`:1362-1363`). The replay's `do_write_word` (`src/uarch-replay-state-access.hpp:359-362`) and the
+  Solidity `writeWord` only check the proof. The host also rejects a non-zero x0 at construction ("uarch x0 register
+  is corrupt", `src/machine.cpp:122-125`), so the intended semantics is a hardwired zero.
+- **Problem:** an `sd` to 0x400018 by uarch code aborts the step in `cm_run_uarch`, `cm_log_step_uarch` and the
+  uarch-cycle collectors, while `cm_verify_step_uarch` and the on-chain `UArchStep` accept it as an ordinary write: x0
+  becomes the stored value, and every later instruction that reads x0 sees it, including every `li`/`mv` idiom
+  (`addi rd, x0, imm`). The honest host therefore cannot log a uarch step that the chain accepts. By code reading, the
+  same host-only rejection applies to uarch stores to the big machine's `x0`, `mvendorid`/`marchid`/`mimpid` and
+  unknown shadow-register words (`src/machine.cpp:1045-1046`, `:1242-1247`, `:1928-1935`); these were not run. The
+  pristine uarch image never writes the uarch shadow, and guests cannot reach it (registered with `pmas = false`,
+  `src/machine-address-ranges.cpp:307-308`), so the case needs a template with a custom uarch RAM image.
+- **Evidence:** the hunter's PoC runs `sd` of 5 to 0x400018 followed by `add t2, x0, x0`: the host fails with
+  "register is read-only" at uarch cycle 5, while the Solidity `UArchStep` (mock access logs) halts with x0 = 5 and
+  t2 = 10. The verifier used real Merkle proofs: logs from a private build whose `write_reg(uarch_x0)` behaves like
+  the replay were judged by the official `libcartesi.so`, whose `cm_log_step_uarch` and `cm_run_uarch` refuse step 3
+  while its `cm_verify_step_uarch` accepted all 11 logged steps, the refused one and every later one included (final
+  x0 = 7 and t2 = 10, where RISC-V gives x0 = 0 and t2 = 3). Test: `uarch-x0-store`.
+- **Possible solution:** CM-02's pristine-uarch check makes the case unreachable. In the shared step, reject stores
+  to the uarch shadow range in `writeUint64` (`throwRuntimeError(a, "write to uarch shadow state")`) and, for full
+  parity, to the big-machine shadow words the host rejects. This restores host/verifier agreement without changing
+  any honest log, the pristine uarch image or its hash, but the transpiled `UArchStep.sol` must be redeployed (not
+  validated in a build). Hardwiring `readX(a, 0)` to 0 instead changes the access-log layout of every instruction that
+  reads x0, so it is a log-format and on-chain compatibility change.
+- **Risks:** as CM-02: where a non-canonical uarch template is accepted, an honest party cannot produce a uarch step
+  proof that the chain accepts.
 
 ## CM-03 — `WRITE_TLB` uarch ecall does not bound-check `set_index`
 
@@ -769,6 +808,110 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 
 ---
 
+## CM-27 — `cm_clone_empty` on a remote machine leaks the server it forks
+
+- **Severity:** Medium (lower end). The documented remote-machine recipe leaks one server process, holding a full
+  machine, per machine it creates. No hash, proof or consensus impact.
+- **Area:** JSON-RPC client / C API / Lua bindings. **Category:** resource leak / denial of service.
+- **Where:** `jsonrpc_machine::do_clone_empty` (`src/jsonrpc-machine.cpp:605-622`) forks the source server and wraps
+  the new address in `new jsonrpc_machine(fork_result.address)` (`:607`), which keeps the member defaults
+  `m_call{cleanup_call::nothing}` and `m_timeout{-1}` (`src/jsonrpc-machine.hpp:188-190`); the destructor shuts the
+  server down or destroys the machine only when `m_call` says so (`src/jsonrpc-machine.cpp:630-648`).
+  `cm_jsonrpc_fork_server`, in contrast, copies both settings from the source (`src/cm-jsonrpc.cpp:143-145`), as
+  documented in `src/cm-jsonrpc.h:89-92`. Reached from `cm_clone_empty` (`src/cm.cpp:569-581`) and from the Lua class
+  constructor `machine_meta_call` (`src/clua-i-machine.cpp:1506-1534`), i.e. `remote(config)` or `remote(dir)` on any
+  remote handle.
+- **Problem:** the object returned by `cm_clone_empty` on a remote machine is the only handle to a newly forked server
+  process, but `cm_delete` of it never shuts that server down, so the process and the machine it holds (RAM and
+  drives) outlive every handle. The source handle's SHUTDOWN/DESTROY policy covers only the source server; the fork is
+  a separate process. The clone also loses the source's timeout (−1, wait forever), so a stuck server hangs the caller
+  even when the source handle had a timeout. A `cm_create`/`cm_load` that fails on the clone leaks an empty server the
+  same way, because the caller can only `cm_delete` the object; in Lua every `remote(bad_config)` error does so
+  (`machine_meta_call` raises at `:1523-1524` with the new handle still at cleanup NOTHING). `cm_clone_empty`'s
+  documentation (`src/cm.h:459-468`) says nothing about cleanup or timeout, and `do_clone_empty`'s own error path
+  shuts the forked server down (`src/jsonrpc-machine.cpp:612-619`), which shows that the clone is meant to own it.
+- **Evidence:** the test spawns a server, sets SHUTDOWN and a 5000 ms timeout on it, then makes a `cm_clone_empty` +
+  `cm_create` object, a `cm_clone_empty` + failing `cm_create` object and a `cm_jsonrpc_fork_server` reference, and
+  deletes all of them. The clone reports `timeout=-1 cleanup=NOTHING` where the fork reports `timeout=5000
+  cleanup=SHUTDOWN`; afterwards the source and fork servers are gone, while both clone servers still answer (one of
+  them holding a machine). The hunter reproduced the leak through the Lua constructor and the verifier through the C
+  API, including the failed-create path. Test: `tests/bugs/remote-clone-empty-leak`.
+- **Scenario:** `doc/recipes/run-remote-config.lua:9-20`, the documented recipe for remote machines, connects with
+  `set_cleanup_call(SHUTDOWN)` ("shut it down automatically on exit") and then creates the machine with
+  `cartesi_jsonrpc_machine(config)`; `doc/recipes/run-rolling-calculator.lua:55` and
+  `doc/recipes/run-rolling-calculator-output-proofs.lua:66` load templates the same way. Each run leaves an orphan
+  `cartesi-jsonrpc-machine` process holding the machine. A long-lived Lua service or C API client that creates
+  machines this way leaks one server per machine, and one per failed create, until the host runs out of memory or
+  processes. The CLI (`src/cartesi-machine.lua:2735-2738`, `:2783`) and the test suites
+  (`tests/lua/machine-bind.lua:259-260`) use `fork_server`/`spawn_server` and are not affected.
+- **Possible solution:** in `do_clone_empty`, right after construction, call `clone->set_timeout(m_timeout);
+  clone->set_cleanup_call(cleanup_call::shutdown);`. Validated in a private build of `libcartesi_jsonrpc.so`: the clone
+  reports the source's timeout and SHUTDOWN, and all servers are gone after `cm_delete`. SHUTDOWN is preferable to
+  inheriting `m_call`: a source from `cm_jsonrpc_connect_server` has cleanup NOTHING and would still leak, and the
+  forked server exists only for the clone, as with `cm_jsonrpc_spawn_server`. Document the policy in `cm_clone_empty`.
+- **Risks:** if unfixed, remote recipes and tools leak server processes that each hold a full machine. The fix only
+  changes cleanup: code that relied on the forked server outliving its handle (unlikely, since its address is
+  reachable only through that handle) must opt out with `cm_jsonrpc_set_cleanup_call(CM_JSONRPC_NOTHING)`. No hash
+  changes.
+
+## CM-28 — The DTB and stored file names follow the host's C++ global locale: locale-dependent template root hash
+
+- **Severity:** Medium (low end). The same config silently produces a different template root hash and different
+  execution, and stored machines become unloadable across locales. It needs an in-process C++ host that installs a
+  digit-grouping global locale; no first-party or known downstream host does, and no attacker or guest can trigger it.
+- **Area:** DTB / machine config / store-load. **Category:** host-environment dependency of the root hash / divergence
+  / unloadable snapshots.
+- **Where:** three default-constructed `std::ostringstream`s format integers with `std::hex` under the C++ global
+  locale: `FDTBuilder::begin_node_num` (`src/fdt-builder.hpp:131-134`), which names every node with a unit address
+  (`clint`, `plic`, `htif`, `virtio`, `memory`, `fw_resv`, `pmem`, `uio`, `rx_buffer`, `tx_buffer`; `cpu@0` has a
+  single digit and is unaffected); the `/aliases` targets `/pmem@…` and `/uio@…` in `dtb_init`
+  (`src/dtb.cpp:209-210`, `:219-220`); and `machine_config::get_data_filename`/`get_dht_filename`/`get_dpt_filename`
+  (`src/machine-config.cpp:39-55`), used by `machine::store` (`src/machine.cpp:421-423`) and recomputed on load by
+  `adjust_ar_backing_store_config` (`src/machine-config.cpp:88-91`, through `adjust_backing_stores` at `:159`). The DTB
+  is written into the hashed DTB range at 0x7ff00000 when the machine is created (`machine::init_dtb_contents`,
+  `src/machine.cpp:287-295`).
+- **Problem:** libstdc++'s `num_put` applies the locale's digit grouping in every base, including `std::hex`. If the
+  process hosting libcartesi has called `std::locale::global(...)` with a grouping locale, the DTB gets
+  `clint@2,000,000`, `memory@80,000,000` and alias targets such as `/pmem@80,100,000` (en_US; `clint@2.000.000` under
+  de_DE). These are legal node-name characters, so the guest boots normally and nothing reports an error, but the
+  template root hash and every later state differ: a Linux boot halts at a different mcycle with a different final
+  hash. Stored file names change the same way (`0000000000000000-8,000.bin`); because load recomputes them with the
+  loader's locale, a directory stored under one locale cannot be loaded under the other ("unable to open backing
+  file"). The C locale alone (`setlocale`, `LANG`/`LC_ALL`) has no effect. `cm_jsonrpc_spawn_server` starts the server
+  with `posix_spawnp` (`src/jsonrpc-machine.cpp:485`) and the server never sets a locale, so an affected host
+  disagrees even with a server it spawned itself. The verifier audited every other formatting site on hashed or
+  persisted paths (`std::to_string`, nlohmann JSON, Boost.Asio endpoints, `snprintf`) and found them
+  locale-independent. libc++ also groups hex digits by code reading (not run).
+- **Evidence:** the verifier's reproducer toggles the C++ global locale between `cm_create_new` calls in one process,
+  using a synthetic grouping `numpunct` facet (no system locale data needed) and decoding the DTB structure block:
+  classic gives root `820e9b84…` with no invalid unit addresses; the grouping facet gives `f790c153…` (the same as
+  `en_US.UTF-8`) with 15 invalid unit addresses and every alias target grouped; `de_DE.UTF-8` gives `6c59d3a9…`;
+  `C.UTF-8` gives the classic hash. Directories stored under one locale fail to load under the other in both
+  directions. A Linux boot to halt with a labelled data drive shows the guest alias `/pmem@c0,000,000`, mcycle
+  57939550 and final hash `c1101e24…`, against `/pmem@c0000000`, 57849418 and `700b53de…` under the classic locale.
+  The hunter showed a local machine (`fd248585…`) and a JSON-RPC server it spawned (`623baeb6…`) disagreeing on the
+  same config in one en_US process. Test: `tests/bugs/dtb-locale-dependence`.
+- **Scenario:** a template-building, deployment or verification tool written in C++ (or a C++ program that embeds
+  Lua and loads `cartesi.so`) adopts the user locale with the common `std::locale::global(std::locale(""))` idiom
+  (Boost.Locale documents the same setup) and runs on a desktop with `LANG=en_US.UTF-8`. A template it builds has a
+  hash nobody can reproduce from the same config, and its snapshots cannot be loaded by the CLI, the JSON-RPC server
+  or a node, nor theirs by it. The CLI (Lua), `cartesi-jsonrpc-machine`, remote machines from any client, and Go,
+  Rust, Python, Node and C hosts never set the C++ global locale and are not affected. Loading a canonical template in
+  an affected host fails loudly (the file names differ), so the silent part is limited to creating machines from a
+  config.
+- **Possible solution:** imbue `std::locale::classic()` into the three streams (one line each), or format with
+  `std::format("{}@{:x}", …)`/`std::to_chars`, which are locale-independent unless the `L` specifier is used.
+  Validated on a relinked `libcartesi.so`: under the grouping facet and `en_US.UTF-8` the template hash is the classic
+  `820e9b84…`, cross-locale loads work, and the Linux boot matches the classic run (mcycle 57849418, `700b53de…`). Add a
+  regression test that installs a synthetic grouping facet as the global locale (no locale data needed on CI), and
+  optionally assert in `dtb_init` that unit addresses match `[0-9a-f]+`.
+- **Risks:** for classic-locale hosts (all current tools) the DTB, root hashes and file names stay byte-identical, so
+  existing templates and the on-chain step are unaffected. Directories already stored by an affected host have
+  grouped file names and a non-canonical DTB: after the fix they load only once the files are renamed, and their root
+  hashes remain non-canonical.
+
+---
+
 ## Traceability of later findings
 
 Original audit IDs of the findings confirmed after the first draft, the `BUGS.md` entry that covers each, and the raw
@@ -791,6 +934,14 @@ reports in `tests/bugs/reports/` with the full evidence.
 | STEP-PROOF-4 | CM-L25 | Low | CMIO response | `send-cmio-response-partial-update` | `hunters/step-proof.md`, `verifiers/verify-step.md` |
 | STEP-PROOF-3 | CM-L24 | Low | access-log verification (UB) | — | `hunters/step-proof.md`, `verifiers/verify-step.md` |
 | HT-5, HT-6, HT-7, HT-8 | CM-22 (HT-5 note), CM-L19, CM-L20, CM-L21 | Low | hash tree | `shadow-padding-page-dirty` (HT-6), `collect-uarch-partial-reset` (HT-7), `back-merkle-tree-alloc` (HT-8) | `hunters/hash-tree.md`, `verifiers/verify-hashtree.md` |
+| lua-lifecycle-1 | CM-27 | Medium (lower end) | JSON-RPC client / Lua bindings | `remote-clone-empty-leak` | `hunters/lua-lifecycle.md`, `verifiers/verify-final.md` |
+| DTB-CONFIG-1 | CM-28 | Medium (low end) | DTB / machine config | `dtb-locale-dependence` | `hunters/dtb-config.md`, `verifiers/verify-dtb.md` |
+| UARCH-ISA-1 | CM-02 (addendum) | Low (part of CM-02) | uarch | `uarch-x0-store` | `hunters/uarch-isa.md`, `verifiers/verify-final.md` |
+| DEVICES2-1 | CM-L26 | Low | C API / HTIF console | `reproducible-getchar-enable` | `hunters/devices2.md`, `verifiers/verify-final.md` |
+| cli-hashes-3 | CM-L27 | Low (upper end) | CLI (gdb stub) | `gdb-stepc-automatic-yield` | `hunters/cli-hashes.md`, `verifiers/verify-final.md` |
+| cli-hashes-1 | CM-L28 | Low | CLI | `uarch-hashes-print-reject` | `hunters/cli-hashes.md`, `verifiers/verify-final.md` |
+| cli-hashes-2 | CM-L29 | Low | Lua helper | `hash-tree-empty-data-root` | `hunters/cli-hashes.md`, `verifiers/verify-final.md` |
+| lua-lifecycle-2 | CM-L30 | Low | Lua bindings | `lua-converter-error-leak` | `hunters/lua-lifecycle.md`, `verifiers/verify-final.md` |
 
 Refuted or by design (not bugs): ROLLUP-FLOW-2 (documented and tested), R-1 revert hash check in
 `verify_send_cmio_response` (documented; mirrors the on-chain verifier).
@@ -826,3 +977,8 @@ Refuted or by design (not bugs): ROLLUP-FLOW-2 (documented and tested), R-1 reve
 | CM-L23 | interpreter (unreproducible mode) | WFI fast-forward clamps mcycle to `mcycle_max` and the loop then adds one: `cm_run(N)` returns mcycle N+1 (a repeated `cm_run(N)` fails with "mcycle is past"; assert-enabled builds abort at `src/interpret.cpp:6411`), and a timer deadline on an RTC tick is delivered one tick (8192 mcycles) late | `machine::poll_external_interrupts` (`src/machine.cpp:2261`); `execute_WFI` (`src/interpret.cpp:2833`) | `wfi-fast-forward-overshoot` |
 | CM-L24 | access-log verification | An untrusted access log with more sibling hashes than `64 - log2_size` makes proof verification evaluate `1 << 64` (UB) in `cm_verify_step_uarch`, `cm_verify_reset_uarch` and `cm_verify_send_cmio_response`; sanitizer builds abort, release builds reject the log | `access::make_proof` (`src/access-log.hpp:175-200`); `hash_tree_proof::bubble_up` (`src/hash-tree-proof.hpp:188-190`) | — |
 | CM-L25 | C API / CMIO | `cm_send_cmio_response`/`cm_log_send_cmio_response` with `data == NULL` and `length > 0` fail ("data is null") after writing `imcyclemax` and the revert root hash, contrary to "validation errors leave the machine unchanged" (`src/cm.h:1028`) | writes at `src/send-cmio-response.cpp:71-73` precede the data write at `:76`; no pointer check in `src/cm.cpp:1325`, `1338` | `send-cmio-response-partial-update` |
+| CM-L26 | C API / HTIF console | The host API can enable HTIF getchar on a reproducible machine (`cm_write_reg(CM_REG_HTIF_ICONSOLE, 3)`, the full-shadow `cm_write_memory(0, …, 0x8000)`, `cm_set_runtime_config` with console input); `cm_run` then answers the guest's getchar with host input (EOT, or host-supplied bytes) while the uarch (hence the on-chain step), `cm_log_step`/`cm_verify_step` and `cm_collect_mcycle_root_hashes` answer "no character", so their root hashes diverge, and `cm_store` writes a directory that `cm_load` rejects ("TTY stdin is only supported in unreproducible machines"). The guest cannot set `iconsole`; same class as CM-L22 | invariant enforced only at create/load (`machine::init_console`, `src/machine.cpp:324-331`); accepted by `write_reg(htif_iconsole)` (`:1356-1357`), the full-shadow write (`:1732-1745`) and `set_runtime_config` (`:388-394`); `device_state_access::do_getchar` serves input to interactive accessors (`src/device-state-access.hpp:153-158`); `store` checks only `iunrep` (`src/machine.cpp:400-402`) | `reproducible-getchar-enable` |
+| CM-L27 | CLI (gdb stub) | Under `--gdb`, a cycle step (the documented `stepc` macro: `monitor stepc N` + `continue`) that ends exactly on an automatic-yield mcycle never gets a stop reply: on resume the stub runs a zero-length step with `iflags_X` still set. Without breakpoints the zero-length `REACHED_TARGET_MCYCLE` is taken as the CLI's own target, so the CLI exits 0 printing the "final" hash (and storing the machine) of an unfinished run; with any breakpoint the stale `YIELDED_AUTOMATICALLY` is returned and the CLI re-services the same yield forever (3.5 million times before the test killed it); a `--cmio-advance-state` computation-hash run never finishes. Debugging sessions only (upper end of Low) | `GDBStub:_handle_continue` (`src/cartesi/gdbstub.lua:475-521`; step target `:480-483`, yield checks `:495`, `:515`); resumed by `_pump_session` (`:614-616`); returned by `GDBStub:run` (`:648-659`) to `run_to_stop` (`src/cartesi-machine.lua:4344-4355`) | `gdb-stepc-automatic-yield` |
+| CM-L28 | CLI | `--print-uarch-cycle-root-hashes` on a machine that reaches an rx-rejected manual yield outside cmio mode (e.g. a snapshot loaded mid-input) prints a fabricated post-rejection group: two entries equal to the revert root hash, the second labelled with an mcycle that never happens, instead of the canonical group (one entry per uarch cycle of the reverted machine, 43 in the test) that `cm_collect_uarch_cycle_root_hashes` with the real tail and `--uarch-cycle-computation-hash` use. Diagnostic output only | fixed `fake_revert_uarch_tail = {R, R}`, on the premise that a rejection "never happens outside cmio mode" (`src/cartesi-machine.lua:3838-3846`); emitted by `append_revert_uarch_tail_period` (`src/machine.cpp:2615-2625`) as documented in `src/cm.h:970-973` | `uarch-hashes-print-reject` |
+| CM-L29 | Lua helper (`cartesi.hash-tree`) | `get_data_root_hash("", log2_size)` returns `nil` instead of the pristine root, although the data "need not fill the tree"; the documented recipe then raises in `verify_splice` when the output NVRAM is empty (`string.unpack("z", …)` returns `""`). Fails closed: a valid empty value is rejected, nothing invalid is accepted | `src/cartesi/hash-tree.lua:45-68` (no leaves, so the pairing loop creates no parents and `:67` returns `nil`); recipe `doc/recipes/slice-calculator-output.lua:26`, `:36` | `hash-tree-empty-data-root` |
+| CM-L30 | Lua bindings | Every input rejected by a Lua conversion helper (`cartesi.fromjson`/`tojson`/`frombase64`/`fromhex`/`tobase64`/`tohex`, and machine methods that convert config tables) leaks its C++ exception object, about 400 bytes: `luaL_error` is called inside a C++ `catch`, and with Lua built as C its `longjmp` skips `__cxa_end_catch`. Unbounded growth for long-lived Lua services that validate untrusted input (the `doc/recipes/game-transport.lua:583` pattern); LeakSanitizer does not report it | `src/clua-cartesi.cpp:116-184` (also `cartesi_mod_new`, `:193`); `clua_tojson` and `clua_fromjson` (`src/clua-i-machine.cpp:616-618`, `:631-633`); also `:228-233`, `:1159-1161` | `lua-converter-error-leak` |

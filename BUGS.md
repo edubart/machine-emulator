@@ -391,6 +391,10 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
   produces `18446744073709552000`), an x86 host builds a machine with `imcyclemax = 0` that never executes an instruction
   (MCYCLE_OVERFLOW at mcycle 0) and has a different root hash; ARM hosts run normally. The same applies to JSON-RPC
   `machine.run` (`mcycle_end`) and Lua `fromjson`/`--load-config`.
+  Confirmed on real aarch64 builds (run under qemu-user): the same config with `imcyclemax` in float form gives root hash
+  `c488e517…` on x86-64 and `e81b8510…` on aarch64, and the same raw JSON-RPC `machine.run` request runs 0 cycles on an
+  x86-64 server but runs to halt on an aarch64 server (`tests/bugs/reports/hunters/arm64.md`). Apart from this issue,
+  x86-64 and aarch64 builds produced identical root hashes, step logs and uarch logs on every workload compared.
 - **Scenario:** a JavaScript/TypeScript client or tool that round-trips configs or requests through `JSON.parse`.
 - **Possible solution:** reject `f >= 18446744073709551616.0` (2^64) and `f >= 9223372036854775808.0` (2^63)
   (validated; no root-hash change).

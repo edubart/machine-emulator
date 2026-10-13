@@ -50,7 +50,7 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-06 | High | store / load | Stored machines can carry a hash tree that does not match their data (write-TLB dirty marks lost); loads trust it without verification | `stored-hash-tree-stale` |
 | CM-07 | High | JSON-RPC / hash tree | `fork` is allowed when the hash tree is shared: parent and child corrupt each other's hashes and proofs | `fork-shared-hash-tree` |
 | CM-08 | High | hash tree | Shared hash tree with private ranges pollutes the stored page-hash cache: wrong proofs, honest uarch/CMIO logs cannot be produced | `shared-hash-tree-cache-pollution` |
-| CM-09 | Medium | JSON parsing | JSON integers equal to 2^64 (or 2^63) hit an undefined float-to-int conversion: host-architecture-dependent machines | `json-uint64-float-cast` *(test pending)* |
+| CM-09 | Medium | JSON parsing | JSON integers equal to 2^64 (or 2^63) hit an undefined float-to-int conversion: host-architecture-dependent machines | `json-uint64-float-cast` |
 | CM-10 | Medium | CLI | `--load-config` ignores command-line fallbacks for missing fields: different machine and template hash | `cli-load-config-fallback` |
 | CM-11 | Medium | CLI | `--revert-mode=stored` silently undoes `--replace-memory-range`; printed initial hash is not the machine that runs | `cli-revert-stored-replace` |
 | CM-12 | Medium | Lua bindings | Nested JSON/table conversion overflows the Lua stack (heap buffer overflow) | `lua-json-stack-overflow` |
@@ -415,10 +415,10 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-L09 | C API | `cm_create`/`cm_load` on a non-empty object leak the previous machine (fds, mappings, exclusive locks) | `local_machine::do_create`/`do_load` (`src/local-machine.cpp:46-53`) | `create-load-nonempty-leak` |
 | CM-L10 | C API | `cm_translate_virtual_address` writes through `paddr` without a NULL check | `src/cm.cpp:1136` | `translate-virtual-address-null` |
 | CM-L11 | config | `std::bit_ceil` on unvalidated huge lengths in `machine_config::adjust_defaults`/`adjust_starts` (aborts hardened builds; release rejects the config later) | `src/machine-config.cpp` | — |
-| CM-L12 | Lua bindings | Table→JSON conversion with numeric keys converts keys in place during `lua_next` (errors, dropped fields or infinite loop); sparse arrays push up to max-index nulls | `src/clua-i-machine.cpp:271`, `386-389` | `lua-tojson-numeric-keys` *(test pending)* |
-| CM-L13 | CLI | Unvalidated `last_output_proof.target_address = 2^64−1` hangs the CLI | `src/cartesi-machine.lua:3364-3370`, `src/cartesi/hash-tree.lua:395-399` | `cli-last-output-proof-hang` *(test pending)* |
-| CM-L14 | CLI | `--print-uarch-cycle-root-hashes=count:N` without `start:` prints nothing for a machine loaded past mcycle N | `src/cartesi-machine.lua:2432`, `3831` | `cli-uarch-hashes-count` *(test pending)* |
-| CM-L15 | CLI | `parse_ipv4` shifts the second octet by 18 instead of 16 (`127.1.2.3` → `127.4.2.3`) | `src/cartesi-machine.lua:1370` | `cli-parse-ipv4` *(test pending)* |
-| CM-L16 | CLI (gdb stub) | GDB `M` (memory write) replies are inverted: error on success, OK on failure | `src/cartesi/gdbstub.lua:412` | `gdbstub-write-reply` *(test pending)* |
+| CM-L12 | Lua bindings | Table→JSON conversion with numeric keys converts keys in place during `lua_next` (errors, dropped fields or infinite loop); sparse arrays push up to max-index nulls | `src/clua-i-machine.cpp:271`, `386-389` | `lua-tojson-numeric-keys` |
+| CM-L13 | CLI | Unvalidated `last_output_proof.target_address = 2^64−1` hangs the CLI | `src/cartesi-machine.lua:3364-3370`, `src/cartesi/hash-tree.lua:395-399` | `cli-last-output-proof-hang` |
+| CM-L14 | CLI | `--print-uarch-cycle-root-hashes=count:N` without `start:` prints nothing for a machine loaded past mcycle N | `src/cartesi-machine.lua:2432`, `3831` | `cli-uarch-hashes-count` |
+| CM-L15 | CLI | `parse_ipv4` shifts the second octet by 18 instead of 16 (`127.1.2.3` → `127.4.2.3`) | `src/cartesi-machine.lua:1370` | `cli-parse-ipv4` |
+| CM-L16 | CLI (gdb stub) | GDB `M` (memory write) replies are inverted: error on success, OK on failure | `src/cartesi/gdbstub.lua:412` | `gdbstub-write-reply` |
 | CM-L17 | JSON-RPC | `delay_next_request` accepts any delay and freezes the single-threaded server for all clients | `src/jsonrpc-remote-machine.cpp:1058`, `1959` | `jsonrpc-delay-unbounded` |
 | CM-L18 | JSON-RPC client | Spawned servers inherit the client's sockets (no close-on-exec); concurrent spawns on fixed ports can fail with `EADDRINUSE` | `posix_spawnp` without file actions; Asio sockets without `SOCK_CLOEXEC` | `spawn-socket-leak` |

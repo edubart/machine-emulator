@@ -72,6 +72,7 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | CM-27 | Medium | JSON-RPC client / C API / Lua bindings | `cm_clone_empty` on a remote machine (Lua `remote(config)`, the documented remote recipe) forks a server whose handle has cleanup NOTHING and no timeout: every machine created this way, and every failed create, leaks a server process | `remote-clone-empty-leak` |
 | CM-28 | Medium | DTB / machine config / store-load | DTB unit addresses, `/aliases` targets and stored file names are formatted with the host process's C++ global locale: locale-dependent template root hash, snapshots unloadable across locales | `dtb-locale-dependence` |
 | CM-29 | Medium | store / load / hash tree | A saved dirty-page tree (`.dpt`) is trusted over a dense hash tree (`.dht`) that was never computed: the root hash stops depending on the range contents | `dpt-without-dht` |
+| CM-30 | High (when the process can write read-only files, e.g. root); Low/Medium otherwise | store / clone | `cm_clone_stored` hard-links a writable range's data file when the source file is read-only; a `SHARING_ALL` load of the clone writes into the source machine | `clone-stored-readonly-hardlink` |
 | CM-L* | Low | various | Lower-severity defects (see the last section) | see table |
 
 ---
@@ -310,6 +311,15 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
   fixes clean exits (validated; no root-hash change). It does not cover a crash during a `sharing:config` session;
   marking a page dirty when it enters the write TLB, instead of when it leaves, makes the persisted dirty-page tree
   self-sufficient and covers that case too, at a small rehash cost.
+
+### Addendum to CM-06 — exposure in the Dave PRT node
+
+The Dave node validates snapshots and templates by comparing `cm_get_root_hash` after `cm_load` with recorded or on-chain
+values. Because loads trust the stored hash tree, a snapshot or template whose data differs from its stored tree passes
+those checks. This also defeats Dave's pristine-uarch template gate (which compares root hashes before and after
+`cm_reset_uarch`), re-opening CM-02 for templates obtained from untrusted sources. `cm_verify_hash_tree` detects this
+damage and is a practical mitigation at template intake and on resume. Evidence: `tests/bugs/reports/hunters/dave-flows.md`,
+`tests/bugs/reports/verifiers/verify-dave.md`.
 
 ## CM-07 — JSON-RPC `fork` is allowed with a shared hash tree
 
@@ -945,6 +955,48 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 
 ---
 
+## CM-30 — `cm_clone_stored` hard-links writable ranges of a read-only stored machine
+
+- **Severity:** High when the process can open read-only files for writing (root / `CAP_DAC_OVERRIDE`); otherwise the
+  clone fails to load (Low/Medium).
+- **Area:** store / clone (`src/os-filesystem.cpp`, `src/machine.cpp`). **Category:** state corruption across snapshots.
+- **Where:** `os::clone_file` (`src/os-filesystem.cpp:585`) chooses between hard link and copy from the file's permission
+  bits; `machine::clone_stored` (`src/machine.cpp:507-535`) passes every file through it; loading the clone opens
+  writable ranges `O_RDWR` + `MAP_SHARED` according to the config, not the file mode.
+- **Problem:** when a stored machine's files are read-only on disk (an immutable template directory, a packaged image),
+  the clone's writable-range data files are hard links to the source. Loading the clone with `SHARING_ALL` and running it
+  writes into the source machine's data. In the "silent" variant the source still loads with its original (now stale)
+  root hash; in the "loud" variant it no longer matches its recorded hash. Without write privileges the clone's load
+  fails with "Permission denied". The CLI help promises per-range isolation (`src/cartesi-machine.lua:878-880`). The
+  emulator's own `--revert-mode=stored` flow is affected too: changes of a rejected input survive the revert.
+- **Evidence:** independent reproducers (C and Lua) show the source template overwritten by running its clone; the
+  pinned emulator commit used by the Dave PRT node contains the same code. Test: `tests/bugs/clone-stored-readonly-hardlink`.
+- **Scenario:** a node that checks out working copies of a read-only template or boundary snapshot with
+  `cm_clone_stored` and runs them with `SHARING_ALL` corrupts the template it must later prove from.
+- **Possible solution:** hard-link only the data of read-only ranges; copy writable-range files and give the copies owner
+  write permission (validated, no root-hash change); also restore write permission on writable ranges in the
+  `SHARING_NONE`/`SHARING_CONFIG` copy path of `store()` (`src/machine.cpp:438`).
+- **Risks:** silent corruption of templates and snapshots; wrong state after reverts.
+
+---
+
+## Exposure in the Dave PRT node
+
+The Dave PRT node (cartesi/dave, pinning emulator v0.21) was mapped call by call (Rust bindings over the C API; no
+JSON-RPC; per-uarch-cycle proofs; `SHARING_NONE` snapshots and `SHARING_ALL` working clones; a pristine-uarch gate on
+templates; root-hash assertions on every load). Its flows were replayed against this emulator and matched in-memory
+references in all differential checks (runner, dispute proofs, Linux template, multi-threaded).
+
+| Reachability from Dave's flows | Entries |
+|---|---|
+| Reachable | CM-06 (damaged or untrusted snapshots/templates load with their stored root; see the CM-06 addendum), CM-30 (read-only templates with root privileges) |
+| Conditional | CM-22 (crash during an update of a `SHARING_ALL` working clone; mitigated by Dave's scratch-clone discipline), CM-02/CM-03/CM-24 (only for untrusted templates, via CM-06), CM-01 and CM-L01..L06 (only if the application template exercises them), CM-L24 (only when verifying untrusted access logs) |
+| Not reachable | all other entries (Dave does not use JSON-RPC, fork, `cm_replace_memory_range`, multi-cycle `cm_log_step`, the RISC Zero replay, `CM_SHARING_CONFIG`, shared hash trees, virtual-memory APIs or VirtIO) |
+
+Details and file:line evidence in Dave: `tests/bugs/reports/hunters/dave-flows.md` and `tests/bugs/reports/verifiers/verify-dave.md`.
+
+---
+
 ## Traceability of later findings
 
 Original audit IDs of the findings confirmed after the first draft, the `BUGS.md` entry that covers each, and the raw
@@ -978,6 +1030,8 @@ reports in `tests/bugs/reports/` with the full evidence.
 | GAPS-1 | CM-29 | Medium (upper end) | store / load / hash tree | `dpt-without-dht` | `hunters/gaps.md`, `verifiers/verify-gaps.md` |
 | GAPS-2 | CM-L31 | Low | Lua helper | `evmu-empty-dynamic-array` | `hunters/gaps.md`, `verifiers/verify-gaps.md` |
 | GAPS-3 | CM-L32 | Low | backing stores | `readonly-flash-short-image` | `hunters/gaps.md`, `verifiers/verify-gaps.md` |
+| DAVE-FLOWS-1 | CM-30 | High (privileged) | store / clone | `clone-stored-readonly-hardlink` | `hunters/dave-flows.md`, `verifiers/verify-dave.md` |
+| DAVE-FLOWS-2 | CM-06 (addendum) | High (as CM-06) | store / load | `stored-hash-tree-stale` | `hunters/dave-flows.md`, `verifiers/verify-dave.md` |
 
 Refuted or by design (not bugs): ROLLUP-FLOW-2 (documented and tested), R-1 revert hash check in
 `verify_send_cmio_response` (documented; mirrors the on-chain verifier).

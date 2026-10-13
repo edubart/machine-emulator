@@ -43,9 +43,9 @@ Bare-metal guest programs are assembled with `riscv64-unknown-elf-gcc` (override
 | ID | Severity | Area | Title | Test |
 |---|---|---|---|---|
 | CM-01 | Critical (conditional) | interpreter | Interrupt selection ignores destination privilege; `cm_run` results depend on how execution is chunked and diverge from the uarch | `interrupt-priority-chunking` |
-| CM-02 | High (Critical if a canonical uarch is not enforced) | uarch / config | Non-pristine uarch state is accepted, so `cm_run` and the uarch big-step compute different transitions | `uarch-non-pristine-state` *(test pending)* |
-| CM-03 | High | uarch | `WRITE_TLB` uarch ecall does not bound-check `set_index`: out-of-bounds host write | `uarch-write-tlb-set-index` *(test pending)* |
-| CM-04 | High | RISC Zero step verifier | `risc0_replay_steps` wraps `mcycle_end` instead of saturating: accepts a forged no-op step, rejects the honest one | `risc0-mcycle-end-wrap` *(test pending)* |
+| CM-02 | High (Critical if a canonical uarch is not enforced) | uarch / config | Non-pristine uarch state is accepted, so `cm_run` and the uarch big-step compute different transitions | `uarch-non-pristine-state` |
+| CM-03 | High | uarch | `WRITE_TLB` uarch ecall does not bound-check `set_index`: out-of-bounds host write | `uarch-write-tlb-set-index` |
+| CM-04 | High | RISC Zero step verifier | `risc0_replay_steps` wraps `mcycle_end` instead of saturating: accepts a forged no-op step, rejects the honest one | `risc0-mcycle-end-wrap` |
 | CM-05 | High | memory / TLB | `cm_replace_memory_range` leaves dangling host pointers in the hot TLB (crash or silent wrong state) | `replace-memory-range-stale-tlb` *(test pending)* |
 | CM-06 | High | store / load | Stored machines can carry a hash tree that does not match their data (write-TLB dirty marks lost); loads trust it without verification | `stored-hash-tree-stale` *(test pending)* |
 | CM-07 | High | JSON-RPC / hash tree | `fork` is allowed when the hash tree is shared: parent and child corrupt each other's hashes and proofs | `fork-shared-hash-tree` *(test pending)* |

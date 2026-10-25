@@ -112,3 +112,24 @@ dispute deadlines, as well as general API consumers.
 - **Risks/limits:** The C header explicitly describes this API as used only for
   internal emulator tests. This is not evidence of spontaneous state divergence,
   a false root produced from intact metadata, or an accepted invalid proof.
+
+## 004 — The CLI cannot dump memory to ordinary paths with shell punctuation
+
+- **Problem:** `--dump-memory-ranges` builds `"mkdir " .. dir` and passes it to a
+  shell. Valid directory names containing spaces or parentheses are parsed as
+  shell syntax instead of being passed as one path, and the CLI aborts.
+- **Area/category:** `cartesi-machine` CLI; incorrect pathname handling.
+  **Pre-existing** on `main`, in the dump function changed by this branch.
+- **Location:** `src/cartesi-machine.lua:3596–3601`, especially line 3601.
+- **Evidence:** `python3 tests/bugs/004-cli-dump-path.py` creates a minimal stored
+  machine and runs the CLI with an argument array, without an invoking shell.
+  Destination `plain` succeeds; destination `trial (1)` fails with exit status 1
+  and a shell syntax error at the internal `mkdir`. Independently confirmed by
+  hunter, reviewer, and orchestrator.
+- **Scenario:** A developer or application asks the CLI to dump a machine beneath
+  a user-selected directory whose name includes spaces or parentheses.
+- **Possible solution:** Use the new `fs.create_directory(dir)` API rather than
+  constructing a shell command.
+- **Severity:** **Low (P3)**; a supported CLI operation fails for valid filenames.
+- **Risks/limits:** No effect on normal guest execution or dispute outcomes was
+  demonstrated. The reproduction exercises only legitimate directory names.

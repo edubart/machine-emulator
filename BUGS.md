@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-9 confirmed issues: 2 high, 5 medium, 2 low.
+11 confirmed issues: 2 high, 6 medium, 3 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -32,8 +32,10 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B06](#b06-frontier_forest_store-commits-truncated-tree-files-on-write-errors) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | frontier_forest_store commits truncated tree files on write errors | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
 | [B09](#b09-json-rpc-server-exits-when-an-error-message-contains-invalid-utf-8) | medium | pre-existing | JSON-RPC remote machine server | JSON-RPC server exits when an error message contains invalid UTF-8 | `bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/` |
+| [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail) | medium | pre-existing | JSON-RPC client (spawn_server) | Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail | `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
+| [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
 
 ## Issues
 
@@ -539,3 +541,109 @@ Run command: `eval $(make -s env); timeout 60 lua5.4 bugs/rpc-01-jsonrpc-server-
 **Proof of concept:** `bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/test_jsonrpc_invalid_utf8_crash.lua`. It needs LuaSocket (`socket`) for the raw POST, and creates its temporary directory with `os.tmpname()`. Run it from the repo root with `eval $(make -s env); timeout 60 lua5.4 bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/test_jsonrpc_invalid_utf8_crash.lua`. While the bug is present it prints `BUG:` lines and exits 1. Once fixed it prints `OK: server survived both scenarios` and exits 0.
 
 **ID**: `rpc-01-jsonrpc-server-crash-invalid-utf8-error-message`
+
+### B10. Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail
+
+**Title**: `cm_jsonrpc_spawn_server` leaks client sockets into spawned servers: concurrent spawns on fixed addresses fail with EADDRINUSE, and closed connections stay in CLOSE_WAIT
+
+**Problem.** The spawn constructor binds a listening acceptor on the requested address and calls `posix_spawnp(&child_pid, bin, nullptr, nullptr, args, environ)`. It passes no `posix_spawn_file_actions`. Boost.Asio opens sockets without `SOCK_CLOEXEC` (only its epoll fd and timerfd get CLOEXEC), and nothing in `src/` sets `FD_CLOEXEC` on sockets or calls `close_range`/`closefrom`. So every socket open in the client process at spawn time is inherited by `cartesi-jsonrpc-machine`. That includes keep-alive connections to other remote machines and, in a multi-threaded host, acceptors other threads have just bound for their own spawns. The server never closes fds it does not know about. Its `fork` handler keeps them in the grandchild, and the grandchild is the long-lived server whose pid is returned. This has two effects:
+1. **Concurrent spawns fail.** Thread A's acceptor stays LISTENing inside thread B's server tree. A's later `rebind` to that address (or A's next acceptor bind) then fails with `bind: Address already in use`. It keeps failing for as long as B's servers live.
+2. **Closed connections leak.** When the client closes a connection (`shutdown_and_close_socket`: receive shutdown plus linger-0 close), the close only drops one reference while another server holds a copy. No RST or FIN is sent, so the remote session never sees EOF. The socket stays in CLOSE_WAIT for the whole lifetime of the inheriting server and its fork descendants.
+
+**Origin.** Pre-existing.
+
+**Area.** JSON-RPC client library (`libcartesi_jsonrpc`, `cm_jsonrpc_spawn_server`) and the `cartesi-jsonrpc-machine` server.
+
+**Category.** Resource leak / file-descriptor inheritance, causing spawn failures (denial of service).
+
+**Location.**
+- `src/jsonrpc-machine.cpp:473-494`: the acceptor is bound, then `posix_spawnp` runs with no file actions.
+- `src/jsonrpc-machine.cpp:180-198`: `json_post` keep-alive sockets, opened with `async_connect` and no CLOEXEC.
+- `src/jsonrpc-machine.cpp:549-551`: the parent closes the acceptor only after the spawn, which leaves a window in which other threads' spawns inherit it.
+- `src/jsonrpc-machine.cpp:581-584` and `src/jsonrpc-remote-machine.cpp:894-907`: `rebind` to the requested address, where the EADDRINUSE shows up.
+- `src/jsonrpc-remote-machine.cpp:830-886`: the `fork` handler, which carries the inherited fds into the grandchild.
+- `src/jsonrpc-remote-machine.cpp:2121-2166`: `--server-fd` handling, which never closes other inherited fds.
+
+**Evidence.** The PoC uses only the public C API.
+- **Part A, single thread.** It spawns m1, makes one request (which opens a keep-alive socket), then spawns m2. It then inspects `/proc/<pid2>/fd` and `/proc/net/tcp`.
+- **Part B, concurrency.** 4 threads x 8 rounds. Each thread spawns on its own fixed port, outside the ephemeral range. A sequential control run uses one fixed port.
+
+Re-run output (`eval $(make -s env); sh bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/run.sh`):
+```
+[A] client sockets before spawning m2: 1, of which held by server2 (pid 4645): 1
+    leaked socket:[143122]  tcp: 01 local=0100007F:DC26 remote=0100007F:81B1
+    after cm_delete(m1): server2 still holds socket:[143122]  tcp: 08 local=0100007F:DC26 remote=0100007F:81B1
+BUG: spawned server2 inherited 1 client socket(s) (keep-alive connection to server1); 1 still held after server1 was deleted
+    [B] thread 0 round 0 spawn on 127.0.0.1:23461 failed: bind: Address already in use [system:98
+        LISTEN holders of port 23461 now: pid=4652(cartesi-jsonrpc) pid=4653(cartesi-jsonrpc) pid=4655(cartesi-jsonrpc)
+[B] concurrent spawns: 23/32 failed (23 with 'Address already in use')
+[B] sequential control on one fixed port: 0/32 failed
+```
+State 08 is CLOSE_WAIT. The prover and two independent reviewers saw between 12/32 and 24/32 concurrent failures across runs. The sequential control always failed 0/32. When a spawn fails, the LISTEN socket for the failing port is held by other threads' `cartesi-jsonrpc-machine` processes.
+
+**Scenario.** A validator node (Cartesi Rollups Node, Dave, or another PRT node written in Go or Rust) hosts several applications or tournaments. It calls `cm_jsonrpc_spawn_server` from several threads, each with its own machine object. With cgo this is the normal case, because cgo calls run on separate OS threads. If each machine is configured on a fixed address, a large share of spawns fail with EADDRINUSE. Retries on the same address keep failing while the servers holding the inherited acceptor are alive, so the node can fail to start or restart machines, for example when it needs a fresh machine to compute a commitment or a step proof during a dispute deadline. Even single-threaded, a long-running node that spawns many servers piles up stale fds and CLOSE_WAIT sockets in them. Remote sessions also never see the client's EOF, so the server holds those connections open. CLI users and Lua scripts that spawn several servers are affected the same way, though less severely.
+
+**Possible solution.**
+- In the client, pass `posix_spawn_file_actions` that keep only the acceptor fd. Alternatively, have `cartesi-jsonrpc-machine` close every inherited fd except `--server-fd` and stdio on startup (`close_range(3, ~0U, 0)` around the server fd, or iterate `/proc/self/fd`).
+- Also open all client sockets and acceptors with CLOEXEC, for example by setting `FD_CLOEXEC` right after open, and clear it only on the acceptor passed to the child (with `posix_spawn_file_actions_adddup2`, or by clearing the flag just before the spawn). This narrows the window but does not remove it unless spawns are serialized, so the server-side close is the robust fix.
+- Optionally serialize the acceptor-bind-to-spawn section with a process-wide mutex as defence in depth.
+
+**Severity.** Medium. Both reviewers agree. It causes a denial of service for nodes that spawn concurrently on fixed addresses, plus a bounded fd and socket leak in long-running nodes. It cannot produce wrong or nondeterministic hashes or proofs, and the common `127.0.0.1:0` (ephemeral port) configuration avoids the bind failure.
+
+**Risks.**
+- Of the bug: a validator can fail to start or restart machines at a critical moment, such as a dispute deadline. A failure that looks transient tends to persist, because the leaked listeners live as long as unrelated servers. Stale CLOSE_WAIT sockets and missed EOFs slowly use up fds and kernel memory, and they keep remote sessions open.
+- Of the fix: closing fds in the server must keep `--server-fd` and stdio, or spawning breaks. Setting CLOEXEC on asio sockets needs care so the acceptor is still inherited. Embedders that deliberately pass extra fds to spawned servers through `CARTESI_JSONRPC_MACHINE` wrappers (unlikely) would lose them.
+
+**Proof of concept.** Files are in `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/`:
+- `test_spawn_fd_leak.cpp`: the C++ test.
+- `run.sh`: compiles the test against `src/` into a temp dir and runs it.
+
+Run from the repo root (Linux, needs `/proc`):
+```
+eval $(make -s env); sh bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/run.sh > rpc-02.log 2>&1; cat rpc-02.log
+```
+Redirect the output to a file as shown: while the bug is present, leftover spawned servers inherit the shell's stdout, so piping the output (for example into `grep`) never reaches end of file. Exit status 1 and `BUG:` lines mean the bug reproduced. Exit status 0 means it is fixed.
+
+**ID**: `rpc-02-jsonrpc-client-fds-leak-into-spawned-servers`
+
+### B11. JSON-RPC request with an invalid id is rejected but still executed
+
+**Title**: JSON-RPC server rejects a request with an invalid `id` but still executes it, and answers it twice in a batch
+
+**Problem**: `handle_request` in the JSON-RPC remote-machine server checks each request and replies `-32600 invalid request` if the request is malformed. For the `jsonrpc` and `method` fields, the code pushes the error and then `continue`s. For an `id` that is not a string, number or null (for example `true`, `{}` or `[]`), it pushes the error but has no `continue`. Control falls through to `jsonrpc_dispatch_method`, so the method runs and changes machine state. Then, because `ji.contains("id")` is true, the method's result is pushed as a second response. A single request returns only `jr[0]`, which is the error, so the client is told the call was rejected when it actually ran. A batch returns both responses for one request. JSON-RPC 2.0 forbids both behaviours: an invalid request must not be executed, and each request gets exactly one response.
+
+**Origin**: pre-existing. `origin/main` has the same code, and the branch's changes to this file do not touch this check.
+
+**Area**: jsonrpc-remote-machine server (`cartesi-jsonrpc-machine`), request validation.
+
+**Category**: api-contract.
+
+**Location**:
+- `src/jsonrpc-remote-machine.cpp:1984-1991`: the invalid-`id` check pushes the error with no `continue`.
+- `src/jsonrpc-remote-machine.cpp:1997`: `jsonrpc_dispatch_method(ji, session)` still runs.
+- `src/jsonrpc-remote-machine.cpp:2003-2005`: the result is pushed as a second response.
+- `src/jsonrpc-remote-machine.cpp:2012`: a single (non-array) request returns only `jr[0]`, the error.
+
+**Evidence**: The test spawns a real `cartesi-jsonrpc-machine` server using the Lua `cartesi.jsonrpc` client and creates a 1 MiB machine. It then sends raw HTTP POSTs with curl. Run with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`:
+```
+single response: {"error":{"code":-32600,"message":"invalid field \"id\" (expected string, number, or null)"},"id":true,"jsonrpc":"2.0"}
+x1 after rejected request: 77
+BUG: request rejected as invalid (bad id) but write_reg was executed anyway (x1=77)
+batch response: [{"error":{"code":-32600,...},"id":{},"jsonrpc":"2.0"},{"id":{},"jsonrpc":"2.0","result":true}]
+responses in batch for 1 request: 2, x2=55
+BUG: batch with one invalid-id request produced 2 responses
+BUG: batch request with invalid id executed (x2=55)
+exit=1
+```
+
+**Scenario**: A third-party or hand-written client talks to `cartesi-jsonrpc-machine` directly over HTTP, for example a validator written in another language or a debugging script. It sends a request whose `id` is not a scalar, such as `{"method":"machine.write_reg","id":true,"params":["x1",77]}`. It receives "invalid field id", treats the call as having no effect, and may retry or carry on. Meanwhile `write_reg`, `run`, `write_memory`, `send_cmio_response` or `store` has already run, so the client's view of the machine no longer matches the real state. A batch-aware client that pairs responses with requests is also confused by the extra response. The official `libcartesi_jsonrpc` C/C++ client, which the Lua bindings, the `cartesi-machine` CLI, Rollups Node, Dave and the PRT node all use, always sends numeric ids. Honest validators using the shipped clients cannot trigger this, and hashes and proofs are not affected.
+
+**Possible solution**: Add `continue;` after `jr.push_back(jsonrpc_response_invalid_request(ji, "invalid field \"id\" ..."))` at line 1990. The invalid-`id` check then behaves like the `jsonrpc` and `method` checks: one error response, and no dispatch.
+
+**Severity**: low. Both reviewers agreed with the prover. Only clients that send a malformed, non-scalar `id` can reach this, and the official C/Lua clients never do. There is no crash, hang, memory corruption, or wrong hash or proof. The harm is that the server tells non-conforming clients a request was rejected when it actually ran.
+
+**Risks**: The bug itself can make a non-conforming client misjudge machine state after a state-changing call it believes was rejected, and can break response pairing in batches. The fix is a one-line change with minimal risk. Any client that currently sends non-scalar ids and depends, by accident, on the method running will now see the request genuinely rejected, which is the behaviour JSON-RPC 2.0 requires.
+
+**Proof of concept**: `bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. It needs `curl` and `cartesi-jsonrpc-machine` in `PATH`. It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the bug is fixed.
+
+**ID**: `rpc-03-jsonrpc-invalid-id-still-executes`

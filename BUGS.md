@@ -80,3 +80,35 @@ dispute deadlines, as well as general API consumers.
 - **Risks/limits:** Requires different representations sharing a storage directory.
   Roots remain correct; this demonstrates loss of available descendants, not
   acceptance of a false proof. Reconstruction may recover the data at a time cost.
+
+## 003 — Hash-tree integrity verification accepts inconsistent internal nodes
+
+- **Problem:** `verify_hash_tree` compares memory with page hashes, but does not
+  verify all internal dense and sparse parent hashes. It also prints a mismatch
+  between a dense root and its sparse leaf without setting its result to false.
+  A successful check can therefore be followed by an invalid Merkle proof.
+- **Area/category:** C/C++ hash-tree integrity API, also exposed in Lua and
+  JSON-RPC; incomplete consistency validation. **Pre-existing** on `main` in
+  code modified by the cache refactor.
+- **Location:** `src/hash-tree.cpp:650–714`, particularly the leaf-only check at
+  lines 658–696 and non-failing mismatch at lines 707–710; public API
+  `cm_verify_hash_tree` in `src/cm.h:1158–1163`.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/003-incomplete-integrity-check.lua`.
+  A fresh stored machine has a valid proof. The test models a single local storage
+  bit fault in a RAM dense-tree internal node, leaving guest memory and page hashes
+  unchanged. Reloaded `verify_hash_tree()` returns true, but the full-root proof
+  fails `verify_slice`. `clear_hash_tree()` rebuilds a valid proof with the original
+  state root. Hunter, independent reviewer, and orchestrator reproduced it.
+- **Scenario:** A consumer uses the integrity API to detect damaged cached metadata
+  before producing proofs, accepts its successful result, and later obtains an
+  unusable proof. Recovery must explicitly rebuild the metadata.
+- **Possible solution:** Verify clean internal parent/child relationships in the
+  dense trees, sparse tree, and cached page trees; make every detected mismatch
+  fail verification. Respect pending dirty nodes when defining the contract.
+- **Severity:** **Medium (P2)**. False assurance can delay proof generation, but
+  this test requires independently damaged metadata; no ordinary execution path
+  causing that damage was established.
+- **Risks/limits:** The C header explicitly describes this API as used only for
+  internal emulator tests. This is not evidence of spontaneous state divergence,
+  a false root produced from intact metadata, or an accepted invalid proof.

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-46 confirmed issues: 4 high, 10 medium, 32 low.
+48 confirmed issues: 4 high, 10 medium, 34 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -71,6 +71,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B44](#b44-json-parsers-truncate-64-bit-log2-sizes-in-access-logs-and-proofs-without-range-checks) | low | pre-existing | JSON parsing (json-util) | JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks | `bugs/api-12-access-log2-size-truncation/` |
 | [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
+| [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
+| [B48](#b48-evmu-hex-decoding-accepts-sign-characters) | low | pre-existing | Lua cartesi.evmu (ABI) | evmu hex decoding accepts sign characters | `bugs/lua-33-evmu-fromhex-sign-chars/` |
 
 ## Issues
 
@@ -2743,3 +2745,101 @@ Run: `eval $(make -s env); lua5.4 bugs/lua-31-evmu-encode-int-wraps-mod-2-512/te
 **Proof of concept**: `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua`. It prints `BUG:` lines and exits 1 while the bug is present, and prints `PASS` once it is fixed.
 
 **ID**: `lua-31-evmu-encode-int-wraps-mod-2-512`
+
+### B47. ABI encoder emits malformed data for arrays with nil holes
+
+**Title**: evmu ABI encoder silently emits malformed ABI for arrays with nil holes (length/offsets from `#values`, elements from `ipairs`)
+
+**Problem:** `append_encoded_array` takes its counts from `#values`: the fixed-size `T[k]` count check, the dynamic-array length word, and the base offset of the dynamic-element offsets table (`#values * 32`). It writes the elements with `ipairs(values)`, which stops at the first `nil`. If the array table has a hole, such as `{1, nil, 3}`, `#values` may be 3 while only one element is written. `encode_abi`, `encode_calldata` and `encode_calldata_hex` then return malformed ABI data and raise no error. For `T[k]`, the static head is short, so every field after it moves into the wrong slot. Lua's `#` on a table with holes may return any border. A caller can therefore also get a smaller count, such as 1, which yields well-formed ABI with the trailing elements silently dropped.
+
+**Origin:** Pre-existing. `append_encoded_array` is identical on `origin/main`. The branch adds the selectorless `encode_abi`/`decode_abi` entry points, which reach the same code, and the PRT bridge uses them for `bytes32[]` proof arrays.
+
+**Area:** Lua library `cartesi.evmu`, the ABI encoder that ships in the emulator package.
+
+**Category:** Correctness / input validation.
+
+**Location:**
+- `src/cartesi/evmu.lua:474-501` (`append_encoded_array`)
+- `src/cartesi/evmu.lua:477-478`: `T[k]` count check uses `#values`
+- `src/cartesi/evmu.lua:481`: dynamic length word uses `#values`
+- `src/cartesi/evmu.lua:484`: static elements written with `ipairs`
+- `src/cartesi/evmu.lua:490-492`: offsets base uses `#values * 32`, elements written with `ipairs`
+- Reached from `src/cartesi/evmu.lua:611` (`encode_calldata`) and `src/cartesi/evmu.lua:627` (`encode_abi`)
+
+**Evidence:** The test encodes arrays with holes and decodes the result with the module's own `decode_abi`. Every case encodes without an error, and in every case `decode_abi` rejects the output:
+```
+#vals =	3
+uint8[] {1,nil,3} ->	0x..20 ..03 ..01	(96 bytes)
+BUG: uint8[] {1,nil,3}: encoded length word says 3 elements but only 1 element words emitted (96 bytes, expected 160)
+BUG: encode_abi output for uint8[] cannot be decoded by decode_abi: evmu.lua:39: insufficient calldata for 256-bit word at offset 96
+(uint8[3],uint256) ->	0x..01 ..42	(64 bytes)
+BUG: (uint8[3],uint256) with {1,nil,3}: static head is 64 bytes, expected 128; following field shifted
+BUG: string[] with hole: encoded data is malformed (decode_abi fails: ... insufficient calldata for 256-bit word at offset 160)
+BUG: bytes32[] with hole silently encoded into malformed data (decode fails: ... insufficient calldata for bytes32)
+exit=1
+```
+Run: `eval $(make -s env); lua5.4 bugs/lua-32-evmu-encode-array-holes-malformed/test.lua`
+
+**Scenario:** A validator node, or any Lua tool built on `cartesi.evmu`, builds a sibling/proof array (`bytes32[]`) or a fixed-size argument indexed by tree level, and a bug leaves a `nil` at one level. The node does not get an encoding error. It submits malformed calldata, which most likely makes the transaction revert. That turns a simple caller bug into a hard-to-diagnose failed submission (a missed move or a timeout in a dispute). Two rarer cases produce ABI that looks valid but carries the wrong data:
+- With `T[k]` followed by more fields, the fields shift into the wrong slots.
+- If `#` returns a smaller border, elements are silently truncated.
+
+**Possible solution:** Compute `n = #values` once and loop `for i = 1, n do local v = values[i]; if v == nil then errorf("missing array element at index %u", i) end ... end` for both static and dynamic elements. Optionally, reject tables that have non-sequence keys or integer keys greater than `n` (checked with `pairs`), so that a truncating border is also caught.
+
+**Severity:** Low. Both reviewers agree. The bug fires only when the caller already has a bug (a nil inside an array). The usual result is calldata that contracts and `decode_abi` reject, not accepted wrong values. It does not affect emulator hashes or proofs, and it cannot make an honest player who builds proofs correctly lose a dispute.
+
+**Risks:**
+- Of the bug: silent malformed or shifted calldata instead of a clear error. In rare cases, a different border from `#` can give well-formed ABI with wrong or truncated arguments, and the behaviour can depend on how the table was built.
+- Of the fix: minimal. Callers that currently pass tables with holes and rely on the output (already malformed) will get an error instead. The added checks are O(n) and negligible.
+
+**Proof of concept:** `bugs/lua-32-evmu-encode-array-holes-malformed/test.lua`. From the repo root: `eval $(make -s env); lua5.4 bugs/lua-32-evmu-encode-array-holes-malformed/test.lua`. It prints `BUG:` lines and exits 1 while the bug is present, and prints `OK` and exits 0 once fixed.
+
+**ID**: `lua-32-evmu-encode-array-holes-malformed`
+
+### B48. evmu hex decoding accepts sign characters
+
+**Title**: evmu `fromhex`/`decode_hex` accepts `+`/`-` sign characters: malformed hex is silently decoded, or raises instead of returning `nil, err`
+
+**Problem**: `fromhex` checks only for whitespace, the `0x` prefix and even length. It then decodes each 2-character group with `tonumber(c, 16)` and treats only a `nil` result as invalid. In Lua 5.4, `tonumber` with a base accepts a leading sign, so `"+f"` gives 15, `"-0"` gives 0 and `"-1"` gives -1. This has three effects:
+- `"0x+f"` decodes to `"\x0f"` and `"0x-0"` decodes to `"\0"`. Both are malformed and should be rejected.
+- `"0x-1"` through `"0x-f"` pass a negative value to `string.char`. That raises `bad argument #1 to 'char' (value out of range)` instead of returning the documented `nil, err`.
+- The function feeds every hex-typed argument of the encoders. As a result, a malformed address such as `"0x" .. ("+f"):rep(20)` is silently encoded as `0x0f0f…0f`.
+
+**Origin**: pre-existing. `origin/main` has the same `tonumber(c, 16)` line, and the branch's evmu change (selectorless ABI encode/decode) does not touch `fromhex`.
+
+**Area**: `cartesi.evmu` Lua library, hex helpers. The library ships: `evmu.lua` is in `EMU_TO_LUA_PATH`.
+
+**Category**: api-contract / input validation
+
+**Location**:
+- `src/cartesi/evmu.lua:56-76`: `fromhex`. The `tonumber(c, 16)` call is at line 64 and the `string.char(n)` that raises is at line 69.
+- `src/cartesi/evmu.lua:636`: `_M.decode_hex = fromhex`.
+- `src/cartesi/evmu.lua:389-402`: `get_raw_expect_hex` and `get_raw_expect_raw`, used by the address, `bytesN` and `bytes` encoders in `encode_calldata`/`encode_abi`. `decode_calldata_hex` also calls `fromhex`.
+
+**Evidence**: running the test from the repo root with `eval $(make -s env); lua5.4 bugs/lua-33-evmu-fromhex-sign-chars/test-fromhex-sign-chars.lua` prints:
+```
+decode_hex('0x+f') ->	true	"\15"	nil
+BUG: decode_hex accepted '0x+f' as "\15" (should return nil,err)
+decode_hex('0x-0') ->	true	"\0"	nil
+decode_hex('0x-1') ->	false	.../src/cartesi/evmu.lua:69: bad argument #1 to 'char' (value out of range)
+encode_calldata_hex('f(address)', {0x+f+f+…+f}) ->	true	0xfc68521a0000000000000000000000000f0f0f…0f
+exit=1
+```
+
+**Scenario**: a Lua caller (for example a validator node, a Rollups tooling script or a CLI wrapper) uses `evmu.decode_hex` to validate hex from an external source such as a JSON-RPC provider, a config file or user input, and expects `nil, err` on bad input. Two things can go wrong:
+- A string with `-X` groups raises an error. Without a `pcall`, that error propagates and can crash the caller.
+- A string with `+X` or `-0` groups is accepted as valid, with content different from what was apparently intended.
+
+The same happens when such a string is passed as an `address` or `bytes` argument to `encode_calldata`/`encode_abi`. Well-formed hex is always decoded correctly. Machine hashes, proofs and step logs do not depend on evmu. Within the package, no CLI or C API path feeds untrusted hex to it.
+
+**Possible solution**: reject any non-hex-digit character before decoding, for example `local bad = hex:find("[^%x]", 3); if bad then return nil, string.format("hex string cannot contain %q", hex:sub(bad, bad)) end`. Alternatively, validate each group with `c:match("^%x%x$")` before calling `tonumber`.
+
+**Severity**: low. Both reviewers rated it low. The bug cannot affect machine state, hashes, proofs or dispute outcomes, and it needs malformed external hex containing sign characters. Its effects are limited to two: malformed input is accepted, or an exception is raised (catchable with `pcall`) where `nil, err` was expected. The assert-based encoder paths raise on bad hex anyway.
+
+**Risks**:
+- Bug: hex that should be rejected is accepted with different content, which could matter for a caller that uses `decode_hex` as a validator. Callers that rely on the `nil, err` contract can also hit an unexpected error.
+- Fix: minimal. It makes only already-malformed input fail, so any caller that currently depends on `"+f"`-style strings being accepted would start getting errors. That is the intended behaviour.
+
+**Proof of concept**: `bugs/lua-33-evmu-fromhex-sign-chars/test-fromhex-sign-chars.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-33-evmu-fromhex-sign-chars/test-fromhex-sign-chars.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 once it is fixed.
+
+**ID**: `lua-33-evmu-fromhex-sign-chars`

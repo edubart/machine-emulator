@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-54 confirmed issues: 4 high, 12 medium, 38 low.
+56 confirmed issues: 4 high, 12 medium, 40 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -79,6 +79,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B51](#b51-log_step-on-an-empty-or-destroyed-local-machine-dereferences-a-null-pointer) | low | pre-existing | C API (local machine) | log_step on an empty or destroyed local machine dereferences a null pointer | `bugs/w2b-02-log-step-empty-machine-null-deref/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B54](#b54-a-transient-accept-error-closes-the-json-rpc-servers-listening-socket-for-good) | low | pre-existing | JSON-RPC remote machine server | A transient accept error closes the JSON-RPC server's listening socket for good | `bugs/w2b-06-jsonrpc-accept-error-kills-server/` |
+| [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
+| [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw) | low | pre-existing | Runtime config, hash tree | Out-of-range concurrency.update_hash_tree makes every hash-tree update throw | `bugs/w2b-08-concurrency-update-hash-tree-int-truncation/` |
 
 ## Issues
 
@@ -3156,3 +3158,114 @@ BUG: after transient accept() EMFILE the JSON-RPC server stopped listening; mach
 **ID**: `w2b-06-jsonrpc-accept-error-kills-server`
 
 **Related**: [B09](#b09-json-rpc-server-exits-when-an-error-message-contains-invalid-utf-8).
+
+### B55. spawn_server hangs on its error path when the caller has SIGTERM blocked
+
+**Title**: cm_jsonrpc_spawn_server hangs forever on its error path when the caller has SIGTERM blocked
+
+**Problem:** `jsonrpc_machine` starts the server with `posix_spawnp(&child_pid, bin, nullptr, nullptr, args, environ)`. It passes no `posix_spawnattr_t`, so `POSIX_SPAWN_SETSIGMASK` is not set and the child inherits the calling thread's signal mask. The server's `install_signal_handlers()` resets the SIGINT/SIGTERM dispositions to `SIG_DFL` and later adds them to an asio `signal_set`. Nothing in the server calls `sigprocmask` or `pthread_sigmask`, so a SIGTERM that was blocked in the caller stays blocked in the server. If anything fails after the spawn, the `child_waiter` scope-exit sends `kill(child_pid, SIGTERM)` once and then loops on `waitpid(child_pid, nullptr, 0)` with no time limit. It escalates to SIGILL only on `EINTR`, which never happens here. The SIGTERM stays pending, the server never exits, and `cm_jsonrpc_spawn_server` never returns its error. The server process also leaks. Failures that lead here: version check failure or timeout, and failure of the `fork`, `shutdown` or `rebind` requests. On the success path the direct child exits through the `shutdown` RPC, so the call returns. Servers spawned that way still ignore SIGTERM/SIGINT for their whole life, but this was not tested. A secondary claim was also not tested: the waiter always SIGTERMs `child_pid`, even after the child may have been auto-reaped under `SIGCHLD=SIG_IGN`, so a narrow race could signal a reused pid.
+
+**Origin:** pre-existing. The spawn and waiter logic is the same before this branch.
+
+**Area:** libcartesi_jsonrpc spawn (`jsonrpc-machine.cpp`) / server signal setup (`jsonrpc-remote-machine.cpp`).
+
+**Category:** hang
+
+**Location:**
+- `src/jsonrpc-machine.cpp:491`: `posix_spawnp` with null file actions and null attrs, so the signal mask is inherited.
+- `src/jsonrpc-machine.cpp:505-545`: `child_waiter` sends `kill(child_pid, SIGTERM)`, then `waitpid` with no bound; SIGILL is sent only on `EINTR`.
+- `src/jsonrpc-machine.cpp:559-586`: post-spawn steps that can throw (`check_server_version`, `fork`, `shutdown`, `rebind`).
+- `src/jsonrpc-remote-machine.cpp:170-182`: `install_signal_handlers()` resets dispositions only and never unblocks the signals.
+- `src/jsonrpc-remote-machine.cpp:325-327`: `signals.add(SIGINT/SIGTERM)` cannot fire while the signals are blocked.
+
+**Evidence:** The test forks a helper into its own process group. The helper calls the public C API `cm_jsonrpc_spawn_server("127.0.0.1:0", 0, ...)`. A timeout of 0 forces the version check to time out, which takes the error path.
+- Baseline, SIGTERM unblocked: the call returns -6 at once.
+- After `pthread_sigmask(SIG_BLOCK, {SIGTERM})`: the call does not return within 5s. `/proc` shows the caller sleeping in `waitpid`. The spawned `cartesi-jsonrpc-machine` has `SigBlk=0x4000` (SIGTERM inherited as blocked) and `ShdPnd=0x4000` (the waiter's SIGTERM is stuck pending). The test then SIGKILLs the group.
+
+Run command:
+```
+eval $(make -s env); sh bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/run.sh
+```
+Output excerpt:
+```
+pid 24806 test_spawn_sigt: State:	S (sleeping) ShdPnd:	0000000000000000 SigBlk:	0000000000004000
+pid 24807 cartesi-jsonrpc: State:	S (sleeping) ShdPnd:	0000000000004000 SigBlk:	0000000000004000
+baseline (SIGTERM unblocked): spawn returned -6 (error, as expected for timeout 0)
+BUG: cm_jsonrpc_spawn_server did not return within 5s when caller has SIGTERM blocked (spawned server inherited mask, ignores SIGTERM, waitpid blocks forever)
+```
+(exit status 1)
+
+**Scenario:** A C/C++ host such as a PRT validator, a custom node or an app harness follows the common daemon pattern: it blocks SIGTERM/SIGINT in `main` and handles them in a dedicated `sigwait`/`signalfd` thread. Every thread created afterwards inherits that mask, including the one that calls `cm_jsonrpc_spawn_server`. When a spawn fails, the worker thread freezes forever instead of getting an error code, and an orphaned `cartesi-jsonrpc-machine` stays alive holding its listening socket. Typical failures are a version mismatch between libcartesi_jsonrpc and the installed server binary, a server that starts too slowly under load and exceeds `spawn_timeout_ms`, or a failed fork, shutdown or rebind. The validator cannot retry or report the failure. Rust/Go hosts such as the Rollups Node and Dave usually do not block these signals, so they are less likely to be affected.
+
+**Possible solution:**
+- In `jsonrpc-machine.cpp`, pass a `posix_spawnattr_t` with `POSIX_SPAWN_SETSIGMASK` (empty mask) and `POSIX_SPAWN_SETSIGDEF` (at least SIGINT, SIGTERM and SIGCHLD reset to default). Rust's `std::process::Command` resets the child's mask the same way.
+- As defense in depth, make the server unblock SIGINT/SIGTERM at startup (`pthread_sigmask(SIG_UNBLOCK, ...)` in `install_signal_handlers`).
+- Optionally bound the waiter: after SIGTERM, poll `waitpid(..., WNOHANG)` for a short grace period, then escalate to SIGKILL.
+- Skip the unconditional SIGTERM once the child has acknowledged `shutdown`, to avoid signalling a possibly reused pid.
+
+**Severity:** low. Both reviewers rated it low, at most borderline medium. Two uncommon conditions must hold at once: the caller has SIGTERM blocked, and a spawn fails after `posix_spawnp`. When they do, the result is a permanent hang plus a leaked server process instead of an error code. Hashes, proofs and stored state are never affected, and successful spawns work.
+
+**Risks:**
+- Of the bug: a host thread deadlocks forever on a spawn failure. Servers accumulate as leaked processes holding ports, and supervisors cannot terminate spawned servers with SIGTERM/SIGINT.
+- Of the fix: resetting the mask and dispositions in the child is standard and low-risk. A hard SIGKILL escalation must keep the coverage-build rule of not signalling a child that is already flushing gcov counters after `shutdown`. Callers that relied on spawned servers ignoring SIGTERM (unlikely, and undocumented) would see different behaviour.
+
+**Proof of concept:** `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/test_spawn_sigterm_blocked.cpp`, built and run by `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/run.sh`. From the repo root:
+```
+eval $(make -s env); sh bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/run.sh
+```
+The test exits 1 and prints a `BUG:` line while the defect is present, and exits 0 once it is fixed.
+
+**ID**: `w2b-07-spawn-server-hangs-when-sigterm-blocked`
+
+**Related**: [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail).
+
+### B56. Out-of-range concurrency.update_hash_tree makes every hash-tree update throw
+
+**Title**: concurrency.update_hash_tree values that truncate to a negative int (e.g. -1, 0xFFFFFFFF) make every hash-tree update throw "vector::reserve"
+
+**Problem:** The hash tree narrows the uint64 runtime setting `concurrency.update_hash_tree` to an `int` with `static_cast<int>`. Any value whose low 32 bits read as a small negative int, such as `-1` (given through Lua or JSON) or `4294967295` (UINT32_MAX), becomes `-1`. `get_concurrency` replaces only `0` with `omp_get_max_threads()` and then takes `std::min` with that thread count, so the negative value is kept. `update_dense_trees` then computes `std::min(m_concurrency << 10, 16384)`, which is `-1024`. Stored in a `size_t`, that is about 2^64, so `batch.reserve` throws `std::length_error("vector::reserve")`. The machine constructor accepts the config, and no interface validates the value. The failure only appears later, on the first operation that updates the hash tree: `get_root_hash`, `get_proof`, `collect_*` logs, `verify_*`, and so on. From then on, every one of those calls fails.
+
+**Origin:** pre-existing. origin/main has the same code, a few lines off.
+
+**Area:** hash tree (`src/hash-tree.cpp`) / runtime config (`concurrency.update_hash_tree`)
+
+**Category:** crash (an exception is thrown; there is no memory corruption) / missing input validation
+
+**Location:**
+- `src/hash-tree.cpp:956`: `m_concurrency{get_concurrency(static_cast<int>(concurrency))}` narrows uint64 to int.
+- `src/hash-tree.cpp:939-946`: `get_concurrency` keeps negative values.
+- `src/hash-tree.cpp:468-470`: `std::min(m_concurrency << 10, 16384)` turns into a huge `size_t`, and `batch.reserve(batch_size)` throws.
+- `src/machine.cpp:303`: the runtime value is passed to the hash tree without any check.
+- `src/machine.cpp:1556, 1614, 1627, 2361, 2675`: callers of `update_hash_tree()` that fail as a result.
+- `src/cartesi-machine.lua:2113`: the CLI `--concurrency=update_hash_tree:<number>` only checks that the value is a number.
+
+**Evidence:** The test builds a 1 MiB-RAM machine for each value and calls `get_root_hash` and `get_proof`. The values -1 and 4294967295 are accepted at construction, and then every hash call fails:
+```
+$ eval $(make -s env); timeout 60 lua5.4 bugs/w2b-08-concurrency-update-hash-tree-int-truncation/test.lua
+update_hash_tree=1: get_root_hash OK
+update_hash_tree=0: get_root_hash OK
+update_hash_tree=1000000: get_root_hash OK
+BUG: update_hash_tree=-1 accepted by constructor but get_root_hash fails: vector::reserve
+BUG: update_hash_tree=4294967295 accepted by constructor but get_root_hash fails: vector::reserve
+update_hash_tree=2147483648: get_root_hash OK
+exit=1
+```
+A reviewer reproduced the same failure through the C API. `cm_create_new` with the runtime config `{"concurrency":{"update_hash_tree":4294967295}}` succeeds, and then `cm_get_root_hash` returns -3 with "vector::reserve". The JSON parser also accepts `-1` for this uint64 field.
+
+Note: 0x80000000 (INT_MIN) does not fail. In practice `INT_MIN << 10` gives 0, `reserve(0)` succeeds, and the code runs single-threaded. The build uses `-std=c++20`, where left-shifting a negative value is defined, so the "signed-shift UB" in the original claim does not apply. The failure that matters is the `reserve` exception.
+
+**Scenario:** An operator of a PRT validator, Rollups Node or Dave node, or a CLI user, sets `concurrency.update_hash_tree` to an "unlimited" value such as `-1` or `UINT32_MAX`, or passes `--concurrency=update_hash_tree:4294967295`. The machine is created and runs without complaint. Then the first root hash, proof, step log or state comparison fails with the unhelpful message "vector::reserve", and the node can never compute a hash. The config is set by the operator, so neither an attacker nor guest code can trigger this.
+
+**Possible solution:** Validate and clamp the value where it enters, and do the arithmetic in `size_t`. In `get_concurrency`, take a `uint64_t`. Treat `0` as auto (`omp_get_max_threads()`) and clamp any other value to `[1, omp_get_max_threads()]` before converting to `int`; alternatively, reject values above `INT_MAX` with a clear `std::invalid_argument` in the machine constructor or the runtime-config parser. Compute the batch size as `std::min<size_t>(static_cast<size_t>(m_concurrency) << 10, 16384)`.
+
+**Severity:** low. Both reviewers and the prover agree. It needs an out-of-range value that the operator chose. It fails loudly and deterministically on the first hash call. It never produces wrong or nondeterministic hashes or proofs, corrupts no state, and is easy to work around by using `0` (auto).
+
+**Risks:** Of the bug: a node configured with an "unlimited" sentinel cannot compute any hash or proof, and the delayed failure with an unclear message makes it harder to diagnose. Of the fix: very low. Clamping changes no hashes, because concurrency affects only scheduling and not results. If the fix rejects bad values instead of clamping them, configs that "work" today with odd values may start failing at machine creation. For example, 0x80000000 currently runs single-threaded by accident.
+
+**Proof of concept:** `bugs/w2b-08-concurrency-update-hash-tree-int-truncation/test.lua`. To run it from the repo root after building:
+```
+eval $(make -s env); timeout 60 lua5.4 bugs/w2b-08-concurrency-update-hash-tree-int-truncation/test.lua
+```
+It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the value is validated or clamped. Rejecting the value in the constructor also counts as a pass.
+
+**ID**: `w2b-08-concurrency-update-hash-tree-int-truncation`

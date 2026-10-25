@@ -4032,6 +4032,10 @@ The result is a stuck query or expansion at one position, never a wrong hash or 
 
 **ID**: `p2-07-clua-arrayindex-signed-overflow`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `p3-03-arrayindex-signed-overflow`: run with `eval $(make -s env); lua5.4 bugs/p3-03-arrayindex-signed-overflow/test.lua`.
+
 **Related**: [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays).
 
 ### B70. JSON-RPC client cmio response functions read from a NULL data pointer

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-49 confirmed issues: 4 high, 10 medium, 35 low.
+50 confirmed issues: 4 high, 11 medium, 35 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -39,6 +39,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Forest tree files keyed only by hash collide across heights and representations | `bugs/lua-04-content-addressing-ignores-height-and-representation/` |
 | [B17](#b17-abi-decoder-rejects-canonical-empty-arrays-of-dynamic-types) | medium | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder rejects canonical empty arrays of dynamic types | `bugs/lua-09-evmu-decode-empty-dynamic-element-array/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
+| [B50](#b50-rename_stored-and-remove_stored-with-a-trailing-slash-succeed-then-fail-and-skip-the-parent-fsync) | medium | pre-existing | Stored machine API | rename_stored and remove_stored with a trailing slash succeed, then fail and skip the parent fsync | `bugs/w2b-03-rename-remove-stored-trailing-slash/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -2894,3 +2895,54 @@ Run: `eval $(make -s env); timeout 30 lua5.4 bugs/lua-15-concat-hash-empty-secon
 **Proof of concept**: `bugs/lua-15-concat-hash-empty-second-arg/test.lua`. Run it from the repo root with `eval $(make -s env); timeout 30 lua5.4 bugs/lua-15-concat-hash-empty-second-arg/test.lua`. It prints one `BUG:` line per accepted malformed input and exits with 1 while the bug is present, and with 0 once it is fixed.
 
 **ID**: `lua-15-concat-hash-empty-second-arg`
+
+### B50. rename_stored and remove_stored with a trailing slash succeed, then fail and skip the parent fsync
+
+**Title**: rename_stored/remove_stored with a trailing-slash path complete the operation, then fail with ENOENT and never fsync the real parent
+
+**Problem:** `parent_directory()` returns `std::filesystem::path(dir).parent_path()`. For a path with a trailing slash such as `"st/a/"`, the final path element is empty, so it returns `"st/a"`, the directory itself, instead of `"st"`. As a result:
+- `rename_stored("st/a/", "st/b/")` renames the directory (Linux accepts trailing slashes on directory renames). It then fsyncs `"st/b"`, the renamed directory rather than its parent. Because `"st/a"` differs from `"st/b"`, it then calls `sync_directory("st/a")`, which no longer exists, so it throws ENOENT.
+- `remove_stored("st/c/")` deletes every file and the directory, then calls `sync_directory("st/c")` on the directory it just removed, which throws ENOENT.
+
+In both cases the caller gets an error for an operation that has already happened, and the real parent directory `"st"` is never fsynced. That breaks the durability contract in `cm.h`, which says the affected or removed parent directory entries are durable on success. `sync_stored` builds the parent as `dir + "/.."`, so it is not affected, and the path-handling helpers disagree with each other.
+
+**Origin:** Pre-existing. `origin/main` has the same `parent_directory`, `rename_stored` and `remove_stored` code (around `src/machine.cpp:545-616`), and this branch does not change it.
+
+**Area:** Stored machine management (`machine.cpp`), reachable through the C API (`cm_rename_stored`, `cm_remove_stored`), the Lua bindings, JSON-RPC and the CLI.
+
+**Category:** Durability / error reporting.
+
+**Location:**
+- `src/machine.cpp:548-554`: `parent_directory()`
+- `src/machine.cpp:562-569`: `rename_stored` (syncs `to_parent`, then the vanished `from_parent`)
+- `src/machine.cpp:619`: `remove_stored` (syncs the removed directory)
+- `src/cm.h:586-602`: the durability contract it breaks
+
+**Evidence:** The Lua test stores a machine at `st/a`, then calls `rename_stored('st/a/', 'st/b/')`. The call raises an error even though `st/a` is gone and `st/b/config.json` exists. It then stores `st/c` and calls `remove_stored('st/c/')`, which raises an error even though `st/c` is gone. Run with `eval $(make -s env); lua5.4 bugs/w2b-03-rename-remove-stored-trailing-slash/test.lua`:
+```
+rename_stored('a/','b/'): ok=false err=unable to sync directory '/tmp/w2b-03-rename-remove-stored-trailing-slash-st/a': open() failed: No such file or directory; a exists=false b exists=true
+BUG: rename_stored with trailing slash renamed the directory on disk but reported failure: ...
+remove_stored('c/'): ok=false err=unable to sync directory '/tmp/w2b-03-rename-remove-stored-trailing-slash-st/c': open() failed: No such file or directory; c exists=false
+BUG: remove_stored with trailing slash removed the directory on disk but reported failure: ...
+exit=1
+```
+
+**Scenario:** A PRT validator, Dave or Rollups Node deployment takes its snapshot directory from a config value such as `"snapshots/"`, or from a shell-completed path, and builds machine paths with a trailing slash. Snapshot rotation calls `rename_stored("snapshots/next/", "snapshots/current/")`, gets an error, and treats the rotation as failed. A retry then also fails, because the source no longer exists. Revert logic that calls `remove_stored` and then `rename_stored` stops after the first step, leaving neither the old state nor the backup in place. The parent directory entry is also never fsynced, so after a power loss the rename or removal can be undone. The CLI's `revert_stored` passes the user's `--load-dir`/`--create-dir` value straight to these calls, so a trailing slash there has the same effect. Hashes, proofs and step logs are not affected.
+
+**Possible solution:** Normalise the path before taking its parent. For example, strip trailing separators (`path p(dir); if (p.filename().empty()) p = p.parent_path(); parent = p.parent_path();`, keeping the `"."` fallback). Another option is to use the same `dir + "/.."` approach as `sync_stored`, computed before the rename or removal. Add regression tests for rename and remove with trailing-slash paths, and for root-relative and `"./"` forms.
+
+**Severity:** medium. Both reviewers agreed. The API reports failure for an operation that has already taken effect and skips the parent fsync it promises, which can derail a caller's rotation or revert logic and lose the change after a crash. It only occurs with trailing-slash paths, which are legitimate but uncommon for nodes that build paths in code, and it never affects hashes, proofs or dispute outcomes.
+
+**Risks:**
+- *Of the bug:* Callers get a misleading error and may take the wrong recovery action, such as retrying or rolling back based on wrong state. A crash after the call can lose the rename or removal, because the parent directory entry was never made durable.
+- *Of the fix:* Very low. It only changes which directory gets fsynced. Edge cases to check are `"/"`, `"a//"`, `"./a/"` and bare names (which should still map to `"."`), and that `from_parent`/`to_parent` still compare equal when they refer to the same directory, so it is not synced twice needlessly.
+
+**Proof of concept:** `bugs/w2b-03-rename-remove-stored-trailing-slash/test.lua`. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/w2b-03-rename-remove-stored-trailing-slash/test.lua
+```
+It exits with status 1 and prints `BUG:` lines while the bug is present, and prints `OK` once it is fixed. It works in `$WORKDIR` if set, otherwise in `${TMPDIR:-/tmp}/w2b-03-rename-remove-stored-trailing-slash-st`.
+
+**ID**: `w2b-03-rename-remove-stored-trailing-slash`
+
+**Related**: [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever).

@@ -3797,3 +3797,40 @@ eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backsla
 **ID**: `w2a-07-hash-tree-lua-parent-dir-ignores-backslash`
 
 **Related**: [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root), [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows).
+
+## Candidates that were not confirmed
+
+These candidates were proposed and investigated but did not pass review. They are listed so that readers can see what
+was ruled out, and why. Several were reproduced and rejected only because reviewers judged the behavior intended; a split
+vote means at least one reviewer would have confirmed it.
+
+| Candidate | Outcome | Reason |
+|---|---|---|
+| `const` C API hash calls (`cm_get_proof`, `cm_get_root_hash`, `cm_get_node_hash`) update the page cache without locking | rejected 2 to 1 | Reproduced: concurrent calls on one machine object crash or return wrong proofs. Rejected as misuse, since one machine object is not meant to be shared across threads. |
+| `clone_file` hard-links read-only files, so clones alias the source inode | rejected 2 to 0 | Reproduced, but hard-linking read-only sources is the documented contract of `clone_file`. |
+| `frontier_forest_expand_leaf` raises on a leaf that is already expanded | rejected 2 to 1 | Reproduced, but the documented precondition covers only opaque leaves. |
+| `frontier_forest_load` reads every stored mixed tree at load time | rejected 2 to 1 | Reproduced (all tree files are read before any query), but hashes are correct and reviewers judged it the documented design, a performance matter only. |
+| Page cache copies new words into a shared entry before hashing them | not reproduced | A real kill leaves the entry marked borrowed, so the reload fails loudly (B03) rather than trusting a torn entry. |
+| CLI `--print-uarch-cycle-root-hashes` passes a fake revert tail in cmio mode | not reproduced | The CLI refuses that option combination before running. |
+| `set_runtime_config` accepts `clear_hash_tree=true` and does nothing | rejected 2 to 1 | Reproduced, but the field is documented as applying at create or load only. |
+| `cartesi.util.read_file` and `write_file` were removed | rejected 2 to 0 | A deliberate, changelogged change with a one-line migration to `cartesi.filesystem`. |
+| `clear_hash_tree` commits about 50 MiB per machine | rejected 2 to 0 | One-time and bounded by the page-cache size; not a leak. |
+
+`verify_hash_tree` not checking inner nodes was first rejected 2 to 1 (`ht-05`), then confirmed by another panel, and it
+is listed as B30 with a reviewer note.
+
+## Method and environment
+
+Ten review workflows ran in two waves. Each hunter agent worked one area or angle and proposed candidates. A triage
+agent merged duplicates. A prover agent wrote and ran a test for each candidate. Two independent reviewers, plus a
+tie-breaker when they split, tried to refute each claim. A recorder agent wrote the entry. Issues found by more than one
+group are listed once, with the other reproductions linked.
+
+The second wave added differential testing of the hash tree and of dispute artifacts in normal operation. It compared
+root hashes, node hashes, proofs, step logs, uarch and mcycle collections across store and load in every sharing mode,
+`clear_hash_tree`, tiny page caches that force evictions, remote machines, and concurrency settings. It found no
+divergence outside the crash, stale-cache and `replace_memory_range` scenarios listed above.
+
+The tests ran on Ubuntu 24.04 (x86-64, ext4) against a local build of this branch. The uarch was built with GCC 13
+rather than the official GCC 14 toolchain, so uarch-dependent hashes differ from upstream golden values. No test
+compares against golden values.

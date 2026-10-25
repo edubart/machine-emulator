@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-72 confirmed issues: 4 high, 16 medium, 52 low.
+74 confirmed issues: 4 high, 16 medium, 54 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -97,6 +97,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B70](#b70-json-rpc-client-cmio-response-functions-read-from-a-null-data-pointer) | low | pre-existing | JSON-RPC client (cmio), C API | JSON-RPC client cmio response functions read from a NULL data pointer | `bugs/p2-05-jsonrpc-cmio-null-data-segfault/` |
 | [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema) | low | pre-existing | Lua bindings (JSON with schemas) | fromjson rewrites strings that match a key of a struct, array or tuple schema | `bugs/p3-01-fromjson-object-schema-string-enum-rewrite/` |
 | [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys) | low | pre-existing | Lua bindings (JSON conversion) | tojson and fromjson truncate object keys at NUL bytes, merging distinct keys | `bugs/p3-06-json-nul-in-keys-truncated-merged/` |
+| [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
+| [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 
 ## Issues
 
@@ -4199,7 +4201,110 @@ BUG: fromjson truncated key "a\u0000b" at NUL; t['a\0b']=nil t.a=1
 
 **ID**: `p3-06-json-nul-in-keys-truncated-merged`
 
-**Related**: [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema).
+**Related**: [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema), [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data).
+
+### B73. fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data
+
+**Title**: `cartesi.fromjson` (and the JSON-RPC server's request parsing) stops at the first NUL byte and accepts JSON followed by NUL plus any trailing data
+
+**Problem**: `cartesi.fromjson` reads its argument with `luaL_checkstring`, which drops the Lua string's length, and passes the bare `const char *` to `clua_fromjson`. That function calls `nlohmann::json::parse(s, cb)`. nlohmann treats a `const char *` as a NUL-terminated C string, so parsing ends at the first embedded NUL. The end-of-input check, which normally rejects trailing data, never sees the bytes after the NUL. As a result `'{"a":1} x'` is rejected, but `'{"a":1}\0{"zzz'` is accepted and returns `{a=1}`. Lua strings are binary-safe, so callers expect the whole string to be validated. The JSON-RPC server has the same pattern: it parses `req.body().data()` as a C string, so a request body is only read up to its first NUL.
+
+**Origin**: pre-existing (`fromjson` is unchanged from `origin/main`).
+
+**Area**: Lua JSON (`cartesi.fromjson`); also the JSON-RPC server's request parsing.
+
+**Category**: correctness (input validation)
+
+**Location**:
+- `src/clua-cartesi.cpp:176-180`: `cartesi_mod_fromjson`. Line 179 calls `luaL_checkstring(L, 1)`, which drops the length.
+- `src/clua-i-machine.cpp:640-651`: `clua_fromjson(lua_State *, const char *s, ...)`. Line 646 calls `nlohmann::json::parse(s, clua_json_parse_callback)`.
+- `src/jsonrpc-remote-machine.cpp:1947`: `json::parse(req.body().data(), jsonrpc_parse_callback)`, the same pattern on the server side. This one is not covered by the PoC.
+- Affected callers that pass whole files: `src/cartesi/hash-tree.lua:528` (StoredTree), `:944` (Base64Array), `:994` (StoredFrontier) and `src/cartesi-machine.lua:3089` (`--load-config`).
+
+**Evidence**: The test runs a control input and three NUL cases through `cartesi.fromjson`:
+- Control: trailing garbage without a NUL is rejected.
+- NUL followed by garbage is accepted.
+- A JSON document followed by 4096 zero bytes is accepted.
+- A `Base64Array` document followed by NUL and garbage is accepted.
+
+Run with `eval $(make -s env); lua5.4 bugs/p3-05-fromjson-truncates-at-nul/test.lua`:
+```
+ok: trailing garbage without NUL rejected: ... parse error at line 1, column 9: ... last read: '1} x'; expected end of input
+BUG: trailing garbage after NUL accepted (len=13), parsed a=1
+BUG: zero-filled tail (file extended with NULs) accepted (len=4103), parsed a=1
+BUG: Base64Array with trailing NUL+garbage accepted, #v=1
+exit=1
+```
+
+**Scenario**: The PRT node loads its stored tree, frontier and epoch files with `cartesi.fromjson(fs.read_file(path), ...)`. If one of these files holds valid JSON, then NUL bytes, then anything else, it loads silently instead of being rejected as corrupt. This could happen if a file is extended with zero-filled blocks, if bytes are appended by mistake, or if a stale prefix document sits in front of other data. The same applies to a CLI user's `--load-config` file and to tooling that feeds wire data containing NUL to `fromjson`. On the JSON-RPC server, bytes after a NUL in a request body are silently ignored. In practice the impact is small:
+- `filesystem.write_file` writes a temp file, fsyncs it and renames it into place, so a crash rarely leaves a valid prefix followed by NULs. A torn write normally gives an empty or fully zeroed file, and both fail to parse.
+- The accepted prefix is always a complete, well-formed JSON value.
+- The StoredTree and StoredFrontier loads re-check the height and hashes afterward.
+
+**Possible solution**: In `cartesi_mod_fromjson`, use `size_t len; const char *s = luaL_checklstring(L, 1, &len);`. Change `clua_fromjson` to take a `std::string_view` or a `(ptr, len)` pair, and call `nlohmann::json::parse(s, s + len, cb)`. Update the internal callers, which pass `std::string`/`const char *` values from the C API, to pass the length. In `jsonrpc-remote-machine.cpp:1947`, parse `req.body()` (a string or iterator range) instead of `.data()`. Add a regression test: `fromjson('{"a":1}\0x')` must fail.
+
+**Severity**: low. Both reviewers agree:
+- It only matters when the input already holds a complete valid JSON value followed by a NUL, and the effect is that some corruption is hidden instead of rejected.
+- Atomic writes make the corrupted-file case unlikely, and the downstream height and hash checks in `hash-tree.lua` catch most stale-content cases.
+- It causes no wrong hashes or proofs, no crash or hang, and no memory-safety issue.
+
+**Risks**:
+- Bug: a corrupted state, frontier or config file can load as a valid prefix document instead of failing loudly. This makes corruption harder to diagnose, and a stale prefix could be used where the follow-up checks do not cover it. JSON-RPC request bodies are not strictly validated.
+- Fix: very low risk. Inputs that hold valid JSON followed by NUL, which are malformed anyway, will now be rejected. Any caller that relied on NUL-terminated buffers with trailing slack would start failing, but no such caller was found. Callers of `clua_fromjson` must pass the correct length.
+
+**Proof of concept**: `bugs/p3-05-fromjson-truncates-at-nul/test.lua`. Run from the repo root:
+`eval $(make -s env); timeout 30 lua5.4 bugs/p3-05-fromjson-truncates-at-nul/test.lua`
+It exits with 1 and prints `BUG:` lines while the bug is present. It prints `PASS` and exits with 0 once the bug is fixed.
+
+**ID**: `p3-05-fromjson-truncates-at-nul`
+
+**Related**: [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys).
+
+### B74. tojson silently writes NaN and infinities as null
+
+**Title**: cartesi.tojson silently turns NaN/+Inf/-Inf into JSON null; fromjson reads it back as nil, so the field or array element is lost
+
+**Problem**: When `clua_push_managed_toclose_json_ref` meets a non-integer Lua number, it stores the number in the `nlohmann::json` value as it is, with no `std::isfinite` check. `nlohmann::json::dump()` writes NaN, +Inf and -Inf as `null` and raises no error. `cartesi.fromjson` then maps `null` to `nil`. The result is silent data loss: `{a=0/0, b=1}` serializes to `{"a":null,"b":1}` and comes back without `a`, and `{1, 0/0, 3}` becomes `[1,null,3]`, which restores with a nil hole at `t[2]`. The reverse direction is strict, because `fromjson` rejects a literal `NaN` with a parse error. So the API is asymmetric, and only `tojson` loses data.
+
+**Origin**: Pre-existing. The branch's diff to `src/clua-i-machine.cpp` does not touch the number case.
+
+**Area**: Lua JSON binding (`cartesi.tojson` / `cartesi.fromjson`, and Lua-table-to-JSON conversion in general).
+
+**Category**: correctness (silent data loss)
+
+**Location**:
+- `src/clua-i-machine.cpp:419-421`: in `clua_push_managed_toclose_json_ref`, the `LUA_TNUMBER` floating-point branch runs `j = lua_tonumber(L, idx);` and never checks whether the value is finite.
+- `src/clua-i-machine.cpp:629`: `clua_tojson` calls `j.dump(indent)`, and this is where nlohmann writes non-finite values as `null`.
+
+**Evidence**: The test round-trips `{a=v, b=1}` through `cartesi.tojson` and `cartesi.fromjson` for v = NaN, +Inf and -Inf, and does the same for the array `{1, 0/0, 3}`. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/p3-07-json-nan-inf-serialized-as-null/test.lua
+nan -> {"a":null,"b":1} -> a=nil
+BUG: tojson serialized non-finite nan as null without error; fromjson round-trip loses field 'a'
+inf -> {"a":null,"b":1} -> a=nil
+BUG: tojson serialized non-finite inf as null without error; fromjson round-trip loses field 'a'
+-inf -> {"a":null,"b":1} -> a=nil
+BUG: tojson serialized non-finite -inf as null without error; fromjson round-trip loses field 'a'
+array {1,nan,3} -> [1,null,3] -> #t=3 t[2]=nil
+BUG: NaN array element silently becomes null/nil hole
+```
+The test exits 1 while the bug is present. It exits 0 once `tojson` raises an error for non-finite numbers, because it treats a `pcall` failure as the correct behaviour.
+
+**Scenario**: A Lua tool, a PRT node helper or a CLI script stores a computed float in its JSON state with `cartesi.tojson`, for example a rate, a timeout or a progress ratio that divides by zero. The JSON is written without any error. After a restart the field is `nil`, so code that indexes or compares it either throws far from the cause or silently takes a default path. Machine config and runtime config are not affected: every field in those schemas is an integer or a string. A NaN passed by mistake in a config table would still become `null` and most likely fall back to a default without any error.
+- Hashes, proofs, step logs and the PRT node's persisted state (EpochState, `epoch.json`, cache manifests, `hash-tree.lua`'s StoredTree) contain no floats. The `math.huge` in `prt-demo.lua`'s `get_progress` is a local accumulator that is never serialized.
+- So validators, the Rollups Node and Dave are not affected today.
+
+**Possible solution**: In the floating-point branch, check the value first and throw when it is not finite. For example: `const lua_Number n = lua_tonumber(L, idx); if (!std::isfinite(n)) { throw std::invalid_argument("cannot serialize non-finite number (NaN or Inf) to JSON"); } j = n;`. `clua_tojson` already catches `std::exception` and turns it into a Lua error. Check that the other callers of `clua_push_managed_toclose_json_ref`, such as `clua_tojsonschemadict` and the config conversion, also catch it. If they do not, use `luaL_error` directly; nothing has to be released at that point because only to-be-closed managed values are held. Add a regression test for `tojson` with NaN, Inf and -Inf, both as object fields and as array elements.
+
+**Severity**: low. Both reviewers rated it low. Non-finite floats are lost silently, but no emulator schema field and no PRT-node persisted value is a float, so hashes, proofs, step logs and validator liveness cannot be affected. Writing `null` is also the same choice JavaScript's `JSON.stringify` makes. The defect is the silent loss in a general-purpose library function, where lua-cjson and Python's `json.dumps(allow_nan=False)` raise an error instead.
+
+**Risks**:
+- Of the bug: third-party Lua state that holds non-finite floats is silently lost or truncated, and the failure shows up later, far from its cause. A NaN in a config table is silently replaced by a default instead of being rejected.
+- Of the fix: code that today relies on `tojson` succeeding with NaN or Inf (for example, logging or dumping debug tables that contain `math.huge`) would start raising errors. This is a behaviour change, so it should be noted in the changelog. A less disruptive alternative is to keep `null` but add an opt-in strict mode. That leaves the silent loss as the default behaviour.
+
+**Proof of concept**: `bugs/p3-07-json-nan-inf-serialized-as-null/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/p3-07-json-nan-inf-serialized-as-null/test.lua`. It exits 1 while the bug is present and 0 once it is fixed.
+
+**ID**: `p3-07-json-nan-inf-serialized-as-null`
 
 ## Candidates that were not confirmed
 

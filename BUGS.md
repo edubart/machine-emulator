@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-34 confirmed issues: 4 high, 9 medium, 21 low.
+38 confirmed issues: 4 high, 10 medium, 24 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -38,6 +38,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B13](#b13-lazily-loaded-forest-used-as-a-value-loses-its-unloaded-subtrees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Lazily loaded forest used as a value loses its unloaded subtrees | `bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/` |
 | [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Forest tree files keyed only by hash collide across heights and representations | `bugs/lua-04-content-addressing-ignores-height-and-representation/` |
 | [B17](#b17-abi-decoder-rejects-canonical-empty-arrays-of-dynamic-types) | medium | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder rejects canonical empty arrays of dynamic types | `bugs/lua-09-evmu-decode-empty-dynamic-element-array/` |
+| [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -49,7 +50,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B21](#b21-frontier_next_proofs-is-wrong-on-trees-of-height-64-or-more) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_next_proofs is wrong on trees of height 64 or more | `bugs/lua-13-next-proofs-signed-compare-ge64/` |
 | [B22](#b22-frontier_pad_back-rejects-valid-counts-and-corrupts-very-tall-frontiers) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_pad_back rejects valid counts and corrupts very tall frontiers | `bugs/lua-14-pad-back-tall-tree-size-wrap/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
-| [B24](#b24-frontier-files-are-created-with-mode-0600-ignoring-umask) | low | introduced by branch | Lua cartesi.hash-tree, CLI | Frontier files are created with mode 0600, ignoring umask | `bugs/rpc-07-frontier-files-mode-0600/` |
+| [B24](#b24-temporary-and-frontier-files-are-created-with-mode-0600-and-without-atomic-o_cloexec) | low | introduced by branch | Lua cartesi.filesystem and cartesi.hash-tree, CLI | Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC | `bugs/rpc-07-frontier-files-mode-0600/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
@@ -59,6 +60,9 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B31](#b31-a-failed-expansion-store-is-never-retried-by-later-frontier_forest_store-calls) | low | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | A failed expansion store is never retried by later frontier_forest_store calls | `bugs/lua-20-failed-expansion-store-never-retried/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
 | [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for files directly under the filesystem root | `bugs/lua-24-hash-tree-root-parent-directory/` |
+| [B36](#b36-temporary-files-from-killed-stores-are-never-cleaned-up) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Temporary files from killed stores are never cleaned up | `bugs/lua-25-leftover-temp-files/` |
+| [B37](#b37-filesystemtemp_pathname-returns-a-deleted-tmp-name-that-another-user-can-claim) | low | introduced by branch | Lua cartesi.filesystem | filesystem.temp_pathname returns a deleted /tmp name that another user can claim | `bugs/lua-27-temp-pathname-toctou/` |
+| [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 
 ## Issues
 
@@ -303,6 +307,7 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 **Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
 
 - `rpc-11-clear-hash-tree-crash-order`: run with `eval $(make -s env); sh bugs/rpc-11-clear-hash-tree-crash-order/run.sh`.
+- `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
@@ -1493,7 +1498,7 @@ Exit code 1 means the bug reproduced. Exit code 0 means it is fixed: the handsha
 
 **Related**: [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines).
 
-### B24. Frontier files are created with mode 0600, ignoring umask
+### B24. Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC
 
 **Title**: Frontier files from `hash_tree.frontier_store` and `frontier_forest_store`, including the CLI's `outputs_frontier` and computation `frontier` files, are created 0600 and ignore umask
 
@@ -1544,6 +1549,10 @@ eval $(make -s env); lua5.4 bugs/rpc-07-frontier-files-mode-0600/test_frontier_f
 Exit code 1 means the bug is present; it prints `OK: all files honor umask` and exits 0 once fixed.
 
 **ID**: `rpc-07-frontier-files-mode-0600`
+
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `lua-23-temp-file-cloexec-race-and-mode`: run with `eval $(make -s env); sh bugs/lua-23-temp-file-cloexec-race-and-mode/run.sh`. It also shows that `os::create_temporary_file` gets its fd from `mkstemp` without `O_CLOEXEC` and sets `FD_CLOEXEC` with a later `fcntl`, so a fork and exec on another thread in between inherits the fd. Use `mkostemp(..., O_CLOEXEC)` and `fchmod` to `0666 & ~umask`.
 
 ### B25. --clear-hash-tree is reapplied on every stored-mode revert
 
@@ -2083,3 +2092,218 @@ eval $(make -s env); lua5.4 bugs/lua-24-hash-tree-root-parent-directory/test-roo
 Exit status 1 together with `BUG:` lines means the bug reproduced; exit status 0 means it is fixed.
 
 **ID**: `lua-24-hash-tree-root-parent-directory`
+
+### B35. collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image
+
+**Title**: collect_uarch_cycle_root_hashes / collect_uarch_cycle_bundle restore only dirty uarch RAM words on reset, so reset leaves (and all later leaves) differ from reset_uarch / verify_reset_uarch when uarch RAM is not the built-in image
+
+**Problem**: After each mcycle, `machine::collect_uarch_cycle_root_hashes` does not call `reset_uarch()`. As an optimization it resets the uarch registers to `uarch_registers_state{}`, then copies the library's built-in `uarch_pristine_ram` (or zeros past its end) back only into the uarch RAM words written during that mcycle (`reset_dirty_words`). It then rehashes only those words with `m_ht.update_words`. The real reset is different. `reset_uarch()`, `log_reset_uarch`/`verify_reset_uarch` and the on-chain reset they model all write the whole built-in image over uarch RAM and zero-fill the rest. The shortcut is equivalent only when every word the uarch did not write already equals the built-in image, and nothing checks this: the only uarch precondition is `uarch_cycle == 0`. If the machine's uarch RAM differs from the built-in image anywhere, the collected reset leaf comes from a mixed state that no reset proof can produce. Every later leaf is then wrong as well, and the machine is left in that mixed state. `collect_uarch_cycle_bundle` calls `collect_uarch_cycle_root_hashes`, so it has the same defect.
+
+**Origin**: pre-existing. The same shortcut is in `origin/main` (v0.22.0) at `src/machine.cpp:2794`.
+
+**Area**: microarchitecture root-hash collection for PRT: `collect_uarch_cycle_root_hashes` and `collect_uarch_cycle_bundle` (C API `cm_collect_uarch_cycle_root_hashes`/bundle, Lua bindings, JSON-RPC).
+
+**Category**: correctness (wrong commitment hashes / state divergence).
+
+**Location**:
+- `src/machine.cpp:2797-2824`: shortcut reset in `machine::collect_uarch_cycle_root_hashes` (registers reset, dirty-word restore, `update_words`).
+- `src/machine.cpp:2677-2679`: precondition checks only `uarch_cycle == 0`, not that uarch RAM is pristine.
+- `src/machine.cpp:2051-2068`: `machine::reset_uarch`, the full reset (whole image plus zero fill) that `log_reset_uarch`/`verify_reset_uarch` replay.
+- `src/machine.cpp:2894`: `collect_uarch_cycle_bundle` reuses `collect_uarch_cycle_root_hashes`.
+
+**Evidence**: The test creates a uarch RAM backing file through config `uarch.ram.backing_store.data_filename`, the mechanism behind CLI `--uarch-ram-image`. The file equals the built-in image except its last 4 KiB page, which is filled with `0xaa` and which the uarch never touches. The test compares `collect_uarch_cycle_root_hashes(3, 0, tail)` against a reference loop: `run_uarch(UARCH_CYCLE_MAX)`, then `get_root_hash` (halt leaf), then `log_reset_uarch` + `verify_reset_uarch` (reset leaf). It also checks the machine root after `collect_uarch_cycle_bundle`. The control run with the built-in uarch RAM matches everywhere. With the custom image, the reset leaf of mcycle 1 differs from what `verify_reset_uarch` returns, and every later leaf diverges:
+```
+[built-in uarch ram] mcycle 1: halt leaf ok (64dcb7ade907f069 vs 64dcb7ade907f069), reset leaf ok (beafc583c3a41063 vs verify_reset_uarch beafc583c3a41063)
+[custom uarch ram] mcycle 1: halt leaf ok (ca0120065f62a44c vs ca0120065f62a44c), reset leaf MISMATCH (370c69331539f6a7 vs verify_reset_uarch beafc583c3a41063)
+[custom uarch ram] mcycle 2: halt leaf MISMATCH (ef9c969db160a639 vs 38f993e746476dad), reset leaf MISMATCH (4e87a0c3654bd578 vs verify_reset_uarch 5169efe4d5f24b00)
+[custom uarch ram] machine root after collect == root after reference: false
+[custom uarch ram] machine root after collect_uarch_cycle_bundle == reference reset of mcycle 1: false
+BUG: collect_uarch_cycle_root_hashes/collect_uarch_cycle_bundle reset leaves differ from reset_uarch/verify_reset_uarch when uarch RAM is not the built-in pristine image
+```
+Run: `eval $(make -s env); lua5.4 bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/test-collect-nonpristine-uarch-ram.lua` (exit 1). On the custom machine, the reference reset hash after mcycle 1 equals the built-in machine's reset hash (`beafc5...`). This confirms that the real reset restores the built-in image.
+
+**Scenario**: A template or snapshot holds uarch RAM that is not byte-identical to the built-in image of the libcartesi the validator links. Ways this happens:
+- the machine was built with `--uarch-ram-image` or a `uarch.ram.backing_store`;
+- the snapshot was stored by a different build;
+- uarch RAM was changed through `write_memory`.
+
+A PRT validator (Dave, the Rollups Node, or another node) that builds its uarch-level commitment with `collect_uarch_cycle_root_hashes` or `collect_uarch_cycle_bundle` then commits reset leaves that `verify_reset_uarch` and the on-chain reset step cannot reproduce. Every later leaf is wrong too. In a dispute that reaches the reset step or any later uarch step, the honest player cannot prove its leaf and loses to an opponent that commits the full-reset leaves. If the differing words were uarch code or data that is read, later mcycles would even run different uarch code than a real reset gives. With the default config (built-in uarch RAM), the shortcut is correct.
+
+**Possible solution**: At the start of collection, or before each shortcut reset, check that the uarch state is pristine: compare the uarch RAM range hash or the uarch state hash with `get_uarch_pristine_hash()`. If it is not pristine, either fall back to a full `reset_uarch()` (full write plus full hash-tree update) for that mcycle, or throw a clear error that rejects the machine. A cheaper and stricter variant: do the full `reset_uarch()` once on the first mcycle, so every later state is pristine and the dirty-word shortcut becomes valid.
+
+**Severity**: medium. When it triggers, the impact is critical: the committed reset leaf and every later leaf cannot be proven, so an honest player loses. Both reviewers rated it medium because it needs a uarch RAM that differs from the library's built-in image, which default templates from the same release never have. A validator whose built-in image differs from the on-chain one would also fail through other paths.
+
+**Risks**: Bug: silent wrong commitments, with no error, for machines with a custom or stale uarch RAM image. The machine is also left in a mixed state, so any later `get_root_hash`, proof or snapshot of it is wrong. Fix: a pristine check adds one hash comparison per collection (cheap). A full-reset fallback costs a full uarch RAM write and rehash per mcycle, but only on the non-pristine path. Rejecting such machines could break existing users of `--uarch-ram-image`; this is acceptable, since their commitments are unprovable today. Whatever the fix, it must keep the leaves byte-identical to `log_reset_uarch`/`verify_reset_uarch` in the pristine case.
+
+**Proof of concept**: `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/test-collect-nonpristine-uarch-ram.lua`. The test needs no machine images. It writes a temporary uarch RAM image next to itself (or in the directory given as its first argument) and removes it afterwards. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/test-collect-nonpristine-uarch-ram.lua
+```
+Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image control unexpectedly failed.
+
+**ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
+
+### B36. Temporary files from killed stores are never cleaned up
+
+**Title**: Temporary files from stores killed mid-write are never cleaned up and pile up in forest/frontier directories
+
+**Problem:** `write_file` in `cartesi.hash-tree` writes each tree or frontier file as `<name>.tmp.XXXXXX` in the target directory (`fs.new_temporary_file`). It then syncs the file and renames it into place. The temporary file is removed on failure only by the temporary object's `close`, which runs from `__close`/`__gc` (`cartesi.filesystem`). Neither runs when the process is SIGKILLed or OOM-killed, or when the machine loses power. No store or load path ever removes stale temporary files: `store_tree` and `load_tree` only test or open `<hash>.json` by its exact name, and `hash-tree.lua` never lists the directory. Every crash that lands between creating the temporary file and renaming it therefore leaves an orphaned file behind for good.
+
+**Origin:** Introduced by this branch (`hash-tree.lua` and `filesystem.lua` are new).
+
+**Area:** Lua library `cartesi.hash-tree` (`frontier_forest_store`, `frontier_store`), with `cartesi.filesystem` temporary files.
+
+**Category:** Resource leak (disk).
+
+**Location:**
+- `src/cartesi/hash-tree.lua:509-514` (`write_file`: creates `<name>.tmp.` in the target directory)
+- `src/cartesi/filesystem.lua:52-68` (cleanup only through `close`, `__close` and `__gc`)
+- `src/cartesi/hash-tree.lua:525-527, 577-592` (`load_tree`/`store_tree` only check `<hash>.json` with `fs.exists`)
+- `src/cartesi/hash-tree.lua:935-938` (`frontier_store`), `967-1018` (`frontier_forest_store`/`frontier_forest_load`): no cleanup
+
+**Evidence:** `child.lua` builds a 1024-leaf keccak256 forest. It wraps `fs.sync_file` so that the process SIGKILLs itself after the temporary file is written and synced, but before the rename. It then calls `frontier_forest_store`. `test.lua` runs this 5 times with different leaves. It then runs one healthy store and `frontier_forest_load` in the same directory, and counts the `*.tmp.*` entries.
+```
+$ eval $(make -s env); lua5.4 bugs/lua-25-leftover-temp-files/test.lua
+crash 1: ok=nil how=exit code=137 tmp files now=1
+...
+crash 5: ok=nil how=exit code=137 tmp files now=5
+after healthy store+load: 5 leftover .tmp. files (353585 bytes)
+  0x45f40119...df47f.json.tmp.9SwUWg
+  ...
+BUG: 5 orphaned temporary files from 5 interrupted stores remain after a later store/load; nothing cleans them
+```
+
+**Scenario:** A validator node (an experimental PRT node, or any Rollups Node or Dave component using these Lua APIs) persists its commitment forests with `frontier_forest_store`. It gets OOM-killed, restarted by its supervisor, or loses power from time to time while storing. Each such crash leaves one tree-sized file, roughly 70 KB per 1024 base hashes, in the forests directory or in the frontier's parent directory. Over a long run on a node that crashes often, these files take up more and more disk space. That moves the node closer to disk-full (ENOSPC) conditions, which feed the separate truncated-write issue in `write_file`.
+
+**Possible solution:** Clean up stale temporary files when a directory is used. For example, in `frontier_forest_load`/`frontier_forest_store` (or in a dedicated `cleanup` helper), remove entries matching `*.json.tmp.*` from the forests directory and from the frontier's parent directory. Only do this when the caller owns the directory, so that a live writer's file is never removed. Another option is to create temporary files in a dedicated subdirectory (on the same filesystem, so rename stays atomic) that is wiped at startup. Document that a forests directory has a single writer.
+
+**Severity:** Low. Both reviewers and the prover agree. Hashes, proofs, stored-state correctness and dispute outcomes are not affected, because loads never read `*.tmp.*` files and the rename commit keeps every committed name consistent. Nothing crashes or hangs. The leak is at most one tree-sized file per crash that lands mid-write, so it matters only for nodes that crash repeatedly over a long time.
+
+**Risks:**
+- Of the bug: slow, unbounded disk growth on unstable nodes, which adds to the chance of ENOSPC and the failures that follow it (failed or truncated stores, a node that stops).
+- Of the fix: removing temporary files without regard to other processes could delete a file that a concurrent writer is about to rename, making that store fail. So cleanup has to assume or enforce a single owner per directory. A glob that is too broad could also delete user files that share the directory. Match only the exact `<64-hex>.json.tmp.XXXXXX` and `<frontier-name>.tmp.XXXXXX` patterns.
+
+**Proof of concept:** `bugs/lua-25-leftover-temp-files/test.lua` (driver) and `bugs/lua-25-leftover-temp-files/child.lua` (store that is killed mid-write). Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/lua-25-leftover-temp-files/test.lua
+```
+It exits with 1 and prints `BUG: ...` while the leak is present, and prints `OK: no leftover temporary files` once it is fixed.
+
+**ID**: `lua-25-leftover-temp-files`
+
+**Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files).
+
+### B37. filesystem.temp_pathname returns a deleted /tmp name that another user can claim
+
+**Title**: `cartesi.filesystem.temp_pathname` returns a `/tmp` name it has just deleted, so another local user can claim it (TOCTOU)
+
+**Problem**: `filesystem.temp_pathname()` calls `os.tmpname()`, which uses `mkstemp` to create `/tmp/lua_XXXXXX`. It then deletes that file and returns the name. This is the insecure `tmpnam` / `mktemp -u` pattern. Between the return and the caller's use of the name, any local user can create a symlink or a directory at that path in the world-writable `/tmp`. Callers use the returned name as the place to create a store, a checkpoint or a status directory.
+
+**Origin**: Introduced by this branch. On `main` the same helper existed only in `tests/lua/cartesi/filesystem.lua`. This branch moves it into `src/cartesi/filesystem.lua`, which the Makefile installs through `EMU_TO_LUA_PATH`, so it is now part of the public `cartesi.filesystem` module.
+
+**Area**: Lua library `cartesi.filesystem` (`temp_pathname`)
+
+**Category**: Security (local TOCTOU / insecure temporary file)
+
+**Location**:
+- `src/cartesi/filesystem.lua:78-82` (`filesystem.temp_pathname`)
+- `Makefile:80` (`EMU_TO_LUA_PATH` installs `src/cartesi/filesystem.lua`)
+- Example callers (recipes, not shipped code): `doc/recipes/prt-demo.lua:99`, and `doc/recipes/prt-test.lua:170, 823, 2008, 2217, 2314`
+
+**Evidence**: The test runs the victim as root. Right after `temp_pathname()` returns, it runs the attacker's steps as uid 65534 (`nobody`) through `setpriv`, which stands in for an attacker who has won the race.
+(1) The attacker plants a symlink at the returned path that points to a file inside the victim's private 0700 directory. The victim's `fs.write_file` follows the symlink and overwrites that file. This host has `fs.protected_symlinks=0`.
+(2) The attacker runs `mkdir` on the returned path first. The victim's `fs.create_directory` then fails with EEXIST.
+Run command: `eval $(make -s env); lua5.4 bugs/lua-27-temp-pathname-toctou/test.lua`
+```
+running as root: true, fs.protected_symlinks=0
+temp_pathname() -> /tmp/lua_wXY1oK (exists: false)
+victim write_file to temp path: ok=true
+BUG: write to fs.temp_pathname() path followed attacker's symlink and overwrote /tmp/tmp.shPbRLvdjK/precious
+victim create_directory(temp_pathname()): ok=false err=unable to create directory '/tmp/lua_e39RDd': File exists
+BUG: attacker pre-created directory at fs.temp_pathname() path; victim's create_directory fails (DoS)
+exit=1
+```
+
+**Scenario**: A validator node or tool built on the shipped Lua library runs on a shared host and uses `fs.temp_pathname()` as the location for its store, checkpoint or status directory, the way the PRT recipes do. A local attacker watches `/tmp` (for example with inotify) and creates the name first.
+- On every kernel: a pre-created directory or file makes the node's directory creation or store fail at startup. This is a denial of service.
+- On hosts with `fs.protected_symlinks=0`: the node's writes follow a planted symlink, so it can overwrite files the attacker chose, with the node's privileges.
+
+No shipped emulator code path (the `cartesi-machine` CLI, the C API or the other Lua modules) calls this helper. Hashes, proofs and step logs are not affected.
+
+**Possible solution**: Remove `temp_pathname` from the shipped module, or make it safe. One option is to create a private directory with `mkdtemp` (mode 0700) and return a path inside it, so no other user can create that path. Another is to provide `create_temporary_directory()` built on `mkdtemp` and move the callers to it. A `mkdtemp` binding in the C filesystem core would make either option straightforward. With either fix the PoC exits 0.
+
+**Severity**: Low. Both reviewers and the prover agree. An attacker needs a local account on a shared host and must win a race against a random name. On default kernels (`protected_symlinks=1`) the impact is limited to making the node fail at startup. No shipped emulator code uses the helper, and consensus data (hashes and proofs) is not affected.
+
+**Risks**:
+- Of the bug: other node implementations may copy the recipe pattern and get startup DoS on shared hosts, or symlink-redirected writes where `protected_symlinks` is off.
+- Of the fix: removing or renaming the function breaks callers (the recipes and the tests). Returning a path inside a private directory changes cleanup semantics, because the caller must also remove the parent directory, so temporary directories may leak if callers are not updated.
+
+**Proof of concept**: `bugs/lua-27-temp-pathname-toctou/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-27-temp-pathname-toctou/test.lua`. It exits 1 when the bug reproduces and 0 when the returned path cannot be claimed. Run it as root (with `setpriv` available) so the attacker steps run as `nobody`. As a non-root user it only gives a weaker same-user demonstration.
+
+**ID**: `lua-27-temp-pathname-toctou`
+
+### B38. ABI decoder accepts dirty address bits and non-zero padding
+
+**Title**: evmu ABI decoder accepts dirty upper bits in `address` and dirty padding in `bytesN`, which Solidity rejects, and non-zero padding in `bytes`/`string`
+
+**Problem**: The ABI decoder in `cartesi.evmu` does not check bits that a canonical encoding requires to be zero:
+- `decode_address` keeps the last 20 bytes of the word (`tobe(word):sub(-20)`) and ignores the upper 12 bytes.
+- `decode_bytes_sized` (`bytesN`) reads `N` bytes and skips the other `32-N` padding bytes without checking them.
+- `decode_string` and the dynamic branch of `decode_bytes` skip the padding up to `ceil32(len)` without checking it.
+
+The same file is strict elsewhere: `decode_uint` and `decode_int` check range, and `decode_bool` rejects anything other than 0 or 1. Solidity's ABI coder v2 reverts on an `address` or `bytesN` with dirty bits, so for those two types evmu accepts data that the on-chain `abi.decode` rejects. Solidity does not check trailing padding of dynamic `bytes`/`string`, so for those two types the issue is only malleability: several distinct byte strings decode to the same value.
+
+**Origin**: Pre-existing. The branch added the selectorless wrappers `encode_abi`/`decode_abi` (commit 44f37ea). `decode_abi` sends data to the same lenient decoders, which makes them reachable from one more public entry point.
+
+**Area**: `src/cartesi/evmu.lua`, the ABI decoder in the shipped Lua library (installed through `EMU_TO_LUA_PATH` in the top-level Makefile).
+
+**Category**: Correctness. The decoder is non-canonical and inconsistent with on-chain decoding.
+
+**Location**:
+- `src/cartesi/evmu.lua:670-676` (`decode_address`)
+- `src/cartesi/evmu.lua:702-709` (`decode_bytes_sized`)
+- `src/cartesi/evmu.lua:691-700` (`decode_string`)
+- `src/cartesi/evmu.lua:712-722` (`decode_bytes`, dynamic branch)
+- Reached through `_M.decode_calldata` (`:820`), `_M.decode_calldata_hex` (`:836`) and `_M.decode_abi` (`:842`).
+
+**Evidence**: The test first runs two control cases, which are rejected. It then feeds six non-canonical encodings, and all six are accepted:
+```
+$ eval $(make -s env); lua5.4 bugs/lua-28-evmu-lenient-dirty-bits-padding/test.lua
+ok: (bool) value 2 [control] rejected: .../evmu.lua:686: invalid bool value in calldata (must be 0 or 1)
+ok: (uint8) value 256 [control] rejected: .../evmu.lua:652: integer value does not fit in target type
+BUG: (address) with 0xff upper 12 bytes accepted (decoded "0x1111111111111111111111111111111111111111")
+BUG: (bytes4) with non-zero padding accepted (decoded "0xdeadbeef")
+BUG: (string) with non-zero padding accepted (decoded "a")
+BUG: (bytes) with non-zero padding accepted (decoded "0x61")
+BUG: decode_calldata Notice(bytes) dirty padding accepted (decoded "a")
+BUG: two distinct encodings decode to the same bytes value "a"
+BUG: decoder accepted 6 non-canonical encodings
+```
+The test exits with status 1.
+
+**Scenario**: The decoder is used by a Lua validator, indexer or tool that decodes untrusted ABI data with evmu, such as `decode_calldata` on Notice/Voucher outputs or `decode_abi` on `eth_call` results. Two things can go wrong:
+- An `address` or `bytesN` with dirty bits is treated as valid, even though a contract's `abi.decode` of the same bytes would revert. For example, a voucher destination or payload field shows as well formed off-chain but fails on-chain.
+- Distinct encodings collapse to the same decoded value. Code that deduplicates or keys on decoded values can then disagree with code that works on the raw bytes.
+
+None of the following uses evmu: the C API, the JSON-RPC machine or the `cartesi-machine` CLI. Machine state hashes, output Merkle roots, proofs and step logs are all computed over raw bytes. So this bug cannot change a PRT commitment or make an honest player lose a dispute.
+
+**Possible solution**:
+- In `decode_address`, assert that the upper 12 bytes of the word are zero (`tobe(word):sub(1, 12) == ("\0"):rep(12)`).
+- In `decode_bytes_sized`, assert that `calldata:sub(offset + size + 1, offset + padded_len)` is all zero.
+- Optionally, for strict canonical decoding, check the same zero padding in `decode_string` and `decode_bytes`. Also optionally reject non-canonical head offsets, since aliasing or overlapping offsets are also accepted today.
+
+**Severity**: Low. Both reviewers agree. The defect is real and reachable through the public Lua API, but it is pre-existing and limited to a Lua helper library. It never affects machine hashes, proofs, step logs, the C API or the CLI, so it cannot crash a validator or decide a dispute.
+
+**Risks**:
+- Of the bug: off-chain Lua consumers may accept malformed or malleable ABI data that the on-chain decoder rejects, and so diverge from contract behaviour on what counts as a valid output or input.
+- Of the fix: stricter checks may start rejecting inputs that callers currently accept, such as sloppy hand-built calldata in scripts or tests. Making the padding checks on `bytes`/`string` strict goes beyond what Solidity enforces, so it should be a deliberate choice, or be made optional.
+
+**Proof of concept**: `bugs/lua-28-evmu-lenient-dirty-bits-padding/test.lua`. Run it from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/lua-28-evmu-lenient-dirty-bits-padding/test.lua
+```
+The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is fixed.
+
+**ID**: `lua-28-evmu-lenient-dirty-bits-padding`
+
+**Related**: [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets).

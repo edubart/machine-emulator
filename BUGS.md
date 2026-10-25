@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-38 confirmed issues: 4 high, 10 medium, 24 low.
+39 confirmed issues: 4 high, 10 medium, 25 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -63,6 +63,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B36](#b36-temporary-files-from-killed-stores-are-never-cleaned-up) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Temporary files from killed stores are never cleaned up | `bugs/lua-25-leftover-temp-files/` |
 | [B37](#b37-filesystemtemp_pathname-returns-a-deleted-tmp-name-that-another-user-can-claim) | low | introduced by branch | Lua cartesi.filesystem | filesystem.temp_pathname returns a deleted /tmp name that another user can claim | `bugs/lua-27-temp-pathname-toctou/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
+| [B39](#b39-collect_uarch_cycle_-aborts-the-process-when-the-uarch-is-halted-but-not-reset) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* aborts the process when the uarch is halted but not reset | `bugs/api-09-collect-uarch-halted-uarch-assert-abort/` |
 
 ## Issues
 
@@ -2143,6 +2144,8 @@ Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image c
 
 **ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
 
+**Related**: [B39](#b39-collect_uarch_cycle_-aborts-the-process-when-the-uarch-is-halted-but-not-reset).
+
 ### B36. Temporary files from killed stores are never cleaned up
 
 **Title**: Temporary files from stores killed mid-write are never cleaned up and pile up in forest/frontier directories
@@ -2307,3 +2310,53 @@ The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is 
 **ID**: `lua-28-evmu-lenient-dirty-bits-padding`
 
 **Related**: [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets).
+
+### B39. collect_uarch_cycle_* aborts the process when the uarch is halted but not reset
+
+**Title**: collect_uarch_cycle_root_hashes and collect_uarch_cycle_bundle abort the process (assert) when uarch_halt=1 and uarch_cycle=0, because the precondition checks only uarch_cycle
+
+**Problem**: The only uarch precondition in `machine::collect_uarch_cycle_root_hashes` is `read_reg(reg::uarch_cycle) != 0` -> throw "microarchitecture is not reset". `uarch_halt` is not checked. With `uarch_halt == 1` and `uarch_cycle == 0`, the first `uarch_interpret` in the inner loop returns `uarch_halted` without executing anything, and the loop breaks. The halt and reset hashes are appended and the uarch registers are reset, but mcycle never advanced, so `assert(mcycle_reached == mcycle_target)` fails. In the default build (`relwithdebinfo`, used for packaging), `src/Makefile` adds `-DNDEBUG` only to `interpret.cpp`, so `machine.cpp` keeps its asserts. The call therefore sends SIGABRT to the host process (the validator, or `cartesi-jsonrpc-machine` for a remote machine) instead of raising a catchable error. In an NDEBUG build (`release=yes`) the call does not abort. It returns a halt+reset group for an mcycle that never ran, then continues from the reset uarch, so every later leaf is shifted. `collect_uarch_cycle_bundle` calls `collect_uarch_cycle_root_hashes`, so it has the same defect.
+
+**Origin**: pre-existing. `origin/main` has the same precondition (`src/machine.cpp:2676`) and the same assert (`src/machine.cpp:2834`).
+
+**Area**: microarchitecture root-hash collection for PRT: `collect_uarch_cycle_root_hashes` and `collect_uarch_cycle_bundle` (C API `cm_collect_uarch_cycle_root_hashes` and the bundle call, Lua bindings, JSON-RPC server).
+
+**Category**: crash (process abort through a reachable assert); wrong hashes in NDEBUG builds.
+
+**Location**:
+- `src/machine.cpp:2678`: uarch precondition checks only `uarch_cycle`.
+- `src/machine.cpp:2780`: an already-halted uarch breaks out of the inner loop at once.
+- `src/machine.cpp:2837`: `assert(mcycle_reached == mcycle_target)` aborts the process.
+- `src/machine.cpp:2894`: `collect_uarch_cycle_bundle` reaches the same path.
+
+**Evidence**: `test-uarch-halt-abort.lua` runs each local case in a child process and also drives a spawned `cartesi-jsonrpc-machine`. All four cases abort with SIGABRT (exit 134) instead of raising an error:
+- (a) `write_reg("uarch_halt", 1)`, then `collect_uarch_cycle_root_hashes`.
+- (b) A config with `uarch.processor.registers.halt = 1`, the same state a stored machine can carry.
+- (c) `collect_uarch_cycle_bundle`.
+- (d) A remote machine: the server process dies.
+
+Run from the repo root with `eval $(make -s env); lua5.4 bugs/api-09-collect-uarch-halted-uarch-assert-abort/test-uarch-halt-abort.lua`:
+```
+lua5.4: machine.cpp:2837: ... collect_uarch_cycle_root_hashes(...): Assertion `mcycle_reached == mcycle_target' failed.
+Aborted
+BUG: local write_reg case: child terminated abnormally (exit 134) instead of raising an error
+... (same for config and bundle cases)
+cartesi-jsonrpc-machine: machine.cpp:2837: ... Assertion `mcycle_reached == mcycle_target' failed.
+remote collect: ok=false err=jsonrpc error: post error contacting 127.0.0.1:45905 (end of stream ...)
+BUG: remote case: cartesi-jsonrpc-machine server died after collect_uarch_cycle_root_hashes: ... (Connection refused ...)
+rc=1
+```
+
+**Scenario**: A validator (Rollups Node, Dave, or the Lua PRT node) loads a template or snapshot whose uarch registers have `halt = 1` and `cycle = 0`. This can happen through a misconfigured config, a hand-edited or corrupted stored machine, or a tool that called `write_reg("uarch_halt", 1)` before storing. When the node computes uarch-level commitments or a bundle for a dispute, the whole process aborts instead of reporting an error it could handle. If such a template were deployed, every validator using it would crash at that point. With a remote machine, the `cartesi-jsonrpc-machine` server dies and the client sees "end of stream", then "connection refused". Normal API use cannot reach this state: after `run_uarch` to halt, `uarch_cycle` is non-zero and the existing check rejects the call, and `reset_uarch` clears both registers.
+
+**Possible solution**: Also throw `std::runtime_error{"microarchitecture is not reset"}` when `read_reg(reg::uarch_halt) != 0`, or require fully pristine uarch registers. Replace the post-loop sanity `assert`s (`uarch_halt != 0`, `mcycle_reached == mcycle_target`) with runtime checks that throw, so an unexpected state cannot abort the host process or produce silently wrong leaves in NDEBUG builds. Apply the same check to every other uarch entry point that assumes a reset uarch.
+
+**Severity**: low. Both reviewers agree on this. The abort is real and kills the validator or the JSON-RPC server, but it needs a non-canonical uarch state that honest operation never produces, and an adversary cannot inject that state into an honest node's dispute. The wrong-hash variant exists only in non-default NDEBUG builds, from the same state.
+
+**Risks**: Bug: a hard process abort (DoS) of a long-running validator or a shared JSON-RPC server, triggered by a bad template or snapshot. In NDEBUG builds, a silently wrong uarch commitment (a shifted leaf sequence) that would lose a dispute. Fix: low risk. The new check only rejects a state that is already invalid for this API. Turning the asserts into exceptions changes nothing on valid inputs.
+
+**Proof of concept**: `bugs/api-09-collect-uarch-halted-uarch-assert-abort/test-uarch-halt-abort.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/api-09-collect-uarch-halted-uarch-assert-abort/test-uarch-halt-abort.lua`. It exits 1 and prints `BUG:` lines while the defect is present, and prints `PASS` once every case raises a catchable error and the remote server survives.
+
+**ID**: `api-09-collect-uarch-halted-uarch-assert-abort`
+
+**Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).

@@ -133,3 +133,30 @@ dispute deadlines, as well as general API consumers.
 - **Severity:** **Low (P3)**; a supported CLI operation fails for valid filenames.
 - **Risks/limits:** No effect on normal guest execution or dispute outcomes was
   demonstrated. The reproduction exercises only legitimate directory names.
+
+## 005 — ABI decoding rejects valid empty arrays of dynamic elements
+
+- **Problem:** The dynamic-element branch of `decode_array` initializes its end
+  offset only inside the element loop. An empty array returns a nil offset, so
+  the enclosing decoder rejects a valid encoding as having trailing data.
+- **Area/category:** Shipped `cartesi.evmu` Lua library; ABI decoding correctness.
+  **Pre-existing** shared decoder bug, newly exposed through this branch's
+  `decode_abi`; the existing `decode_calldata` is also affected.
+- **Location:** `src/cartesi/evmu.lua:742–750` (`last_offset`), with rejection in
+  `decode_abi` at line 846 and `decode_calldata` at line 831.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/005-empty-dynamic-abi-array.lua`.
+  The test constructs the canonical 64-byte encoding independently: offset 32,
+  followed by length zero. Empty `string[]`, `bytes[]`, nested dynamic arrays,
+  and arrays of dynamic tuples fail with `ABI data too long`; the same bytes
+  decode correctly as empty `uint256[]`. Nonempty `string[]` also succeeds.
+  Existing calldata decoding rejects its matching canonical encoding. Independently
+  reproduced and checked against controls by a second reviewer and the orchestrator.
+- **Scenario:** A consumer decodes ordinary contract return values or event data
+  containing an empty array of dynamic values and unexpectedly aborts processing.
+- **Possible solution:** Initialize `last_offset` to `new_offset` before iterating,
+  so an empty array returns the endpoint after its length word.
+- **Severity:** **Medium (P2)**; valid ABI responses cannot be processed by affected
+  consumers.
+- **Risks/limits:** No concrete financial-loss or dispute-loss scenario was
+  established. Effect on a validator depends on which ABI schemas it consumes.

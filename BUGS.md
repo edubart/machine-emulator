@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-40 confirmed issues: 4 high, 10 medium, 26 low.
+43 confirmed issues: 4 high, 10 medium, 29 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -65,6 +65,9 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 | [B39](#b39-collect_uarch_cycle_-aborts-the-process-when-the-uarch-is-halted-but-not-reset) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* aborts the process when the uarch is halted but not reset | `bugs/api-09-collect-uarch-halted-uarch-assert-abort/` |
 | [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree) | low | pre-existing | Machine API (uarch cycle collection) | Over-long revert_uarch_tail aborts on an assert or yields an invalid mcycle subtree | `bugs/api-10-collect-uarch-revert-tail-length-unvalidated/` |
+| [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
+| [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
+| [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder's trailing-data check uses only the last dynamic tail | `bugs/lua-29-evmu-end-offset-last-dynamic-only/` |
 
 ## Issues
 
@@ -1128,6 +1131,8 @@ Reviewers also found that `(bytes[],uint256)` fails, while `(bytes[],bytes)` dec
 **Proof of concept:** `bugs/lua-09-evmu-decode-empty-dynamic-element-array/test_decode_empty_dynamic_array.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/lua-09-evmu-decode-empty-dynamic-element-array/test_decode_empty_dynamic_array.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 once it is fixed.
 
 **ID**: `lua-09-evmu-decode-empty-dynamic-element-array`
+
+**Related**: [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail).
 
 ### B18. ABI decoder bounds checks overflow and accept out-of-bounds offsets
 
@@ -2423,3 +2428,165 @@ Exit 1 means the bug is present. Exit 0 means all three cases reject the over-lo
 **ID**: `api-10-collect-uarch-revert-tail-length-unvalidated`
 
 **Related**: [B39](#b39-collect_uarch_cycle_-aborts-the-process-when-the-uarch-is-halted-but-not-reset).
+
+### B41. collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount
+
+**Title**: `collect_uarch_cycle_root_hashes` accepts `log2_bundle_uarch_cycle_count` 21..63, hits a negative shift (UB) and returns a malformed layout
+
+**Problem:** `machine::collect_uarch_cycle_root_hashes` never checks that `log2_bundle_uarch_cycle_count` is in `0..ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE` (0..20). The only bound comes from the `back_merkle_tree` constructor, which accepts 0..63. For values from 21 to 63, `append_uarch_reset_root_hash` computes `UINT64_C(1) << (20 - log2_bundle_uarch_cycle_count)`. That is a shift by a negative amount, which is undefined behavior, and the `assert` after it is compiled out in release builds. Instead of an argument error, the call returns 3 entries per mcycle (a padded execution bundle, the halt pad hash and the reset bundle), and each entry claims to cover 2^log2 > 2^20 leaves. The sibling API `collect_uarch_cycle_bundle` rejects the same values with `log2_bundle_uarch_cycle_count must be in {0, ..., 20}`.
+
+**Origin:** pre-existing. `origin/main` has the same unguarded shift and no range check.
+
+**Area:** `collect_uarch_cycle_root_hashes` in the C++ machine, used by the C API (`cm_collect_uarch_cycle_root_hashes`), the Lua binding and the JSON-RPC server/client.
+
+**Category:** api-contract / input validation (undefined behavior)
+
+**Location:**
+- `src/machine.cpp:2657-2713`: `machine::collect_uarch_cycle_root_hashes` has no range check, and the `back_merkle_tree` is built at line 2713
+- `src/machine.cpp:2604-2606`: the negative shift in `append_uarch_reset_root_hash`
+- `src/back-merkle-tree.hpp:47-52`: the only check, which allows 0..63
+- `src/machine.cpp:2878-2881`: the check in `collect_uarch_cycle_bundle`, for comparison
+- `src/cm.cpp:789`, `src/clua-i-machine.cpp:1300`, `src/jsonrpc-remote-machine.cpp:1014`: these pass the value through unchanged
+
+**Evidence:** The test makes a fresh machine (local, then remote through JSON-RPC). On each one it calls `collect_uarch_cycle_root_hashes(2, L, tail)` with L = 20 as a control, then with L = 21, 32, 40 and 63. It also calls `collect_uarch_cycle_bundle(0, 21, tail)`.
+```
+local	log2=20 ok:	4	entries, offsets	1,3,5
+local	collect_uarch_cycle_bundle(0,21):	rejected: log2_bundle_uarch_cycle_count must be in {0, ..., 20}
+BUG: local collect_uarch_cycle_root_hashes accepted log2_bundle_uarch_cycle_count=21 (valid range 0..20): 6 entries, offsets 1,4,7 ...
+BUG: local collect_uarch_cycle_root_hashes accepted log2_bundle_uarch_cycle_count=63 (valid range 0..20): 6 entries, offsets 1,4,7 ...
+jsonrpc	collect_uarch_cycle_bundle(0,21):	rejected: log2_bundle_uarch_cycle_count must be in {0, ..., 20}
+BUG: jsonrpc collect_uarch_cycle_root_hashes accepted log2_bundle_uarch_cycle_count=21 (valid range 0..20): 6 entries, offsets 1,4,7 ...
+BUG: 8 out-of-range log2_bundle_uarch_cycle_count values accepted
+```
+To run it: `eval $(make -s env); lua5.4 bugs/api-11-collect-uarch-log2-bundle-unbounded/test-uarch-log2-bound.lua`. The exit status is 1 while the bug is present. L = 64 is rejected, but only by the back tree's `log2_max_leaves is too large` check.
+
+**Scenario:** A validator node, a remote JSON-RPC client or a tool built on the C/Lua API passes the height of a different tree level, for example 21 or a whole-mcycle level, or reads a misconfigured constant. It does not get a clear argument error. The call succeeds with a malformed layout, so the caller builds a wrong uarch commitment or computation hash and may store or publish it. Because the shift is undefined behavior, the result could also differ across compilers, optimization levels or architectures. Correct PRT callers only use levels 0..20 and are not affected. A malformed commitment cannot match a valid on-chain one, so the most likely outcome is a mismatch or a wasted dispute, not an honest player being silently misled.
+
+**Possible solution:** At the top of `machine::collect_uarch_cycle_root_hashes`, before any work, add the same check that `collect_uarch_cycle_bundle` uses: `if (log2 < 0 || static_cast<uint64_t>(log2) > ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE) throw std::runtime_error{"log2_bundle_uarch_cycle_count must be in {0, ..., 20}"};`. Once that check exists, the redundant check in `collect_uarch_cycle_bundle` can stay or be removed.
+
+**Severity:** low. Both reviewers agree. Only callers that pass invalid arguments (21..63) are affected. The outcome is UB and a meaningless result rather than a crash, a hang or memory corruption (the back tree stays within its own bounds). Correct PRT nodes never pass values above 20.
+
+**Risks:** The bug lets a misconfigured validator produce commitments that look plausible but are invalid and that depend on the platform, with no error. The fix carries almost no risk. It only rejects inputs that never had a defined meaning. A caller that relied on values above 20 being accepted, which none should, would now get an error.
+
+**Proof of concept:** `bugs/api-11-collect-uarch-log2-bundle-unbounded/test-uarch-log2-bound.lua` (uses the local machine and a spawned JSON-RPC server, and takes about 2 s). From the repo root: `eval $(make -s env); lua5.4 bugs/api-11-collect-uarch-log2-bundle-unbounded/test-uarch-log2-bound.lua`. Exit status 1 with `BUG:` lines means the bug reproduced. Exit status 0 with `OK:` means it is fixed.
+
+**ID**: `api-11-collect-uarch-log2-bundle-unbounded`
+
+**Related**: [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree).
+
+### B42. filesystem.rename_file does not replace existing files on Windows
+
+**Title**: `cartesi.filesystem.rename_file` does not replace an existing destination on Windows, so every hash-tree durable rewrite after the first fails (`frontier_store`, `frontier_forest_store`, StoredTree)
+
+**Problem**: `filesystem.rename_file(from, to)` says it renames "atomically replacing the destination if it exists", but its body is just `assert(os.rename(from, to))`. Lua's `os.rename` is plain ISO C `rename()`. POSIX `rename()` replaces the destination. The Windows CRT `rename()` (msvcrt/UCRT, and so MinGW builds too) fails with `EEXIST`/`EACCES` when the destination exists. `temporary_file:rename` calls `rename_file`. `hash-tree.lua`'s `write_file` uses `temporary_file:rename` for every durable write, and its callers rewrite a fixed path on each commit:
+- StoredTree persistence
+- `frontier_store`
+- `frontier_forest_store`
+
+On Windows, the first write of each file succeeds and every later write raises. The destination keeps its stale contents. Nothing removes the destination first or falls back to another way of replacing it, and the C core has no Windows-aware rename helper.
+
+**Origin**: Introduced by this branch. `src/cartesi/filesystem.lua` and the hash-tree persistence code do not exist on `main`.
+
+**Area**: Lua library `cartesi.filesystem` (`src/cartesi/filesystem.lua`) and its users in `cartesi.hash-tree` (`src/cartesi/hash-tree.lua`). Validator nodes use these to persist output and epoch frontiers and stored trees.
+
+**Category**: API contract / portability. Availability: persisting state raises an error.
+
+**Location**:
+- `src/cartesi/filesystem.lua:127`: `function filesystem.rename_file(from, to) assert(os.rename(from, to)) end`
+- `src/cartesi/filesystem.lua:45-49`: `temporary_file:rename` calls `filesystem.rename_file`
+- `src/cartesi/hash-tree.lua:509-514`: local `write_file` (temporary file, sync, then rename)
+- `src/cartesi/hash-tree.lua:592` (StoredTree), `:936` (`frontier_store`), `:988` (`frontier_forest_store`): callers that rewrite a fixed path
+- Windows is an intended target. `src/os-filesystem.cpp` has new `_WIN32` branches (for example `create_temporary_file` at :667, plus `sync_file` and `sync_directory`), and `README.md:45` lists Windows support.
+
+**Evidence**: `test.lua` loads the repo's unmodified `src/cartesi/filesystem.lua`. It stubs only the C core functions `create_temporary_file`, `sync_file` and `sync_directory`, because the native core is not built for Windows here and the rename path does not use them. It then runs the same temporary-file, sync and rename sequence as `hash-tree.lua` `write_file` twice on one path. `run.sh` runs the test once with native Linux Lua and once with a Windows `lua.exe` (Lua 5.4.6, cross-built with mingw-w64) under Wine. Run it with `eval $(make -s env); sh bugs/lua-26-rename-not-replacing-on-windows/run.sh`. It exits 1:
+```
+== native lua5.4 (Linux) ==
+second store:	true	nil
+destination contents:	commit-2
+OK: destination replaced
+== Windows lua.exe under wine ==
+first store:	true	nil
+second store:	false	Z:/home/user/machine-emulator/src/cartesi\filesystem.lua:127: File exists
+destination contents:	commit-1
+BUG: rename_file did not replace existing destination (second frontier store failed): ...filesystem.lua:127: File exists
+```
+
+**Scenario**: A validator node built for Windows (or any tool using `cartesi.hash-tree` persistence there) persists the outputs frontier or the epoch-builder forest after each input or epoch. The first commit creates the file. The second commit raises `File exists`, and the node stops persisting state or crashes. After a restart it reloads the stale commit-1 frontier, if it reloads at all. Re-persisting a StoredTree to the same path fails the same way. Hashes and proofs are never silently wrong, because the failure is loud. Rollups Node and Dave do not deploy on Windows today, and the repo has no Windows build or CI, so the realistic reach is limited to people porting a node or tools to Windows.
+
+**Possible solution**: Implement the rename in the C core and expose it as `core.rename_file`. Use `rename()` on POSIX. On Windows, use `MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` (or `ReplaceFileW`), or use `std::filesystem::rename`, which replaces on both. Make `filesystem.rename_file` use it. Do not "remove the destination, then rename" in Lua: that breaks atomicity, because a crash between the two steps loses the file.
+
+**Severity**: Low. Both reviewers agree. The failure is loud, affects availability only, and occurs only on Windows builds, which have no build or CI support in the repo and are not used by Rollups Node or Dave. No data is corrupted, and no hashes or proofs come out wrong.
+
+**Risks**:
+- **Of the bug**: a Windows-hosted node cannot persist state after its first commit. A recovery path that writes the same file twice also fails.
+- **Of the fix**: a careless fallback (remove, then rename) opens a crash window in which neither the old file nor the new one exists. `MoveFileExW` can still fail with sharing violations while another handle holds the destination open, for example a concurrent reader or an antivirus scanner, so callers should expect it to fail occasionally.
+
+**Proof of concept**: `bugs/lua-26-rename-not-replacing-on-windows/test.lua` and `bugs/lua-26-rename-not-replacing-on-windows/run.sh`. From the repo root, run `eval $(make -s env); sh bugs/lua-26-rename-not-replacing-on-windows/run.sh`.
+
+It needs `lua5.4` and `wine` (or `wine64`). It also needs either `WIN_LUA=<path to a Windows lua.exe>`, or `x86_64-w64-mingw32-gcc` so the script can cross-build Lua 5.4.6. The script builds it from `LUA_TARBALL`, or downloads it from lua.org, and caches it in `${TMPDIR:-/tmp}/bugs-lua-26-winlua`. Exit status 1 together with a `BUG:` line means the bug reproduced.
+
+**ID**: `lua-26-rename-not-replacing-on-windows`
+
+### B43. ABI decoder's trailing-data check uses only the last dynamic tail
+
+**Title**: evmu ABI decoder's "no trailing data" check uses only the end of the last-decoded dynamic tail, so it rejects valid data (out-of-order tails, empty dynamic-element arrays) and accepts aliased tails and gaps
+
+**Problem:** `decode_abi` and `decode_calldata` assert that the end offset returned by the top-level `decode_value` equals `#data`, which is meant to check that no data is left over. That end offset does not measure how much data was used:
+- `decode_tuple` starts `new_offset` at `tuple_start + static_size` and then replaces it with the end of *each* dynamic component it decodes. It returns the end of the **last** component in declaration order, not the furthest byte read.
+- For dynamic element types, `decode_array` returns `last_offset`, the end of the last element only. That value is `nil` when `size == 0`. This nil case is reported on its own as `lua-09`; this entry covers the general root cause.
+
+As a result:
+1. **Valid encodings are rejected.** The ABI spec lets tails appear in any order, and Solidity's decoder accepts such layouts. When tails are not in component order (for example `(bytes,bytes)` with the second tail stored first), the last component's end falls before `#data`, and the decoder raises `ABI data too long` / `calldata too long`.
+2. **The decoder's own canonical output is rejected** whenever an empty `bytes[]`, `string[]` or dynamic-tuple `[]` is the last dynamic component (the `lua-09` case).
+3. **Non-canonical data is accepted.** Two heads can point at one tail (aliasing), and garbage can sit between the head and the first tail, so the assert never actually checks that all data was consumed. The values returned are still the ones the offsets point to, and Solidity is just as lenient, so this part is a strictness gap rather than a wrong-value bug.
+
+**Origin:** Pre-existing. On `origin/main`, `decode_calldata` already rejects reversed tails (`evmu.lua:821: calldata too long`) and accepts aliased tails. This branch (commit `44f37ea`) adds the public `decode_abi`, which reuses the same `decode_tuple`/`decode_array` logic for `eth_call` return data and event log data, giving callers a new way to hit the bug.
+
+**Area:** Lua library `cartesi.evmu` (ABI decoder: `decode_abi`, `decode_calldata`, `decode_calldata_hex`).
+
+**Category:** Correctness (ABI decoding: wrong end-offset / trailing-data check).
+
+**Location:**
+- `src/cartesi/evmu.lua:726-755`: `decode_array`, which returns `last_offset` (end of the last element; `nil` for `size == 0`).
+- `src/cartesi/evmu.lua:757-783`: `decode_tuple`, where `new_offset` is replaced by each dynamic component's end (lines 767-773).
+- `src/cartesi/evmu.lua:831`: `decode_calldata`, `assert(offset == #calldata_raw, "calldata too long")`.
+- `src/cartesi/evmu.lua:846`: `decode_abi`, `assert(offset == #data, "ABI data too long")`.
+
+**Evidence:** The test builds raw ABI words by hand (`w(n)` is a 32-byte big-endian word, and `bytes(s)` is a length word followed by padded data) and checks six cases. Run from the repo root with `eval $(make -s env); lua5.4 bugs/lua-29-evmu-end-offset-last-dynamic-only/test_end_offset_last_dynamic.lua`:
+```
+BUG: aliased tails accepted: {0xcd,0xcd} (128 bytes, only one tail)
+BUG: 32-byte garbage gap before tail accepted: 0xcd
+BUG: valid out-of-order tails rejected: .../src/cartesi/evmu.lua:846: ABI data too long
+BUG: canonical empty string[] rejected: .../src/cartesi/evmu.lua:846: ABI data too long
+BUG: decode_calldata rejects its own encode_calldata output for empty bytes[]: .../src/cartesi/evmu.lua:831: calldata too long
+BUG: decode_abi rejects encode_abi output for empty string[]: .../src/cartesi/evmu.lua:846: ABI data too long
+exit=1
+```
+The inputs were:
+- Aliased: `w(0x40)..w(0x40)..bytes("\xcd")` as `(bytes,bytes)`.
+- Gap: `w(0x40)..<32 x 0xff>..bytes("\xcd")` as `(bytes)`.
+- Reversed: `w(0x80)..w(0x40)..bytes("\xef")..bytes("\xcd")` as `(bytes,bytes)`, which decodes to `{0xcd,0xef}` under the ABI spec.
+
+Running the same reversed and aliased inputs through `origin/main`'s `decode_calldata` gives `false  evmu.lua:821: calldata too long` and `true` respectively.
+
+**Scenario:**
+- A validator or Rollups/Dave component written in Lua uses `cartesi.evmu.decode_abi` to decode an `eth_call` result or event log. If a contract getter returns, or an event emits, an empty `string[]`/`bytes[]`/dynamic-tuple array as its last dynamic field, the call throws on legitimate chain data. The node cannot process that response or event until the code is patched. The same happens with any producer (a hand-written or non-Solidity encoder, or a precompile or proxy) that lays tails out in a different order.
+- An application inside the machine that decodes input calldata with `decode_calldata` (for example `bytes[]` batches) rejects valid inputs, such as an empty batch, and may reject or revert legitimate user transactions.
+- Code that relies on `decode_abi`/`decode_calldata` to reject non-canonical encodings (for example, for replay or uniqueness, or for hashing the raw bytes it accepted) gets two different byte strings that decode to the same value.
+- The in-tree PRT node's current ABI types (uint, `bytes32[]`, static tuples, `bytes`) do not include arrays of dynamic elements as the last dynamic field, so the PRT path is unlikely to hit this in practice. No machine hash, proof or step log is involved.
+
+**Possible solution:**
+- Track the furthest extent read instead of the last-decoded tail. In `decode_tuple`, start with `end = tuple_start + static_size` and set `end = max(end, tail_end)` for each dynamic component. In `decode_array`, start with `end = array_data_start + 32*size` for dynamic elements, which also fixes the `size == 0` nil, and take the max over elements.
+- For a strict decoder, also check that the tails cover `[head_end, end)` exactly with no overlap or gap: sort the tails by offset and require each one to start where the previous one ended. This rejects aliasing and gaps while still accepting any order. Alternatively, keep lenient Solidity-like behaviour and use the max-extent check only.
+
+**Severity:** Low. Both reviewers rated it low. The decoder only *throws* on some valid inputs (out-of-order tails, empty dynamic-element arrays in the last dynamic position), never returns wrong values for canonical data, and does not affect hashes, proofs or the C API. The PRT contract types in use do not trigger it. Accepting aliased or gapped data matches Solidity's own leniency. One could argue for medium because the library fails to round-trip its own encoder's output; that case is rated medium on its own as `lua-09`.
+
+**Risks:**
+- *Of the bug:* Throwing on valid chain data can stall a Lua-based validator or indexer on one response or event until someone patches it. In-machine apps may reject legitimate inputs. Users who assume the length assert makes the decoder strict get non-unique encodings accepted.
+- *Of the fix:* The max-extent fix is local and low risk. It only changes which inputs raise, not the values decoded for accepted inputs. A strict no-overlap/no-gap check would newly reject non-canonical encodings that some producers (and Solidity's decoder) accept, so it should be optional or documented, and should not be applied to data that only needs to be interoperable.
+
+**Proof of concept:** `bugs/lua-29-evmu-end-offset-last-dynamic-only/test_end_offset_last_dynamic.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/lua-29-evmu-end-offset-last-dynamic-only/test_end_offset_last_dynamic.lua`. It needs no machine images. It exits 1 with `BUG:` lines while the bug is present and prints `PASS` once it is fixed. Under a lenient (Solidity-like) fix, the first two checks (aliasing and gap) are expected to keep reporting and can be dropped.
+
+**ID**: `lua-29-evmu-end-offset-last-dynamic-only`
+
+**Related**: [B17](#b17-abi-decoder-rejects-canonical-empty-arrays-of-dynamic-types).

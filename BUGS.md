@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-78 confirmed issues: 4 high, 16 medium, 58 low.
+80 confirmed issues: 4 high, 16 medium, 60 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -103,6 +103,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B76](#b76-filesystemget_file_size-returns-263-1-for-directories-and-blocks-on-fifos) | low | introduced by branch | Lua cartesi.filesystem | filesystem.get_file_size returns 2^63-1 for directories and blocks on FIFOs | `bugs/p3-09-fs-get-file-size-directory-fifo/` |
 | [B77](#b77-filesystemremove_directory-deletes-files-and-remove_file-deletes-empty-directories) | low | introduced by branch | Lua cartesi.filesystem | filesystem.remove_directory deletes files and remove_file deletes empty directories | `bugs/p3-10-fs-remove-directory-removes-files/` |
 | [B78](#b78-evmu-function-signature-cache-never-evicts-entries) | low | pre-existing | Lua cartesi.evmu | evmu function-signature cache never evicts entries | `bugs/p3-12-evmu-func-sig-cache-never-evicts/` |
+| [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
+| [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
 
 ## Issues
 
@@ -4482,6 +4484,131 @@ eval $(make -s env); timeout 120 lua5.4 bugs/p3-12-evmu-func-sig-cache-never-evi
 ```
 
 **ID**: `p3-12-evmu-func-sig-cache-never-evicts`
+
+### B79. bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64
+
+**Title**: bint `<<` / `>>` with a bint shift count of 2^63 or more wraps the count modulo 2^64: `x << bint(2^64-1) == x >> 1` and `x << bint(2^64) == x`
+
+**Problem**: `bint.__shl` and `bint.__shr` convert the shift count with `bint_assert_tointeger(y)`. That calls `bint.tointeger`, which ORs every 32-bit word into one Lua integer (`n = n | (x[i] << (BINT_WORDBITS*(i-1)))`). Bits above 64 are shifted out, so the count wraps modulo 2^64 with no range check. `bint_assert_tointeger` raises only when the result is `nil`, which never happens for a bint. The `y == math_mininteger or math_abs(y) >= BINT_BITS` guard, which should send any count of 256 or more to zero, runs only after the wrap. A count passed as a bint (or a numeric string) of 2^63 or more therefore turns into an unrelated shift:
+- 2^64 becomes 0, so the shift does nothing;
+- 2^64+1 becomes 1;
+- 2^64-1 becomes -1, so the shift goes the other way.
+
+The result is a plausible wrong value, not 0 and not an error. Native Lua gives 0 for these counts (`5 << 64 == 0`). The shift docs say "@raise Asserts in case inputs are not convertible to integers". The wrap inside `bint.tointeger` is itself documented ("integer values wrap around"). What is wrong is the shift operators trusting that wrapped value.
+
+Two related observations are not bugs. `brol`/`bror` (lines 944, 962) use the same helper. But rotation is modulo 256 and 2^64 is a multiple of 256, so their results stay correct: `brol(1, 2^64+1) == 2` and `bror(1, 2^64-1) == 2`, both checked. `bint.trunc("0x10000000000000005")` returns 5 because `bint.trunc` calls Lua's own `tonumber`, which wraps hex literals. That is standard Lua behaviour, not this helper. A negative count reversing the shift (`bint(5) << -1 == 2`) is also intended and matches native Lua.
+
+**Origin**: Pre-existing. `bint.lua` is vendored lua-bint and the branch does not change it. The branch adds `evmu.encode_abi`/`evmu.decode_abi`, which return every `uint` as a bint. That makes it easier for a caller to pass a raw on-chain value as a shift count.
+
+**Area**: Lua `cartesi.third-party.bint`, exported as `cartesi.evmu`'s `evmu.bint`.
+
+**Category**: Correctness (silent wrong result).
+
+**Location**:
+- `src/cartesi/third-party/bint.lua:480-496`: `bint.tointeger` builds the integer by OR-ing words, so it wraps modulo 2^64.
+- `src/cartesi/third-party/bint.lua:499-505`: `bint_assert_tointeger` checks only for `nil`, never for range.
+- `src/cartesi/third-party/bint.lua:1506-1509`: `__shl` converts first, then applies the `>= BINT_BITS` guard to the wrapped value.
+- `src/cartesi/third-party/bint.lua:1534-1537`: `__shr`, same pattern.
+
+**Evidence**: The test checks shift counts given as bints, including a `uint256` round-tripped through `evmu.encode_abi`/`evmu.decode_abi`. It expects 0 (or an error) for every count of 256 or more. Run it with `eval $(make -s env); lua5.4 bugs/p3-13-bint-shift-count-wraps-mod-2-64/test.lua`, which exits 1:
+```
+decoded count:	18446744073709551615	type bint:	true
+BUG: bint(5) << bint(2^64) = 5, expected 0
+BUG: bint(5) << bint(2^64+1) = 10, expected 0
+BUG: bint(5) << bint(2^64-1) = 2, expected 0
+BUG: bint(5) >> bint(2^64-1) = 10, expected 0
+BUG: bint(5) << decoded_uint256(2^64-1) = 2, expected 0
+ok: bint(1) << bint(2^63) (min int) = 0
+BUG: bint.trunc('0x10000000000000005') = 5, expected 18446744073709551621
+bint.tointeger(2^64+5) =	5
+```
+The `bint.trunc` line comes from Lua's `tonumber` (see Problem) and is informational. The five shift lines are the defect.
+
+**Scenario**: A validator or app script built on `cartesi.evmu` shifts by a decoded on-chain value without narrowing it to a Lua integer first. Examples are `position << descriptor.log2Stride` or `1 << height`, where the stride or height is a `uint256` from a contract event or from a hostile contract's return data. A value such as 2^64-1 then gives a wrong cycle, position or mask (here a right shift by 1) with no error, and the node can be steered to the wrong step or proof. The in-tree PRT node recipe (`doc/recipes/prt-bridge.lua:196, 209, 222`) narrows decoded values with `eth.small` before using them. Every in-tree bint shift in `src/cartesi/evmu.lua` uses a small constant or an ABI type width. So no shipped caller is affected today. Nothing in the library catches the misuse, though. The emulator's hashes, proofs and step logs are not affected.
+
+**Possible solution**: In `__shl`/`__shr`, check the count before converting it. If `y` is a bint, return `bint_zero()` when `y` is negative-large or `bint.ult(BINT_BITS - 1, |y|)`, and convert only once it is known to be small. Another option is a range-checked conversion helper, used only by the shift operators, that raises `value has no integer representation` (or returns zero) when the bint does not fit in a signed 64-bit integer. Leave the documented wrap of `bint.tointeger` as it is. `brol`/`bror` need no change, because their results are already correct modulo 256. Callers can also narrow with `eth.small`/an explicit `assert(count < 256)` before shifting.
+
+**Severity**: Low. Both reviewers agree. It is a real silent wrong-result bug, but in vendored, pre-existing library code. It needs a caller that shifts by an unnarrowed count of at least 2^63, which no in-tree caller or the PRT node does, and it cannot affect machine hashes, proofs or step logs.
+
+**Risks**: Bug: third-party Lua code (PRT validators, Dave/Rollups Node tooling, apps using `evmu.bint`) that shifts by attacker-influenced 256-bit values gets a quietly wrong value instead of 0 or an error. That is the kind of mistake that is hard to notice in testing and can be exploited when the result picks a cycle or a proof position. Fix: the change is limited to the shift operators and their behaviour for in-range counts does not change. It does make bint diverge from upstream lua-bint, which matters for future vendor updates. If the fix raises instead of returning 0, a caller that relied on the wrap would now fail loudly, which is the intended outcome.
+
+**Proof of concept**: `bugs/p3-13-bint-shift-count-wraps-mod-2-64/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/p3-13-bint-shift-count-wraps-mod-2-64/test.lua` (it needs only the built `cartesi` Lua package and no machine images). It exits 1 and prints `BUG:` lines while the bug is present, and prints `no bug` once it is fixed.
+
+**ID**: `p3-13-bint-shift-count-wraps-mod-2-64`
+
+**Related**: [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing).
+
+### B80. bint.new returns non-numeric values unchanged instead of failing
+
+**Title**: `bint.new` / `evmu.bint()` returns `true`, tables and `evmu.hex` wrappers unchanged instead of asserting, so the evmu int/uint encoders' "value not an integer" check never fires
+
+**Problem**: `bint.new(x)` is documented to return "a new bint" and to throw an assert "in case x is not convertible to a bint". It only converts numbers and strings. Any other value that is not already a bint skips both branches. It then reaches `assert(x, 'value cannot be represented by a bint')`, which only rejects `nil` and `false`, and is returned as is. So:
+- `bint.new(true)` returns `true`.
+- `bint.new({})` returns the same table, and `bint.isbint` is false for it.
+- `bint.new(evmu.hex("0x05"))` returns the hex wrapper.
+
+In `evmu`, `encoded_uint` and `append_encoded_int` validate their input with `assert(bint.new(value), "value not an integer")`. That check therefore never fires for a truthy non-numeric value. The call still fails, but later and with an unrelated internal error ("attempt to perform bitwise operation on a table value", "attempt to compare number with nil"). Also, `evmu.bint(x) == evmu.bint(y)` compares the raw values when both are non-numeric, so `evmu.bint(true) == evmu.bint(true)` is `true`.
+
+**Origin**: Pre-existing. `bint.new` is unchanged from `origin/main`, where it matches upstream lua-bint. This branch's changes to `evmu.lua` do not touch these lines.
+
+**Area**: Lua `cartesi.third-party.bint` (exposed as `evmu.bint`) and the `cartesi.evmu` ABI encoders.
+
+**Category**: api-contract (input validation and diagnostics).
+
+**Location**:
+- `src/cartesi/third-party/bint.lua:384-407`: doc comment and `bint.new`. Only `number` and `string` are converted, and the `assert(x, ...)` at line 397 lets any truthy value through.
+- `src/cartesi/evmu.lua:405-410`: `encoded_uint`, `assert(bint.new(value), "value not an integer")` at line 407. It then fails at line 408 (`value >> size`).
+- `src/cartesi/evmu.lua:416-423`: `append_encoded_int`, same assert at line 418. It then fails inside the bint comparison (`bint.lua:1719`).
+- `src/cartesi/evmu.lua:609`: the `encode_calldata` comment says int/uint values are accepted "in any format bint.new accepts".
+
+**Evidence**: The test reports 6 `BUG:` lines and exits with code 1. `bint.new(false)` and `bint.new(nil)` do raise as expected, so only truthy non-numeric values pass through.
+```
+$ eval $(make -s env); lua5.4 bugs/p3-14-bint-new-returns-non-numeric-input/test.lua
+bint.new(true):	true	true
+BUG: bint.new(true) returned true instead of raising
+bint.new({}):	true	table: 0x55fd29d96990	true	false
+BUG: bint.new({}) returned a non-bint table (same ref=true)
+bint(true)==bint(true):	true	true
+BUG: evmu.bint(true) == evmu.bint(true) is true (malformed values compare equal)
+bint.new(evmu.hex('0x05')):	true	hex("0x05")	true
+BUG: bint.new(evmu.hex('0x05')) returned the hex wrapper unchanged
+encode_abi((uint256),{hex}):	false	.../src/cartesi/evmu.lua:408: attempt to perform bitwise operation on a table value (local 'value')
+BUG: encode_abi with hex wrapper fails with unrelated error: ...
+encode_abi((int256),{true}):	false	.../src/cartesi/third-party/bint.lua:1719: attempt to compare number with nil
+BUG: encode_abi with boolean fails with unrelated error: ...
+exit=1
+```
+
+**Scenario**: In practice, the result is a misleading error message:
+- A PRT/Rollups Node or app developer passes a JSON-decoded boolean or object, or an `evmu.hex()` wrapper, as an int/uint argument to `encode_abi`/`encode_calldata`. They get an internal Lua error that points into `evmu.lua` or `bint.lua`, not the intended "value not an integer". The wrapper is documented for string arguments only. For uint arguments, a plain `"0x05"` string works.
+- Code that calls `evmu.bint(x)` to validate or normalize input, such as the `evmu.bint(decoded[field]) == evmu.bint(expected)` pattern in `doc/recipes/prt-cast.lua:217`, does not get an error for a malformed field. The comparison passes wrongly only when both sides are the very same truthy non-numeric value (`true` vs `true`, or the same table). Comparing against a real number is still false, so a mismatch with a real expected value is never accepted.
+
+Nothing is mis-encoded, and no wrong hash, proof or calldata is produced. Validator correctness and PRT disputes are not affected.
+
+**Possible solution**:
+- In `bint.new`, raise an error for any argument type other than number, string or bint, for example `error('value cannot be represented by a bint')` in an `else` branch. Alternatively, make it delegate to `bint.tobint` and assert on a `nil` result.
+- In `evmu.lua`, validate with `bint.isbint` (or `bint.tobint(value)` plus an assert) so that "value not an integer" is what users see.
+- Add a regression test that passes `true`, `{}` and `evmu.hex(...)` to `bint.new` and to the int/uint encoders.
+
+**Severity**: low. The prover and both reviewers agree. The only realistic effect is a misleading error message for invalid input, and the silent-equality case needs both sides to be the same malformed value, which no real validator flow produces.
+
+**Risks**:
+- Of the bug:
+  - Poor diagnostics for API misuse.
+  - Callers that rely on `bint()` to reject non-numeric values silently get the raw value back, and may propagate or compare it.
+- Of the fix:
+  - It changes a vendored third-party file, which diverges from upstream lua-bint. Keep it small, document it, or put the check in an evmu wrapper instead.
+  - Code that currently passes, knowingly or not, a non-bint table with bint-like behaviour through `bint.new` would start to fail. No such use is known in the repo.
+
+**Proof of concept**: `bugs/p3-14-bint-new-returns-non-numeric-input/test.lua`. Run it from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/p3-14-bint-new-returns-non-numeric-input/test.lua
+```
+It exits with code 1 and prints `BUG:` lines while the defect is present, and prints `OK` once it is fixed.
+
+**ID**: `p3-14-bint-new-returns-non-numeric-input`
+
+**Related**: [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264).
 
 ## Candidates that were not confirmed
 

@@ -4861,13 +4861,23 @@ vote means at least one reviewer would have confirmed it.
 | `set_runtime_config` accepts `clear_hash_tree=true` and does nothing | rejected 2 to 1 | Reproduced, but the field is documented as applying at create or load only. |
 | `cartesi.util.read_file` and `write_file` were removed | rejected 2 to 0 | A deliberate, changelogged change with a one-line migration to `cartesi.filesystem`. |
 | `clear_hash_tree` commits about 50 MiB per machine | rejected 2 to 0 | One-time and bounded by the page-cache size; not a leak. |
+| Shut-down JSON-RPC servers become zombies when the node runs as PID 1 or a subreaper | rejected 2 to 0 | Reproduced. Rejected because the double fork is deliberate daemonization that relies on PID 1 reaping orphans; a container without an init breaks that for any program, and `--init` or `tini` fixes it. |
+| A JSON-RPC machine object identifies its server only by address, so after a crash its requests and cleanup reach whatever later binds that port | rejected 2 to 0 | Reproduced. Rejected because addressing by host and port is the contract `rebind_server` relies on, and the PRT rollback cannot reach the scenario (its `shutdown_server` fails first if the server crashed). |
+| Spawned and forked servers outlive a crashed client | rejected 2 to 0 | Reproduced. Rejected as the documented design: servers are independent processes, the client gets their pids, and supervisors that kill the process group clean them up. |
+| `clone_stored` hard-links every file of a read-only template, so the clone cannot be loaded with `SHARING_ALL` | rejected 2 to 0 | Reproduced. Rejected as the documented and tested contract (read-only files are hard-linked); the load fails with a clear message. |
+| `remove_stored` and `rename_stored` take no locks and act on a directory a live `SHARING_ALL` machine is using | rejected 2 to 0 | Reproduced. Rejected because `cm.h` requires that the stored machine is not in use. |
+| `receive_cmio_request` throws on a guest-chosen data length above 2 MiB | rejected 2 to 0 | Reproduced. Rejected as the documented contract of the API; input delivery and proofs are unaffected. |
+| `log_send_cmio_response` accepts a revert root hash that `send_cmio_response` would reject | rejected 2 to 0 | Reproduced. Rejected because `cm.h` documents that the logged call does not check it, so that an honest party can always prove the transition; verifiers reject a log made with a different revert hash. |
+| A user schema dictionary overrides machine type names nested inside machine types | rejected 2 to 0 | Reproduced. Rejected as the documented lookup order (user dictionary first). |
+| Base64 and Hex schema fields accept non-string values | rejected 2 to 0 | Reproduced. Rejected because the schema only describes conversions and was never meant to validate. |
+| `fs.exists` reports dangling symlinks as absent and raises on `ENOTDIR` | rejected 2 to 1 | Following symlinks is the usual meaning of "exists"; raising on other errors was judged acceptable. |
 
 `verify_hash_tree` not checking inner nodes was first rejected 2 to 1 (`ht-05`), then confirmed by another panel, and it
 is listed as B30 with a reviewer note.
 
 ## Method and environment
 
-Ten review workflows ran in two waves. Each hunter agent worked one area or angle and proposed candidates. A triage
+Thirteen review workflows ran in three rounds. Each hunter agent worked one area or angle and proposed candidates. A triage
 agent merged duplicates. A prover agent wrote and ran a test for each candidate. Two independent reviewers, plus a
 tie-breaker when they split, tried to refute each claim. A recorder agent wrote the entry. Issues found by more than one
 group are listed once, with the other reproductions linked.
@@ -4876,6 +4886,13 @@ The second wave added differential testing of the hash tree and of dispute artif
 root hashes, node hashes, proofs, step logs, uarch and mcycle collections across store and load in every sharing mode,
 `clear_hash_tree`, tiny page caches that force evictions, remote machines, and concurrency settings. It found no
 divergence outside the crash, stale-cache and `replace_memory_range` scenarios listed above.
+
+The third round focused on the emulator APIs that the Lua PRT node uses, cataloged in `PRT-APIS.md`, with one hunter
+per API category (IDs starting with `p1`, `p2` and `p3`). One hunter replayed the node's whole emulator call sequence
+for an epoch with several inputs: remote machines, snapshots with `fork_server`, chunked mcycle and uarch collection,
+rollback of rejected inputs, storing and restarting. It compared every state hash, commitment and proof against a local
+machine, a restarted machine and a straight reference run, and found no divergence. Mutation fuzzing of opponent-supplied
+step, reset and cmio logs found no log that the static verifiers used by the node accept wrongly.
 
 The tests ran on Ubuntu 24.04 (x86-64, ext4) against a local build of this branch. The uarch was built with GCC 13
 rather than the official GCC 14 toolchain, so uarch-dependent hashes differ from upstream golden values. No test

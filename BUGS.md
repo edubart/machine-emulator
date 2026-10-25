@@ -29,6 +29,7 @@ dispute deadlines, as well as general API consumers.
 | 006 | Exponential reconstruction of shared forest subtrees | High for tall affected trees | Introduced |
 | 007 | Nesting a lazy forest loses its source storage context | Medium; conditional dispute availability risk | Introduced |
 | 008 | Failed persisted expansion is omitted by later successful stores | Medium, conditional on persistence error | Introduced |
+| 009 | Collected uarch reset differs from verified reset for custom initial RAM | Medium; conditional incorrect-commitment risk | Existing |
 
 ## 001 — Forest persistence commits truncated tree files after a failed write
 
@@ -279,6 +280,47 @@ dispute deadlines, as well as general API consumers.
   that later successful stores still omit available data. Recovery by discarding
   the object and reloading works. Unlike 001, the initial I/O error is reported;
   unlike 002, no existing expansion file prevents the missing write.
+
+## 009 — Collection's implicit uarch reset can disagree with a verified reset
+
+- **Problem:** Micro-cycle collection restores only uarch RAM words written during
+  the current collection period. An untouched non-pristine word already present
+  in the initial RAM survives the implicit reset, whereas `reset_uarch` and
+  `log_reset_uarch` restore the entire canonical pristine state. Collection therefore
+  emits a reset root and leaves a machine state inconsistent with the valid reset
+  proof for the same halted state.
+- **Area/category:** C/C++ collection API, also exposed in Lua and JSON-RPC;
+  incorrect state transition and commitment. **Pre-existing** on `main` in the
+  reviewed machine code and PRT collection APIs.
+- **Location:** `src/machine.cpp:2766–2773` records only this execution's dirty
+  words, and lines 2797–2824 restore only those words. The entry check at lines
+  2678–2680 tests the cycle counter alone. The full reset at lines 2063–2066
+  rewrites the pristine RAM image and clears the remainder.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/009-collection-uarch-reset.lua`.
+  A supported `uarch.ram.backing_store.data_filename` contains the default uarch
+  program plus a 32-byte marker in unused RAM. Machines start at cycle zero;
+  collection and explicit execution produce the same halted root. The explicit
+  reset log verifies, but collection's final reset root differs and retains the
+  marker. Clearing cached hashes preserves that difference. Independent checks
+  cover pristine/custom configurations, a stored/reloaded custom machine, and
+  already halted machines requiring no revert tail. All pristine controls agree.
+- **Scenario:** A consumer collects a computation commitment from a configured or
+  restored machine whose initial uarch RAM is non-pristine but whose cycle is zero.
+  It later builds a reset proof for the disputed boundary and cannot reproduce the
+  committed reset root with the canonical verifier.
+- **Possible solution:** Use a full canonical reset for a period that started from
+  non-pristine uarch state, retaining the dirty-word optimization only when its
+  initial-state assumption has been established. Alternatively, explicitly validate
+  and reject unsupported initial states before collection executes.
+- **Severity:** **Medium (P2)** because it requires custom/non-pristine initial
+  uarch RAM. For a validator accepting such a state, an incorrect commitment can
+  cause dispute failure.
+- **Risks/limits:** Default pristine images pass. Custom uarch RAM is supported by
+  configuration; the public collection contracts describe implicit resets without
+  requiring fully pristine initial RAM. This is actual retained state, not a stale
+  cache or a proof-checker false positive. Ordinary guest code causing the initial
+  non-pristine uarch state was not demonstrated.
 
 ## Coverage and validation
 

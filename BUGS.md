@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-60 confirmed issues: 4 high, 14 medium, 42 low.
+61 confirmed issues: 4 high, 14 medium, 43 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -85,6 +85,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw) | low | pre-existing | Runtime config, hash tree | Out-of-range concurrency.update_hash_tree makes every hash-tree update throw | `bugs/w2b-08-concurrency-update-hash-tree-int-truncation/` |
 | [B57](#b57-readwrite_virtual_memory-silently-do-nothing-for-ranges-that-reach-264) | low | pre-existing | C API (virtual memory access) | read/write_virtual_memory silently do nothing for ranges that reach 2^64 | `bugs/w2b-09-virtual-memory-range-wraparound/` |
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
+| [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
 
 ## Issues
 
@@ -3451,6 +3452,10 @@ In the shared scenario the processor did not run, so the flash range is the only
 
 **ID**: `w2b-11-replace-memory-range-stale-config-store`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `w2a-01-store-after-replace-memory-range-uses-stale-config`: run with `eval $(make -s env); lua5.4 bugs/w2a-01-store-after-replace-memory-range-uses-stale-config/test.lua`.
+
 **Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs).
 
 ### B60. Full-shadow write_memory skips validation and never marks the TLB padding page dirty
@@ -3506,3 +3511,41 @@ BUG: iunrep accepted by write_memory, stored machine unloadable: iunrep mismatch
 **Proof of concept**: `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/test.lua`. It writes its temporary stored directories next to itself and removes them. Run from the repo root with `eval $(make -s env); lua5.4 bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/test.lua`. Exit 1 means the bug is present. Exit 0 with `OK: no defect`, or a "write_memory rejected ... (fixed?)" line, means it is fixed.
 
 **ID**: `w2b-12-shadow-snapshot-write-unvalidated-not-dirty`
+
+### B61. cm_translate_virtual_address crashes on a NULL output pointer
+
+**Title**: cm_translate_virtual_address(NULL paddr) segfaults instead of returning an error
+
+**Problem**: `cm_translate_virtual_address` writes `*paddr = ...` without first checking `paddr` for null. When a caller passes `NULL`, the process segfaults. Its catch block does guard `paddr != nullptr`, so the author clearly meant NULL to be handled. Sibling functions such as `cm_read_console_output` and `cm_write_console_input` throw `std::invalid_argument("invalid ... output")` for NULL outputs (about 26 such checks in `cm.cpp`), so this one breaks the API's own "return an error, don't crash" convention. The crash happens on both local and JSON-RPC machines, because the write is in the client-side `cm.cpp` wrapper and happens after the translation succeeds. A related claim, that `cm_jsonrpc_rebind_server(m, NULL, ...)` crashes, does **not** reproduce. libstdc++ throws `std::logic_error` when a `std::string` is built from nullptr, and the call returns `CM_ERROR_LOGIC_ERROR` (-5). That is still UB per the standard, so it needs an explicit check for portability (hardening only).
+
+**Origin**: pre-existing (the code is identical on `origin/main`).
+
+**Area**: libcartesi C API.
+
+**Category**: crash.
+
+**Location**:
+- `src/cm.cpp:1158-1160`: `cm_translate_virtual_address` dereferences `paddr` unchecked (the catch at 1163-1166 checks it, but only after the fact).
+- `src/cm-jsonrpc.cpp:161-163`: `cm_jsonrpc_rebind_server` passes `address` into `rebind_server(const std::string&)` with no null check (hardening only, no crash under libstdc++).
+- `src/cm.h:796`: documents `paddr` as a required "Receives" output.
+
+**Evidence**: Each case runs in a forked child, so the test can observe the signal. Translating with `paddr=NULL` gets SIGSEGV on both a local machine and a spawned JSON-RPC machine. `rebind_server(NULL)` returns -5. Run with `eval $(make -s env); sh bugs/w2b-14-capi-null-output-crashes/run.sh`:
+```
+  rebind(NULL) -> -5: basic_string: construction from null is not valid
+BUG: cm_translate_virtual_address(local, paddr=NULL) crashed with signal 11 (Segmentation fault) instead of returning an error
+BUG: cm_translate_virtual_address(jsonrpc, paddr=NULL) crashed with signal 11 (Segmentation fault) instead of returning an error
+OK: cm_jsonrpc_rebind_server(address=NULL) returned an error code
+```
+(exit 1)
+
+**Scenario**: A third-party FFI binding (Rust, Go, Python ctypes) or a validator written directly against the C API calls `cm_translate_virtual_address(m, vaddr, NULL)`, for example to probe whether a page is mapped. The whole process segfaults instead of getting an error code. That process could be a node hosting several machines, or the JSON-RPC client. In-tree callers cannot trigger it: the Lua binding (`clua-i-machine.cpp:1056`) always passes `&paddr_value`, and the CLI, the JSON-RPC server and PRT-style nodes built on Lua never pass NULL.
+
+**Possible solution**: At the top of the try body in `cm_translate_virtual_address`, add `if (paddr == nullptr) { throw std::invalid_argument("invalid paddr output"); }`, which matches the sibling functions. In `cm_jsonrpc_rebind_server`, add `if (address == nullptr) { throw std::invalid_argument("invalid address"); }` before building the string. A quick audit of other `const char *` → `std::string` conversions in `cm.cpp`/`cm-jsonrpc.cpp` would be worth doing too.
+
+**Severity**: low. Both reviewers agree on low. The crash needs a C caller to pass NULL for a documented required output, which is API misuse. The segfault is client-side only, can't be triggered remotely, and doesn't touch hashes, proofs, step logs or stored state. The `rebind_server` half doesn't crash with libstdc++.
+
+**Risks**: Bug: a misbehaving direct C/FFI caller takes down its own process. Under a non-checking standard library (for example libc++ without hardening), `rebind_server(NULL)` is UB and could also crash. Fix: very low risk. It only turns a crash into an error code (`CM_ERROR_INVALID_ARGUMENT`) for inputs that were never valid. It changes no successful paths.
+
+**Proof of concept**: `bugs/w2b-14-capi-null-output-crashes/test_null_output.cpp` (forked-child C++ test) and `bugs/w2b-14-capi-null-output-crashes/run.sh` (builds it against `src/` and runs it). From the repo root: `eval $(make -s env); sh bugs/w2b-14-capi-null-output-crashes/run.sh`. It exits 1 while the bug is present and 0 once `cm_translate_virtual_address` returns an error for NULL `paddr`.
+
+**ID**: `w2b-14-capi-null-output-crashes`

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-58 confirmed issues: 4 high, 13 medium, 41 low.
+59 confirmed issues: 4 high, 14 medium, 41 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -42,6 +42,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B50](#b50-rename_stored-and-remove_stored-with-a-trailing-slash-succeed-then-fail-and-skip-the-parent-fsync) | medium | pre-existing | Stored machine API | rename_stored and remove_stored with a trailing slash succeed, then fail and skip the parent fsync | `bugs/w2b-03-rename-remove-stored-trailing-slash/` |
 | [B53](#b53-run-aborts-when-a-non-blocking-console-output-descriptor-is-briefly-full) | medium | pre-existing | Machine console (run) | run aborts when a non-blocking console output descriptor is briefly full | `bugs/w2b-05-console-eagain-fails-run/` |
 | [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
+| [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -3398,3 +3399,55 @@ It exits 1 and prints `BUG:` lines while the defect is present, and exits 0 once
 **ID**: `w2b-01-rpc-timeout-request-still-executes-fork-leaks-server`
 
 **Related**: [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail).
+
+### B59. replace_memory_range leaves the config stale, so store persists the old flash image
+
+**Title**: `replace_memory_range` leaves `m_c.flash_drive`/`m_c.nvram` stale, so `store` with `SHARING_CONFIG`/`SHARING_NONE` persists the pre-replacement image
+
+**Problem**: `machine::replace_memory_range` replaces the address range object (`m_ars.replace`), rebuilds the hot TLB and evicts clean pages. It never writes the new `backing_store` (data/dht/dpt filenames and the `shared` flag) into the matching `m_c.flash_drive[i]` or `m_c.nvram[i]` entry. `machine::store` decides what to do with each flash/nvram range from that stale `m_c` entry. As a result:
+- **Shared replacement under `SHARING_CONFIG`.** If the original range was not shared (for example, any machine loaded with `SHARING_NONE`), `store` takes the "copy unshared backing store" branch. It runs `os::copy_file` on the ORIGINAL image and its `.dht`/`.dpt` files instead of writing current memory. This breaks the `cm.h` contract: "Store current machine state for shared backing stores".
+- **Unshared replacement under `SHARING_CONFIG` or `SHARING_NONE`.** The range is rolled back to the image it had before the replacement, not to the replacement file.
+
+The stored snapshot mixes the current processor/RAM state with the old flash contents, and its root hash is neither the live machine's hash nor the replacement image's hash. `get_initial_config()` also keeps reporting the old backing store (old `data_filename`, `shared=false`). That could be read as intended for an "initial" config, but `store` depends on it, so either way the snapshot is wrong.
+
+**Origin**: Pre-existing. `origin/main` has the same `replace_memory_range` and `store` code.
+
+**Area**: C API / Lua API `replace_memory_range` + `store` (stored machines, flash drives and NVRAM). Reached by the `cartesi-machine` CLI (`--replace-memory-range` plus `--store=...,sharing:config|none`).
+
+**Category**: corrupted-state (a silently wrong persisted snapshot).
+
+**Location**:
+- `src/machine.cpp:633-681`: `machine::replace_memory_range` resolves start/length from `m_c` and calls `m_ars.replace(resolved)`, but never updates `m_c.flash_drive[i]`/`m_c.nvram[i]`.
+- `src/machine-address-ranges.cpp:639-663`: `machine_address_ranges::replace` builds the new `memory_address_range` from `config.backing_store`. This is the only place the new backing store is recorded.
+- `src/machine.cpp:418-459`: the `store_address_range` lambda picks "write current memory" vs "copy unshared backing store" (line 436) from the `backing_store_config` it is handed.
+- `src/machine.cpp:467-472`: `store` passes the stale `f.backing_store`/`n.backing_store` from `m_c` for each flash drive and NVRAM range.
+- `src/cm.h:569`: documented `CM_SHARING_CONFIG` store semantics, which the shared case violates.
+- `src/cartesi-machine.lua:3141` (replacements applied) and `:4727` (store): the CLI path.
+
+**Evidence**: `test.lua` stores a base machine whose flash drive (`0x0080000000000000`, length `0x2000`) holds `'A'`. It then runs three scenarios. In each, it loads the base with `SHARING_NONE`, replaces the drive with a `'B'` file (shared or unshared), writes `'Z'` at `+0x1000`, stores with `SHARING_CONFIG` or `SHARING_NONE`, and reloads. In every scenario the reloaded flash holds the pre-replacement `'A'` image. Run with `eval $(make -s env); lua5.4 bugs/w2b-11-replace-memory-range-stale-config-store/test.lua`. It exits 1:
+```
+[shared-B_SHARING_CONFIG] get_initial_config flash backing_store: data_filename=/tmp/lua_G3S6gc-w2b-11/base/0080000000000000-2000.bin shared=false
+[shared-B_SHARING_CONFIG] memory before store="BBBBBBBB" after reload="AAAAAAAA"
+[shared-B_SHARING_CONFIG] root hash equal after store/reload: false
+[shared-B_SHARING_CONFIG] byte at +0x1000 after reload="A" expected="Z"
+BUG: [shared-B_SHARING_CONFIG] store after replace_memory_range persisted the PRE-replacement flash image ("AAAAAAAA", byte@+0x1000="A") instead of the replacement ("BBBBBBBB", byte@+0x1000="Z")
+[unshared-B_SHARING_CONFIG] memory before store="BBBBBBBB" after reload="AAAAAAAA"
+[unshared-B_SHARING_NONE]   memory before store="BBBBBBBB" after reload="AAAAAAAA"
+```
+In the shared scenario the processor did not run, so the flash range is the only source of the root hash mismatch. For the unshared scenarios a hash mismatch alone is expected, because those ranges roll back by design. The defect there is that they roll back to `A` instead of `B`.
+
+**Scenario**: An app or CLI user, or a node, keeps a template machine and swaps in an app or input drive per run. For example: `cartesi-machine --load=template,sharing:none --replace-memory-range=label:app,filename:app-v2.ext2,shared --store=snap,sharing:config`, or the same sequence through `cm_replace_memory_range` + `cm_store`. The stored `snap` silently contains the template's old drive (and its old `.dht`/`.dpt`), so reloading it gives a different root hash and a machine that boots the wrong drive contents. Anyone who later loads that snapshot (an operator restoring a checkpoint, an app developer reproducing a run) works from state that matches neither the live machine nor the replacement image. The default `SHARING_ALL` always writes current memory and is not affected. No evidence was found that PRT validators, the Rollups Node or Dave combine `replace_memory_range` with `SHARING_CONFIG`/`SHARING_NONE` stores, and live-machine hashes, proofs and logs are unaffected.
+
+**Possible solution**: In `machine::replace_memory_range`, after `m_ars.replace(resolved)` succeeds, find the `m_c.flash_drive`/`m_c.nvram` entry with the same start/length and update its `backing_store` (data/dht/dpt filenames, `shared`, `create`, `truncate`) from `config.backing_store`. Keep its `label`, `read_only`, start and length. Alternatively, have `store` take the per-range backing-store decision from the live `address_range` object instead of `m_c`. Add a regression test that stores after `replace_memory_range` under all three sharing modes and reloads.
+
+**Severity**: medium. Both reviewers rated it medium and the prover low-to-medium. It silently corrupts a persisted snapshot (wrong flash image and root hash) in a legitimate, documented, CLI-reachable flow, which is more than low. It is not high because the default `SHARING_ALL` is unaffected, live-machine hashes/proofs are correct, and no validator path is known to use the combination.
+
+**Risks**:
+- Of the bug: snapshots that silently contain the wrong drive, which leads to unexpected root hashes, wrong program behaviour after reload, and hard-to-diagnose divergence when such a snapshot is used as a checkpoint or template.
+- Of the fix: `get_initial_config()` would start reporting the replacement backing store. Callers that compare it with the originally loaded config, or that rely on it to find the original image, would see a change. The stored `config.json` would then reference the replaced drive's files, which is correct, but the semantics of "initial config" should be documented. `create`/`truncate` flags copied from the replacement must not cause files to be recreated or truncated on a later load. The update must stay exception-safe, so `m_c` is changed only after `m_ars.replace` succeeds.
+
+**Proof of concept**: `bugs/w2b-11-replace-memory-range-stale-config-store/test.lua`. It is self-contained and uses a temporary directory (override with `WORKDIR=...`). Run from the repo root with `eval $(make -s env); lua5.4 bugs/w2b-11-replace-memory-range-stale-config-store/test.lua`. It prints `BUG:` lines and exits 1 while the bug is present, and prints `OK` and exits 0 once it is fixed.
+
+**ID**: `w2b-11-replace-memory-range-stale-config-store`
+
+**Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs).

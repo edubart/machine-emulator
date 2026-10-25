@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-44 confirmed issues: 4 high, 10 medium, 30 low.
+46 confirmed issues: 4 high, 10 medium, 32 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -69,6 +69,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
 | [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder's trailing-data check uses only the last dynamic tail | `bugs/lua-29-evmu-end-offset-last-dynamic-only/` |
 | [B44](#b44-json-parsers-truncate-64-bit-log2-sizes-in-access-logs-and-proofs-without-range-checks) | low | pre-existing | JSON parsing (json-util) | JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks | `bugs/api-12-access-log2-size-truncation/` |
+| [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
+| [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 
 ## Issues
 
@@ -498,6 +500,10 @@ exit=1
 **Proof of concept:** `bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It works in a fresh `mktemp -d` directory, or in `$WORKDIR` if that is set. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: remove_stored is idempotent` once fixed.
 
 **ID**: `ht-09-remove-stored-not-idempotent`
+
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `api-13-remove-stored-fails-on-incomplete-dir`: run with `eval $(make -s env); lua5.4 bugs/api-13-remove-stored-fails-on-incomplete-dir/test_remove_stored_incomplete_dir.lua`.
 
 ### B08. clone_stored fails with EMLINK instead of falling back to a copy
 
@@ -2640,3 +2646,100 @@ Run with `eval $(make -s env); lua5.4 bugs/api-12-access-log2-size-truncation/te
 **Proof of concept**: `bugs/api-12-access-log2-size-truncation/test.lua` and its helper `bugs/api-12-access-log2-size-truncation/proxy.py` (a JSON-RPC proxy that tampers with `machine.get_proof` results; needs `python3` and `cartesi-jsonrpc-machine` on PATH). Run from the repo root with `eval $(make -s env); lua5.4 bugs/api-12-access-log2-size-truncation/test.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: no bug` once it is fixed.
 
 **ID**: `api-12-access-log2-size-truncation`
+
+### B45. ABI decoder amplifies memory use through aliased dynamic offsets
+
+**Title**: evmu ABI decoder: aliased dynamic-element offsets cause quadratic (nested: exponential) memory/CPU amplification
+
+**Problem**: `cartesi.evmu`'s ABI decoder follows each head offset of a dynamic element or component independently. It never checks that offsets increase, that element ranges do not overlap, or that the total decoded size stays bounded. Every element of a `bytes[]` / `string[]` (or any array/tuple of dynamic types) can point at the same large tail. `decode_bytes` / `decode_string` then make a fresh `calldata:sub(...)` copy for each element; Lua 5.4 does not intern long strings, so each copy is a separate L-byte allocation. With `prefer="hex"` (the default for `bytes`) every copy also goes through `tohex`, which doubles its size and adds CPU time. Memory grows as N*L for an input of about 32N+L bytes, and each nesting level multiplies it. The decoders return the end offset of the *last* element, so the trailing `offset == #data` / `offset == #calldata_raw` "too long" checks still pass on aliased input.
+
+**Origin**: pre-existing. `decode_calldata` and `decode_array` / `decode_tuple` are the same on `main`. The branch's new `decode_abi` (commit 44f37ea) exposes the same path for data without a selector.
+
+**Area**: `src/cartesi/evmu.lua` (Lua ABI encode/decode helper shipped in the emulator package).
+
+**Category**: resource exhaustion (memory/CPU amplification, DoS).
+
+**Location**:
+- `src/cartesi/evmu.lua:741-750`: `decode_array` dynamic-element loop (offset read, then `decode_value` with no overlap or monotonicity check)
+- `src/cartesi/evmu.lua:761-785`: `decode_tuple`, same pattern for dynamic components
+- `src/cartesi/evmu.lua:691-724`: `decode_string` / `decode_bytes` make one `sub` copy (and `tohex`) per aliased element
+- `src/cartesi/evmu.lua:831`, `:846`: end-offset checks in `decode_calldata` / `decode_abi` that aliased payloads still pass
+
+**Evidence**: `test.lua` builds well-formed but non-canonical ABI payloads whose element offsets all alias one tail, then measures the Lua heap retained after decoding.
+```
+$ eval $(make -s env); lua5.4 bugs/lua-30-evmu-aliased-offsets-quadratic-memory/test.lua
+flat (bytes[]): input=129632 bytes, retained Lua memory=125.1 MiB, ratio=1012x, time=0.18s
+BUG: decode_abi('(bytes[])') of 129632-byte input retains 125.1 MiB (1012x amplification) because all 2000 element offsets alias one 65536-byte tail
+decode_calldata f(bytes[]): input=129636, retained=125.1 MiB (1012x)
+BUG: decode_calldata('f(bytes[])') has the same aliased-offset amplification
+nested (bytes[][][]): input=18080 bytes, retained=64.2 MiB, ratio=3722x, time=0.17s
+BUG: nested decode_abi('(bytes[][][])') of 18080-byte input retains 64.2 MiB (16^3 aliased copies)
+```
+(exit status 1 = bug present). The prover also ran the nested case with `prefer="hex"` and a 16 KiB tail: an 18 KB input retained 128 MiB and took 21 s of CPU.
+
+**Scenario**: A Lua validator, indexer or tool built on `cartesi.evmu` decodes attacker-influenced ABI data containing arrays of dynamic types. Examples are inputs, vouchers or notices from an untrusted app whose schema has `bytes[]`, `string[]` or nested dynamic arrays. A payload of a few KB to a few hundred KB makes the decoder allocate hundreds of MiB to GiB and burn CPU, so the process runs out of memory or stalls. Hashes, proofs, step logs and the C API are not involved. The PRT recipe node in this branch only decodes `Notice(bytes)` and the EvmAdvance input, which have no arrays of dynamic types, so it cannot hit this path. Solidity's decoder also accepts aliased offsets, but it pays gas for each copy; this decoder has no limit at all.
+
+**Possible solution**: Pick one or more:
+- Enforce canonical layout: each dynamic element/component offset must be at least the end of the previous one, and must start inside the region after the head.
+- Track the total number of decoded bytes and fail once it exceeds a small multiple of `#data` (a "max inflation" guard, like the one ethers.js v6 has).
+- Memoize decoded values by `(absolute offset, type)` so aliased elements share one Lua value instead of getting new copies.
+
+**Severity**: low. Both reviewers and the prover agree. This is a real DoS amplification, but it is limited to an optional Lua helper. It cannot change hashes, proofs or dispute outcomes, and the shipped PRT node's decode paths cannot reach it. It matters only to third-party Lua tooling that decodes untrusted arrays of dynamic types.
+
+**Risks**:
+- Bug: an out-of-memory crash or CPU stall in any Lua process that decodes untrusted dynamic-array ABI data. If that process is a validator or monitor, it goes down; it does not produce a wrong result.
+- Fix: strict canonical-offset enforcement would reject some valid but non-canonical encodings that Solidity accepts. That could break interoperability for callers who decode hand-crafted or third-party data. A size cap needs a generous bound so legitimate large payloads still decode. Memoization makes aliased elements share one Lua value, which is only visible if callers mutate the decoded tables.
+
+**Proof of concept**: `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/test.lua`. From the repo root:
+```
+eval $(make -s env); lua5.4 bugs/lua-30-evmu-aliased-offsets-quadratic-memory/test.lua
+```
+It exits 1 and prints `BUG:` lines while the amplification is present, and exits 0 once fixed (the amplification ratio stays at or below 64x). It needs about 300 MiB of free memory.
+
+**ID**: `lua-30-evmu-aliased-offsets-quadratic-memory`
+
+**Related**: [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail).
+
+### B46. ABI integer encoders wrap values of 2^512 or more instead of rejecting them
+
+**Title**: evmu integer encoders (encode_calldata / encode_abi) silently wrap values >= 2^512 given as strings instead of rejecting them
+
+**Problem**: `cartesi.evmu` uses a 512-bit bint (256 bits of headroom). `encoded_uint` and `append_encoded_int` call `bint.new(value)`. For a string or bint input, `bint.new` reduces the value modulo 2^512 and raises no error, and the range check then runs on the wrapped value. So the guard rejects values in [2^256, 2^512) but accepts any value >= 2^512 that is congruent mod 2^512 to an in-range value, and encodes that smaller value. Examples: 2^512 encodes as `0`, 2^512+5 encodes as `5` (also for `uint8`), and `int256` given `0x` followed by 128 `f`s encodes as `-1`.
+
+**Origin**: Pre-existing. The encoders behind `encode_calldata` / `encode_calldata_hex` predate this branch. This branch adds `_M.encode_abi`, which reuses the same encoders and inherits the defect.
+
+**Area**: `src/cartesi/evmu.lua` ABI/calldata encoder. This is a shipped Lua library, installed through `EMU_TO_LUA_PATH` in the Makefile.
+
+**Category**: correctness (silent truncation / missing input validation)
+
+**Location**:
+- `src/cartesi/evmu.lua:18-19`: `bint_extra = 256`; `bint(256 + bint_extra)`
+- `src/cartesi/evmu.lua:405-410`: `encoded_uint`, `bint.new(value)` followed by the `value >> size == 0` check
+- `src/cartesi/evmu.lua:416-423`: `append_encoded_int`, `bint.new(value)` followed by the intmin/intmax check
+- `src/cartesi/evmu.lua:627-633`: `_M.encode_abi` (new), plus `_M.encode_calldata` (pre-existing), both reach these encoders
+
+**Evidence**: The test passes the out-of-range values above through the public `encode_abi` and `encode_calldata_hex`. Every call is accepted and returns the wrapped value instead of raising "integer value does not fit in target type":
+```
+BUG: uint256 2^512+5 (hex string), encode_abi was accepted and encoded as 0x0000000000000000000000000000000000000000000000000000000000000005
+BUG: uint256 2^512+5 (hex string), encode_calldata was accepted and encoded as 0xb3de648b0000000000000000000000000000000000000000000000000000000000000005
+BUG: uint256 2^512 (decimal string) was accepted and encoded as 0x0000000000000000000000000000000000000000000000000000000000000000
+BUG: uint8 2^512+5 was accepted and encoded as 0x0000000000000000000000000000000000000000000000000000000000000005
+BUG: int256 2^512-1 (hex string) was accepted and encoded as 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+bint.new(2^512+5) =	5
+```
+Run: `eval $(make -s env); lua5.4 bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua` (exits 1 while the bug is present). For comparison, values in [2^256, 2^512) are correctly rejected.
+
+**Scenario**: A node or tool built on `cartesi.evmu` (for example, one that builds Rollups or Dave calldata, or event/return data with `encode_abi`) forwards a numeric string from untrusted input, such as a JSON-RPC parameter, a user-supplied amount or a CLI argument, without validating it. If the string is at least 155 decimal digits or 129 significant hex nibbles long, it is encoded as a small, different number and no error is raised. A transaction or input carrying the wrong argument is then signed and submitted. Lua integers can never reach the wrap. Machine hashes, proofs and step logs never pass through this path, so it cannot by itself make an honest PRT player lose a dispute. Applications running inside the machine are unaffected.
+
+**Possible solution**: Reject over-wide inputs before or after parsing. Options:
+- (a) For strings, strip the sign, the `0x` prefix and leading zeros, then reject more than 64 hex nibbles or more than 78 decimal digits before calling `bint.new` (the range check then handles the rest).
+- (b) Parse with a wider bint that has a guard, or check that `tostring`/`tobase` of the parsed value round-trips to the normalized input.
+- (c) Teach the bundled bint's `frombase`/`fromstring` to report overflow instead of wrapping.
+
+**Severity**: low. Both reviewers agree. This is a real silent truncation in a shipped helper library, but it fires only on absurdly large string inputs (>= 2^512) that well-behaved callers never produce. It touches no hashing, proof or step-verification path, and it cannot crash or hang a validator.
+
+**Risks**: Bug: wrong values are encoded into calldata or ABI data without any error when callers forward unvalidated, huge numeric strings, which may cause unintended on-chain actions. Fix: low risk. Stricter parsing could reject inputs that callers currently pass with redundant leading zeros or unusual formatting, so normalize (strip leading zeros) before applying the length check. A fix inside bint itself would affect every other user of the third-party bint module.
+
+**Proof of concept**: `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua`. It prints `BUG:` lines and exits 1 while the bug is present, and prints `PASS` once it is fixed.
+
+**ID**: `lua-31-evmu-encode-int-wraps-mod-2-512`

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-70 confirmed issues: 4 high, 16 medium, 50 low.
+71 confirmed issues: 4 high, 16 medium, 51 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -95,6 +95,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B68](#b68-first-frontier_forest_store-of-an-in-memory-expansion-skips-the-per-level-directory-sync) | low | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | First frontier_forest_store of an in-memory expansion skips the per-level directory sync | `bugs/p2-06-forest-store-batch-expansion-unordered-dir-sync/` |
 | [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
 | [B70](#b70-json-rpc-client-cmio-response-functions-read-from-a-null-data-pointer) | low | pre-existing | JSON-RPC client (cmio), C API | JSON-RPC client cmio response functions read from a NULL data pointer | `bugs/p2-05-jsonrpc-cmio-null-data-segfault/` |
+| [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema) | low | pre-existing | Lua bindings (JSON with schemas) | fromjson rewrites strings that match a key of a struct, array or tuple schema | `bugs/p3-01-fromjson-object-schema-string-enum-rewrite/` |
 
 ## Issues
 
@@ -4074,6 +4075,76 @@ The result is a stuck query or expansion at one position, never a wrong hash or 
 **ID**: `p2-05-jsonrpc-cmio-null-data-segfault`
 
 **Related**: [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer).
+
+### B71. fromjson rewrites strings that match a key of a struct, array or tuple schema
+
+**Title**: Lua `fromjson` replaces any string equal to a key of an object (struct/array/tuple) schema with that schema's internal value; the mapping was meant only for enum schemas
+
+**Problem**: In `clua_push_json_value`, the string case has the branch `schema.is_object() && schema.contains(data)`. It exists to map enum names to integers (for example `InterpreterBreakReason`: `"halted"` -> `1`). Nothing checks that the schema actually is an enum, meaning that all its values are integers. Every object schema takes this branch: struct schemas (`Proof`, `AccessLog`, user structs), `{items=...}` array schemas, and tuple schemas. So a JSON string that equals one of the schema's keys is replaced by `schema.at(data)`, which is a type name such as `"Base64"` or `"Base64Array"`, or a Lua table copied from a tuple's `items` list. On the other side, `tojson` writes strings unchanged and has no reverse (integer-to-name) mapping. As a result, `tojson` followed by `fromjson` with the same schema does not return the original value, and no error is raised.
+
+**Origin**: Pre-existing. `origin/main` has the same branch and the same `fromjson(s, schema_name, dict)` signature. This branch's tuple-schema support (array-valued `items`) adds a new form of the bug, in which a string comes back as a table.
+
+**Area**: Lua JSON binding (`cartesi.fromjson` / `cartesi.tojson`, `src/clua-i-machine.cpp`).
+
+**Category**: correctness (silent type confusion; `tojson`/`fromjson` round trip is broken).
+
+**Location**:
+- `src/clua-i-machine.cpp:493-495`: `clua_push_json_value`, string case, `else if (schema.is_object() && schema.contains(data))`.
+- `src/clua-i-machine.cpp:424-434`: `clua_push_managed_toclose_json_ref` (`tojson`), string case. It writes strings unchanged and has no reverse mapping.
+- `src/clua-i-machine.cpp:532-545`: `clua_get_machine_schema_dict`. Its comment says the mapping is for "enumeration strings" only, but the dictionary has no enum marker.
+
+**Evidence**: The test runs 5 cases and all of them fail. The enum path itself still works: `fromjson('"halted"', "InterpreterBreakReason")` returns `1`.
+```
+$ eval $(make -s env); lua5.4 bugs/p3-01-fromjson-object-schema-string-enum-rewrite/test.lua
+tojson wrote: {"p":"target_hash"}
+BUG: tojson->fromjson round trip of string in Proof-typed field: expected "target_hash", got Base64 (string)
+BUG: fromjson '"items"' at Base64Array-typed field: expected "items", got Base64 (string)
+BUG: tojson->fromjson round trip of string in tuple-typed field: expected "items", got ["Base64","ArrayIndex"] (table)
+BUG: fromjson top-level string equal to Claim field name: expected "root", got Base64 (string)
+BUG: fromjson '"sibling_hashes"' with schema Proof: expected "sibling_hashes", got Base64Array (string)
+BUG: 5 case(s) where fromjson replaced a string with schema internals
+exit=1
+```
+
+**Scenario**: The bug needs ill-typed input: a string where the schema expects a struct, array or tuple. Examples:
+- A Lua app or PRT component stores a field typed with a struct schema that can also hold a string sentinel. After a restart, the value comes back as `"Base64"` and not as the original string.
+- A peer sends `"arguments":"items"` for an event whose tuple schema is `{items={...}}`. The PRT game transport decodes it with `cartesi.fromjson` and a user schema, so the receiver gets a table of type-name strings and no error. That table could pass a naive `type(x)=="table"` check.
+
+The emulator's own callers cannot hit this with data it produces:
+- Proofs, access logs, root-hash arrays and configs are all well-typed.
+- `hash-tree.lua` `STORED_SCHEMAS` could only be affected by a corrupted file, which then fails the existing asserts.
+
+An adversary also gains nothing over sending a well-shaped array of arbitrary strings directly.
+
+**Possible solution**:
+- Apply the enum mapping only to enum schemas, either by checking that every value in the object schema is an integer or by adding an explicit enum marker to the schema dictionary. Never apply it to struct or `{items}` schemas.
+- Optionally, map integers back to enum names in `tojson` so that enum values round-trip.
+- Add a regression test that round-trips strings through struct, array and tuple schema positions.
+
+**Severity**: low.
+- The prover rated it low-to-medium; both reviewers rated it low.
+- It only triggers on ill-typed input, which honest producers and the emulator's own APIs never emit.
+- The effect is a silent type confusion in the Lua binding only. There is no crash, and hashes, proofs, step logs, verification, the C API and JSON-RPC are not affected.
+
+**Risks**:
+- Of the bug:
+  - Persisted Lua state or peer messages are silently decoded into wrong-typed values (a schema type-name string, or a table), with no error.
+  - Downstream code that does shallow type checks may accept them.
+  - It is confusing to debug, because `tojson`/`fromjson` round trips look symmetric.
+- Of the fix:
+  - Code that relied, knowingly or not, on string-to-value mapping for non-integer object schemas would change behaviour. Unlikely, since such schemas hold type names.
+  - The enum detection must keep `InterpreterBreakReason` (and any user enum schemas) working.
+  - Adding a reverse mapping in `tojson` changes the JSON output for enum-typed integers, so check compatibility with JSON consumers that expect integers.
+
+**Proof of concept**: `bugs/p3-01-fromjson-object-schema-string-enum-rewrite/test.lua`. Run it from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/p3-01-fromjson-object-schema-string-enum-rewrite/test.lua
+```
+It exits with code 1 and prints `BUG:` lines while the defect is present, and prints `PASS` once it is fixed.
+
+**ID**: `p3-01-fromjson-object-schema-string-enum-rewrite`
+
+**Related**: [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices).
 
 ## Candidates that were not confirmed
 

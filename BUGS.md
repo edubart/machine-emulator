@@ -10,8 +10,8 @@ Existing defects in touched code are identified explicitly. Review is ongoing.
 
 Workflow: separate agents inspect different areas and propose candidates; executable
 reproductions establish behavior; independent reviewers try to disprove each
-candidate. Only confirmed findings appear below. Each is committed and pushed with
-its reproduction as it is confirmed. Reproductions assert the observed bug and exit
+candidate. Only confirmed findings appear below. Each is committed locally with
+its reproduction as it is confirmed; pushing was cancelled by the user. Reproductions assert the observed bug and exit
 successfully when it occurs; they are not fixes. Run commands from the repository
 root with the branch built (`make`). Severity considers validator availability and
 dispute deadlines, as well as general API consumers.
@@ -47,3 +47,36 @@ dispute deadlines, as well as general API consumers.
 - **Risks/limits:** Requires an actual I/O failure. This does not demonstrate a
   wrong Merkle root or acceptance of an invalid proof; it demonstrates silent
   checkpoint corruption and failed recovery.
+
+## 002 — Saving a richer forest can silently discard its proof material
+
+- **Problem:** Two trees can have the same Merkle root while retaining different
+  amounts of descendant information. Persistence deduplicates only by root hash
+  and keeps the first file. Saving a fully expanded flat tree after a coarser tree
+  with the same root neither updates that file nor saves its missing descendants.
+  Reloading the richer forest therefore loses leaf queries that succeeded before
+  the supposedly successful store.
+- **Area/category:** Lua forest serialization; loss of proof data. **Introduced**
+  in this branch.
+- **Location:** `src/cartesi/hash-tree.lua:562–594`, especially the existing-file
+  guard at line 581 and the child traversal at lines 567–569.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/002-forest-representations.lua`.
+  The test stores two opaque height-1 hashes, then the corresponding four explicit
+  leaves in the same directory. Both roots match and both stores succeed.
+  After reloading the second frontier, its first leaf is unavailable:
+  `nil, "the node is below an opaque hash"`. The original expanded forest still
+  answers that query. Independently reproduced by hunter, orchestrator, and reviewer.
+- **Scenario:** A consumer shares content-addressed storage between computation
+  forests constructed with different bundling or expansion histories. Following
+  restart, an honest validator cannot retrieve proof material it had saved and
+  must reconstruct it before the dispute deadline.
+- **Possible solution:** Reconcile representations before deduplicating: preserve
+  every available descendant needed by either representation, or publish a richer
+  representation after its required child files are durable. Merely finding the
+  root-hash filename does not prove that all query data has been saved.
+- **Severity:** **High** when recovery must supply dispute proofs on a deadline;
+  medium for other persistence consumers.
+- **Risks/limits:** Requires different representations sharing a storage directory.
+  Roots remain correct; this demonstrates loss of available descendants, not
+  acceptance of a false proof. Reconstruction may recover the data at a time cost.

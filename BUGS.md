@@ -243,3 +243,64 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 **Proof of concept**: `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/run.sh`, `test.lua` and `killshim.c`. `run.sh` builds the shim into a temporary directory and runs `test.lua`. Run it from the repo root with `eval $(make -s env); sh bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/run.sh`. It needs `gcc` and `lua5.4`, exits 1 with `BUG:` lines while the defect is present, and exits 0 once it is fixed.
 
 ID: `ht-04-clear-hash-tree-zeroes-before-marking-dirty`
+
+<a id="ht-08-filesystem-write-file-swallows-close-errors"></a>
+
+### `cartesi.filesystem.write_file` reports success when the final flush fails, so CLI hash and proof files can be left empty
+
+**Problem:** `filesystem.write_file` opens the file as a to-be-closed variable (`local f <close> = ...`), calls `assert(f:write(data))`, and never closes the file explicitly. For small payloads (32-byte hashes, proofs, reports) `f:write` only fills the stdio buffer, so it succeeds. The real `write(2)` happens in `fclose`, which runs from the `<close>` handler. Lua 5.4's file `__close` (the same function as `__gc`) throws away `fclose`'s result. So ENOSPC, EFBIG, EIO or quota errors are lost: `write_file` returns normally and leaves an empty or truncated file. `write_temp_file` wraps `write_file` in `pcall`, so it cannot see the error either. The CLI then exits 0.
+
+**Origin:** Pre-existing. `util.write_file` on `origin/main` has identical code (`src/cartesi/util.lua:344-347`). This branch moved it into the new `cartesi.filesystem` module.
+
+**Area:** Lua library `cartesi.filesystem` (exported to other projects) / `cartesi-machine` CLI.
+
+**Category:** Durability / silent error loss.
+
+**Location:**
+- `src/cartesi/filesystem.lua:91-94` (`write_file`)
+- `src/cartesi/filesystem.lua:103-109` (`write_temp_file`, and `write_scope_temp_file` through it)
+- CLI callers in `src/cartesi-machine.lua`: 3214, 3287 (per-advance state hash files), 3486 and 3500 (proofs), 3587, 3606 (memory-range dumps), 3669 (`--initial-hash`), 4365, 4715 (`--final-hash`)
+- Not affected: `hash-tree.lua` has its own `write_file` (temp file, sync, rename) for stored hash trees.
+
+**Evidence:** `test_write_file_close.lua` writes 32 bytes to `/dev/full`. An explicit `f:close()` reports the error, but `fs.write_file` returns success:
+```
+$ lua5.4 bugs/ht-08-filesystem-write-file-swallows-close-errors/test_write_file_close.lua
+explicit f:close() on /dev/full ->	nil	No space left on device
+fs.write_file(32 bytes, /dev/full) ->	true	nil
+BUG: cartesi.filesystem.write_file reported success although the data could not be written (ENOSPC on fclose was swallowed)
+```
+`test_cli_final_hash.sh` runs `cartesi-machine.lua --final-hash=...` with `ulimit -f 0` and SIGXFSZ ignored, so the write fails with EFBIG:
+```
+$ sh bugs/ht-08-filesystem-write-file-swallows-close-errors/test_cli_final_hash.sh
+Halted
+Cycles: 56481123
+cli_exit=0
+final.bin size=0
+BUG: cartesi-machine exited 0 although the --final-hash file was not written (size=0)
+```
+
+**Scenario:** A script, CI job or operator tool runs `cartesi-machine --final-hash=final.bin` (or `--initial-hash`, state-hash, proof or dump outputs) on a host whose disk is full, over quota or failing. The CLI exits successfully and leaves a 0-byte or truncated file. Downstream tooling reads an empty or wrong hash or proof and may compare it, submit it or reject it with nothing pointing at the real cause. Lua projects that use `cartesi.filesystem.write_file`, `write_temp_file` or `write_scope_temp_file` (for example to stage input files for a run) can silently feed empty data into a later step after a host I/O failure.
+
+**Possible solution:** Close explicitly and check the result. For example, keep `<close>` and add `assert(f:close())` after the write; closing an already-closed file in `__close` is harmless. Or:
+```lua
+function filesystem.write_file(data, filename)
+    local f = assert(io.open(filename, "wb"))
+    local ok, err = f:write(data)
+    if ok then ok, err = f:close() else f:close() end
+    assert(ok, err)
+end
+```
+Audit other `<close>`-only write paths for the same pattern.
+
+**Severity:** Low. Both reviewers agree. It only triggers on host-side write failures. Machine state and the hashes and proofs computed in memory are correct, and neither the C API nor the PRT hash-tree storage path is involved. The harm is output files left empty or truncated while the CLI reports success.
+
+**Risks:** Bug: downstream consumers of CLI output files, or Lua library users, can act on empty or truncated hashes, proofs or inputs with no error raised. Fix: minimal. Callers that used to "succeed" on a failing disk will now raise an error, which is the intended behavior. `write_temp_file` already removes the file when it fails.
+
+**Proof of concept:** `bugs/ht-08-filesystem-write-file-swallows-close-errors/test_write_file_close.lua` (library-level, needs `/dev/full`) and `bugs/ht-08-filesystem-write-file-swallows-close-errors/test_cli_final_hash.sh` (end-to-end CLI, needs the default Cartesi images). Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/ht-08-filesystem-write-file-swallows-close-errors/test_write_file_close.lua
+eval $(make -s env); sh bugs/ht-08-filesystem-write-file-swallows-close-errors/test_cli_final_hash.sh
+```
+Both exit 1 while the bug is present and 0 once it is fixed.
+
+ID: `ht-08-filesystem-write-file-swallows-close-errors`

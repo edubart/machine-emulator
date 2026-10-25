@@ -6,15 +6,27 @@ Review branch: `codex/emulator-0.23-bugs`, based on `feature/prt` at
 
 Scope: shipped emulator C/C++/Lua libraries and `cartesi-machine`. The experimental
 Lua validator is excluded; branch `prt.lua` and README supply PRT semantics.
-Existing defects in touched code are identified explicitly. Review is ongoing.
+Existing defects in touched code are identified explicitly. Reportable review
+work is complete; material blocked by automated safeguards was skipped at the
+user's request and is not included as an unconfirmed finding.
 
 Workflow: separate agents inspect different areas and propose candidates; executable
 reproductions establish behavior; independent reviewers try to disprove each
 candidate. Only confirmed findings appear below. Each is committed locally with
-its reproduction as it is confirmed; pushing was cancelled by the user. Reproductions assert the observed bug and exit
+its reproduction as it is confirmed; pushing was cancelled by the user.
+Reproductions assert the observed bug and exit
 successfully when it occurs; they are not fixes. Run commands from the repository
 root with the branch built (`make`). Severity considers validator availability and
 dispute deadlines, as well as general API consumers.
+
+| ID | Finding | Severity | Origin |
+| --- | --- | --- | --- |
+| 001 | Successful persistence of truncated tree files | High, conditional on I/O failure | Introduced |
+| 002 | Lost proof descendants after forest reload | High for deadline-sensitive recovery | Introduced |
+| 003 | Incomplete hash-tree integrity check | Medium | Existing |
+| 004 | CLI dump rejects valid directory names | Low | Existing |
+| 005 | Empty dynamic-element ABI arrays rejected | Medium | Existing decoder, new API exposure |
+| 006 | Exponential reconstruction of shared forest subtrees | High for tall affected trees | Introduced |
 
 ## 001 — Forest persistence commits truncated tree files after a failed write
 
@@ -120,7 +132,7 @@ dispute deadlines, as well as general API consumers.
   shell syntax instead of being passed as one path, and the CLI aborts.
 - **Area/category:** `cartesi-machine` CLI; incorrect pathname handling.
   **Pre-existing** on `main`, in the dump function changed by this branch.
-- **Location:** `src/cartesi-machine.lua:3596–3601`, especially line 3601.
+- **Location:** `src/cartesi-machine.lua:3599–3601`, especially line 3601.
 - **Evidence:** `python3 tests/bugs/004-cli-dump-path.py` creates a minimal stored
   machine and runs the CLI with an argument array, without an invoking shell.
   Destination `plain` succeeds; destination `trial (1)` fails with exit status 1
@@ -174,8 +186,8 @@ dispute deadlines, as well as general API consumers.
 - **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
   LD_LIBRARY_PATH=./src lua5.4 tests/bugs/006-forest-shared-subtrees.lua`.
   The bounded test uses only public construction and checkpoint APIs. At heights
-  4/7/10, the stored directories contain 6/9/12 files, but loading reads
-  16/128/1024 files and constructs 31/255/2047 distinct tree objects. Equivalent
+  4/7/10, the stored directories contain 6/9/12 files, but loading performs
+  16/128/1024 file-read operations and constructs 31/255/2047 distinct tree objects. Equivalent
   forests built without intermediate checkpoints each reopen in two reads and
   one tree object. Roots and leaf queries agree. Independently confirmed with
   these controls after the orchestrator's initial reproduction.
@@ -193,3 +205,32 @@ dispute deadlines, as well as general API consumers.
   fixed-point-only trees avoid the problem. The test deliberately stays at height
   10 and demonstrates exact operation/object counts, not an actual out-of-memory
   event or missed dispute. Unlike 002, all data is present and hashes remain correct.
+
+## Coverage and validation
+
+The hunting passes covered cache metadata/payload layout, eviction, dense/sparse
+hashes and proofs, cache clearing and runtime configuration, mapped-memory clearing,
+shared/private backing stores, C/Lua/JSON-RPC API dispatch and lifecycle contracts,
+Lua frontier/forest construction and persistence, selectorless ABI wrappers and
+their shared decoder, filesystem helpers, and changed CLI paths. Branch PRT usage
+was consulted for semantics only. No experimental validator findings are included.
+
+All six committed reproductions ran successfully and established the described
+incorrect behavior. Existing suites also passed: filesystem (6 cases), ABI (6),
+Lua hash tree (60), backing stores (89), local/remote machine API (91), and C API
+(166). The C API run passed 165 cases in the sandbox; its loopback-server case
+passed separately outside the sandbox. These passing suites do not negate the
+additional cases in this report.
+
+Additional bounded comparisons found no divergence across Keccak/SHA cache
+capacities 1/3/17/101, concurrency 1/4, repeated clearing, dirty writes, non-power-of-two
+RAM/flash ranges, execution, proof queries, runtime clearing, shared/private loads,
+and persisted reloads (64 matrix checkpoints). Collected micro-cycle hashes also
+matched cleared and uncleared machines for three instructions at each cache size.
+C API handle/error/configuration checks passed. `make -q -C src` confirmed the
+existing build was current; no production source was changed.
+
+The checks ran on this Linux host, not every supported platform. No claim is made
+that every possible defect was found. Findings distinguish measured failures from
+conditional validator/dispute consequences; skipped blocked material is outside
+the report's confirmation coverage.

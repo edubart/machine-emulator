@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-82 confirmed issues: 4 high, 17 medium, 61 low.
+83 confirmed issues: 4 high, 17 medium, 62 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -107,6 +107,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
 | [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
 | [B81](#b81-load-or-create-on-a-non-empty-local-machine-object-leaks-the-previous-machine-and-its-locks) | low | pre-existing | C API (local machine) | load or create on a non-empty local machine object leaks the previous machine and its locks | `bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/` |
+| [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 
 ## Issues
 
@@ -4722,6 +4723,65 @@ BUG: SHARING_CONFIG load + run modified the stored snapshot S in place (mcycle 2
 **ID**: `p1-02-store-persists-load-time-sharing-all-as-config-shared-`
 
 **Related**: [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image), [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs).
+
+### B83. Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail
+
+**Title**: Rollback frees the working server's ephemeral port before rebinding the backup to it, so anything that binds that port in the gap makes `revert` fail with EADDRINUSE
+
+**Problem**: The only rollback method runs `get_server_address()`, `shutdown_server()`, `swap(backup)`, then `rebind_server(address)`. Both the CLI's `revert_fork` and the PRT recipe's `machine_pair:revert` use it. `shutdown_server` closes the working server's acceptor on port A right away, as its own comment says, "so the port can be immediately reused". A came from `bind(127.0.0.1:0)`: either `spawn_server("127.0.0.1:0")` or a fork child, which always binds `(addr, 0)`. So A is an ephemeral port, and nothing reserves it once it is freed. `rebind_server(A)` then builds a fresh `tcp::acceptor` on A. If any other socket is actively bound to A or listening on it by then, the bind fails with `bind: Address already in use` and `revert()` raises. Possible sources of that socket:
+- an explicit bind;
+- another JSON-RPC server binding `:0`, for example another validator node on the same host;
+- an outgoing connection that auto-binds A.
+
+The API has no way to pass a listening socket from one server to another, and no way to have the fork reserve A in advance. Asio's `SO_REUSEADDR` covers only a port in TIME_WAIT. State is not corrupted: the acceptor constructor throws before `handler->rebind`, so the backup keeps serving at its fork address with the correct restored root hash. What is lost is the stable address that callers use and the snapshot (`backup_machine` is already nil).
+
+**Origin**: pre-existing. `revert_fork` on origin/main does the same `rebind_server(address)`.
+
+**Area**: remote-machine lifecycle (`shutdown_server` → `swap` → `rebind_server`), JSON-RPC server acceptor handling.
+
+**Category**: api-contract (time-of-check/time-of-use race on a released port).
+
+**Location**:
+- `src/jsonrpc-remote-machine.cpp:755-769`: `jsonrpc_shutdown_handler` calls `close_acceptor()`, which frees A.
+- `src/jsonrpc-remote-machine.cpp:837`: `jsonrpc_fork_handler` binds the child acceptor to `(addr, 0)`, so the port is ephemeral.
+- `src/jsonrpc-remote-machine.cpp:894-907`: `jsonrpc_rebind_handler` constructs a new `tcp::acceptor{ioc, A}`, which throws on EADDRINUSE.
+- `src/jsonrpc-machine.cpp:749-754`: `jsonrpc_machine::rebind_server` passes the error back to the client.
+- Callers: `src/cartesi-machine.lua:3703-3711` (`revert_fork.__index:revert`) and `doc/recipes/prt.lua:1067-1075` (`machine_pair_methods:revert`).
+
+**Evidence**: The test runs the exact revert sequence. After `shutdown_server()` it starts a second JSON-RPC server on the freed address, standing in for another validator node or any process on the host. `rebind_server(A)` then fails, the machine stays on its fork address, and the root hash is restored correctly:
+```
+$ eval $(make -s env); timeout 60 lua5.4 bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/test.lua
+working server address:	127.0.0.1:38079
+squatter bound to:	127.0.0.1:38079
+rebind_server:	false	bind: Address already in use [system:98 at .../reactive_socket_service.hpp:161:5 ...]
+machine address after revert:	127.0.0.1:39581	root hash restored:	true
+BUG: rollback could not rebind the backup to the released ephemeral port 127.0.0.1:38079: bind: Address already in use [system:98 ...]
+exit=1
+```
+The test forces the bad interleaving. It does not catch a natural race.
+
+**Scenario**: A PRT validator, Rollups Node or Dave node rolls back a rejected input with `shutdown_server`/`swap`/`rebind_server`, or a CLI user's `revert_fork` does. In the few milliseconds between the shutdown reply and the rebind, another process on the host takes port A. That process could be another node spawning or forking a JSON-RPC server on `:0`, an outgoing connection auto-binding that port, or a co-located process deliberately squatting on ports it sees in use. `revert()` raises, the node aborts input processing, the snapshot is gone, and the machine is no longer at the address the node tracks.
+
+**Possible solution**: Make the handover atomic instead of release-then-rebind. Options:
+- Have the backup take over the working server's listening socket. For example, a `swap`/`takeover` RPC passes the fd over a Unix socket (`SCM_RIGHTS`), or the fork child inherits the parent's acceptor fd and keeps it dormant, so the port is never released.
+- Do the rebind before the shutdown. That needs `SO_REUSEPORT`, or a server-side "replace me with the fork" operation that closes the old acceptor only after the new one is bound.
+- In the recipes, at least make `revert` tolerate a failed rebind: keep using the fork address, which `swap` already points the client at, and report the new address instead of raising. Callers who need a stable address can use a fixed, non-ephemeral port.
+
+**Severity**: low. Both reviewers agree. No wrong hashes, proofs or corrupted state result, and the failure is a clean exception with the backup still usable at its fork address. A natural collision needs a random bind to land on one specific ephemeral port inside a window of a few milliseconds, about 1 in 28k per bind in that window. Triggering it on purpose needs a co-located process, which could already disrupt the node in worse ways. The worst realistic outcome is one aborted rollback/input step, recoverable by restart or retry.
+
+**Risks**:
+- Of the bug: occasional, hard-to-reproduce rollback failures on busy hosts that run several nodes or servers. The node's view of the machine address diverges from the server's actual address, and the snapshot is lost.
+- Of the fix: passing fds or inheriting the acceptor adds platform-specific code (Unix-only `SCM_RIGHTS`), and it adds fd lifetime and leak concerns across fork/shutdown. `SO_REUSEPORT` lets unrelated processes share the port and can steer connections to the wrong server. Making `revert` tolerate a failed rebind changes the recipe contract: callers must re-read `get_server_address()` after a revert.
+
+**Proof of concept**: `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/test.lua`. Run from the repo root:
+```
+eval $(make -s env); timeout 60 lua5.4 bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/test.lua
+```
+It exits with status 1 and prints `BUG: ...` while the bug is present, and prints `OK` once rollback can no longer lose the port. The test shuts down every server it spawns.
+
+**ID**: `p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race`
+
+**Related**: [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection).
 
 ## Candidates that were not confirmed
 

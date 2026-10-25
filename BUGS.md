@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-50 confirmed issues: 4 high, 11 medium, 35 low.
+51 confirmed issues: 4 high, 11 medium, 36 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -75,6 +75,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
 | [B48](#b48-evmu-hex-decoding-accepts-sign-characters) | low | pre-existing | Lua cartesi.evmu (ABI) | evmu hex decoding accepts sign characters | `bugs/lua-33-evmu-fromhex-sign-chars/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
+| [B51](#b51-log_step-on-an-empty-or-destroyed-local-machine-dereferences-a-null-pointer) | low | pre-existing | C API (local machine) | log_step on an empty or destroyed local machine dereferences a null pointer | `bugs/w2b-02-log-step-empty-machine-null-deref/` |
 
 ## Issues
 
@@ -2946,3 +2947,56 @@ It exits with status 1 and prints `BUG:` lines while the bug is present, and pri
 **ID**: `w2b-03-rename-remove-stored-trailing-slash`
 
 **Related**: [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever).
+
+### B51. log_step on an empty or destroyed local machine dereferences a null pointer
+
+**Title**: `local_machine::do_log_step` skips the `get_machine()` null check, so `cm_log_step` / `machine:log_step` on an empty or destroyed local machine segfaults instead of returning "no machine"
+
+**Problem**: `local_machine::do_log_step` calls `m_machine->log_step(mcycle_count, filename)` directly. Every other `do_*` method in `src/local-machine.cpp` calls `get_machine()`, which throws `std::runtime_error{"no machine"}` when `m_machine` is null, and this is the only bare `m_machine->` dereference in the file. `m_machine` is null on a handle from `cm_new()` / `cartesi.new()` that was never created or loaded, and after `cm_destroy()` / `machine:destroy()` (`do_destroy` deletes the machine and sets the pointer to null). In that state `cm_log_step` dereferences a null pointer. Its `try`/`catch(...)` cannot catch a SIGSEGV, so the host process crashes. Every sibling API (`cm_run`, `cm_get_root_hash`, `cm_log_step_uarch`, `cm_get_proof`, ...) returns `CM_ERROR_RUNTIME_ERROR` "no machine" on the same handle. The Lua binding has the same defect because `machine_obj_index_log_step` passes the handle straight to `cm_log_step`, and `pcall` cannot recover from the crash.
+
+**Origin**: pre-existing. `origin/main` has the same line (`src/local-machine.cpp:112-113`). This branch adds only 4 unrelated lines to the file.
+
+**Area**: libcartesi C API / `local_machine` (local machines only). The JSON-RPC server is not affected: `jsonrpc_machine_log_step_handler` (`src/jsonrpc-remote-machine.cpp:1168`) checks `if (!session->handler->machine)` and returns "no machine" before it calls `log_step`.
+
+**Category**: crash (null-pointer dereference / SIGSEGV)
+
+**Location**:
+- `src/local-machine.cpp:112-114`: `do_log_step` uses `m_machine->` instead of `get_machine()->`
+- `src/local-machine.cpp:62-74`: the `get_machine()` guard that this method skips
+- `src/local-machine.cpp:212-215`: `do_destroy` nulls `m_machine`
+- `src/i-machine.hpp:139-140`: `i_machine::log_step` forwards to `do_log_step` without a check
+- `src/cm.cpp:865-881`: `cm_log_step` validates only `log_filename`, then forwards
+- `src/clua-i-machine.cpp:850-853`: `machine_obj_index_log_step` calls `cm_log_step`
+
+**Evidence**: Each call runs in a child process. As a control, `cm_run` on an empty `cm_new()` handle returns -6 "no machine", but `cm_log_step` on the same handle dies with signal 11. In Lua, `get_root_hash` on a destroyed machine raises "no machine", while `log_step` on a `cartesi.new()` machine or on a destroyed machine segfaults, even inside `pcall`. Run: `eval $(make -s env); sh bugs/w2b-02-log-step-empty-machine-null-deref/run.sh`
+```
+== C API ==
+  cm_run (control) returned -6: no machine
+OK: cm_run (control) on empty machine returned an error
+BUG: cm_log_step on empty machine killed process with signal 11 (Segmentation fault) instead of returning an error
+== Lua ==
+  ok=false err=no machine
+OK: control: get_root_hash on destroyed machine raised an error
+Segmentation fault
+BUG: log_step on cartesi.new() machine crashed the process (exit 139) instead of raising an error
+Segmentation fault
+BUG: log_step on destroyed machine crashed the process (exit 139) instead of raising an error
+```
+
+**Scenario**: A PRT validator or Dave node uses `cm_log_step` to produce big-machine step proofs, and it runs the machine in process. Two cases hit the bug:
+- An error path calls `cm_destroy()`, and a later retry or cleanup step still calls `cm_log_step` on that handle.
+- A `cm_create`/`cm_load` failure leaves the `cm_new()` handle empty, and the code does not check the return value before calling `cm_log_step`.
+
+In both cases the node process crashes with SIGSEGV. Every other call on that handle would have returned a recoverable "no machine" error that the node could log and handle. Lua tooling built on `cartesi.new()` / `machine:destroy()`, such as test harnesses and CLI scripts, fails the same way, and `pcall` cannot catch it. Rollups Node and other users of `cartesi-jsonrpc-machine` are not affected, because the server checks for a missing machine.
+
+**Possible solution**: In `local_machine::do_log_step`, replace `return m_machine->log_step(mcycle_count, filename);` with `return get_machine()->log_step(mcycle_count, filename);`. Optionally, add a regression test that calls every `cm_*` machine method on an empty and on a destroyed handle and expects "no machine". That would catch this omission and any future one.
+
+**Severity**: low. The bug only triggers when a caller misuses a handle (never created or loaded, or already destroyed). Correct validators that check return codes never reach it. Hashes, proofs, step logs and dispute outcomes are never affected. The only effect is a process crash where every other API returns a recoverable error. The prover suggested medium, but both reviewers rated it low (at most borderline medium) because it needs a caller bug and has no integrity impact. This entry uses their rating.
+
+**Risks**:
+- Of the bug: a caller bug becomes a crash of the whole host process (validator / node / Lua script) instead of a recoverable error. The crash also loses any in-memory state and leaves a partial or empty step-log file behind. The API also behaves inconsistently, because only `log_step` lacks the guard.
+- Of the fix: minimal. It is a one-line change that matches every sibling method. Behavior on valid handles does not change. On an empty handle the call now returns `CM_ERROR_RUNTIME_ERROR` "no machine" and sets `break_reason` to `CM_BREAK_REASON_FAILED`.
+
+**Proof of concept**: `bugs/w2b-02-log-step-empty-machine-null-deref/run.sh` (driver), `test_log_step_empty.cpp` (C API test, compiled against `src/libcartesi`), and `test_log_step_empty.lua` (Lua test: one control case plus a `cartesi.new()` case and a destroyed-machine case). Run from the repo root with libcartesi built: `eval $(make -s env); sh bugs/w2b-02-log-step-empty-machine-null-deref/run.sh`. The script exits non-zero while the bug is present and prints `OK` for every case once it is fixed.
+
+**ID**: `w2b-02-log-step-empty-machine-null-deref`

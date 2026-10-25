@@ -360,6 +360,10 @@ Both exit 1 while the bug is present and 0 once it is fixed.
 
 **ID**: `ht-08-filesystem-write-file-swallows-close-errors`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `lua-21-write-file-close-error-ignored`: run with `lua5.4 bugs/lua-21-write-file-close-error-ignored/test_write_file_close_error.lua`.
+
 **Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files).
 
 ### B06. frontier_forest_store and fs.sync_file ignore write errors and commit truncated files

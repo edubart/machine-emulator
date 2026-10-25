@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-27 confirmed issues: 3 high, 9 medium, 15 low.
+30 confirmed issues: 3 high, 9 medium, 18 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -52,6 +52,9 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
+| [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
+| [B29](#b29-frontier-api-accepts-heights-above-the-tree-height-and-silently-grows-the-frontier) | low | pre-existing | Lua cartesi.hash-tree (frontier) | Frontier API accepts heights above the tree height and silently grows the frontier | `bugs/lua-17-frontier-height-args-unvalidated/` |
+| [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 
 ## Issues
 
@@ -1660,3 +1663,156 @@ eval $(make -s env); lua5.4 bugs/rpc-10-dump-memory-ranges-shell-mkdir/test_dump
 It uses a fresh `mktemp -d` work directory, or the directory given as the first argument. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK` once it is fixed.
 
 **ID**: `rpc-10-dump-memory-ranges-shell-mkdir`
+
+### B28. get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64
+
+**Title**: Lua `get_data_root_hash` returns nil for empty data, rejects `log2_root_size` 63/64 (shift overflow), and accepts sizes below a word
+
+**Problem**: `cartesi.hash-tree.get_data_root_hash(data, log2_root_size)` has three defects:
+1. **Empty data.** With `data == ""`, level 0 gets no entries, so the pairing loop `for i = 1, #level, 2` never runs. Every level stays `{}` and the function returns `level[1] == nil`. The function's own contract says "the data need not fill the tree" and that untouched nodes take the pristine hash, so it should return the pristine subtree root. That is the same value as `get_data_root_hash(zeros(2^n), n)` and the same value the machine reports for an untouched region.
+2. **Shift overflow.** The guard `#data <= (1 << log2_root_size)` uses Lua's 64-bit integers. `1 << 63` is `math.mininteger` and `1 << 64` is `0`, so any non-empty data is rejected with "data does not fit in the tree" at log2 63 or 64. 64 is the machine's root size.
+3. **No lower bound.** For `log2_root_size < WORD_LOG2_SIZE` (5, i.e. 32-byte words), the level loop does not run. The function silently returns the zero-padded full-word hash, for example `("a", 0)` and `("abcd", 2)`, instead of rejecting a size smaller than any proof target.
+
+**Origin**: Pre-existing. The function body is the same on `origin/main`; the branch changes other parts of `hash-tree.lua` (the forest storage) but not this function.
+
+**Area**: Lua hash-tree library (`cartesi.hash-tree`), used by off-chain verifiers of input/output regions.
+
+**Category**: correctness (wrong result on an edge input, and integer overflow in a bounds check).
+
+**Location**:
+- `src/cartesi/hash-tree.lua:46-69` (`get_data_root_hash`)
+- `src/cartesi/hash-tree.lua:48` (overflowing fit guard)
+- `src/cartesi/hash-tree.lua:63-69` (level loop, with no lower bound and no empty-level handling; `return level[1]` gives nil)
+- Caller example: `doc/recipes/slice-calculator-output.lua:26,36`
+
+**Evidence**: The test computes `get_data_root_hash("", n)` and compares it with the all-zero root and with `machine:get_proof(flash_start, 12).target_hash` for an untouched 4 KiB flash drive. It also calls the function with 1-byte data at log2 63 and 64, and with sub-word sizes. Run: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`
+```
+BUG: empty data, log2=12 returned nil, expected pristine 0x292c23a9aa1d8bea7e2435e555a4a60e379a5a35f3f452bae60121073fb6eead
+BUG: verifier comparing get_data_root_hash('',12) against machine proof target fails (got nil)
+BUG: 1-byte data, log2=63 rejected: .../src/cartesi/hash-tree.lua:48: data does not fit in the tree
+BUG: 1-byte data, log2=64 rejected: .../src/cartesi/hash-tree.lua:48: data does not fit in the tree
+BUG: log2_root_size=0 (< word) silently returns the full-word hash instead of rejecting
+BUG: log2_root_size=2 (< word) silently returns the full-word hash
+9 bug(s)
+```
+(The test exits with status 1 while the bug is present.)
+
+**Scenario**: An application writes an empty result, or a result that starts with a NUL byte, to its output NVRAM. A Lua verifier that follows the documented recipe `doc/recipes/slice-calculator-output.lua` does `result = string.unpack("z", read_memory(output_nvram))` and gets `""`. It then calls `get_data_root_hash(result, log2_size)` and gets nil. The next step, `verify_splice` / `roll_hash_up_tree`, either fails its assertion or raises an error on `keccak256(nil, sibling)`, so an honest, correct proof is rejected or the verifier crashes. The machine's own target hash for that region is the all-zero root. A caller that hashes small data as a whole-machine root (log2 64) is wrongly rejected. The PRT C API paths are not affected: `get_root_hash`, `get_proof`, step and uarch logs, and the frontier/forest code. No on-chain hash or dispute outcome changes.
+
+**Possible solution**: Add `assert(log2_root_size >= WORD_LOG2_SIZE and log2_root_size <= 64)`. Replace the guard with an overflow-safe form, such as `log2_root_size >= 63 or #data <= (1 << log2_root_size)`. Seed level 0 with the pristine word hash when `data` is empty (or return the pristine hash for that height), so the result is always a hash.
+
+**Severity**: low. Both reviewers agree. This is a Lua convenience helper that is not on the PRT/C-API path. Its main failure, on empty data, fails loudly (nil, then an error) and never produces a wrong hash that would be accepted. Callers can work around it with zero-padded data, and the 63/64 and sub-word cases are rarely reached in practice.
+
+**Risks**: Bug: Lua-based output/input verifiers reject valid proofs, or crash, for empty results. Code that hashes at the full machine size breaks. Sub-word sizes quietly give a hash that matches no proof target. Fix: low risk. Callers that relied on `nil` as an "empty" sentinel will now receive the pristine hash, and callers that passed sub-word sizes will get an error instead of a hash.
+
+**Proof of concept**: `bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. It needs no machine images: it builds a RAM-only machine with a flash drive.
+
+**ID**: `lua-16-get-data-root-hash-empty-nil`
+
+### B29. Frontier API accepts heights above the tree height and silently grows the frontier
+
+**Title**: Lua frontier API accepts subtree and pad heights above the tree height, and non-hash `hash_type` values, then silently grows the frontier or returns the pad as the root
+
+**Problem:** No function in the `cartesi.hash-tree` frontier API checks that a subtree or pad height is at most `log2_max_leaves` (`#frontier - 1`):
+- `frontier_push_back(f, hash, height)` sets `level = height + 1`. Its only capacity check, `assert(not frontier[#frontier])`, looks at the current top level. When `height + 1 > #frontier`, the final `frontier[level] = right` writes past the end of the array. The tree silently gets taller: on a height-3 frontier, `push_back(f, x, 5)` makes `#f == 6`. After that, `frontier_get_root_hash` returns `x` and `frontier_get_leaf_count` returns 32 for a tree that holds at most 8 leaves.
+- `frontier_append(..., height)` relies on `frontier_padding_fits`. When `first_level > #frontier`, the local `height = #frontier - first_level` is negative, so the capacity bits are never checked and the function returns true. `append` then calls `push_back` past the end, giving `#g == 5`.
+- `frontier_get_root_hash(f, pad, pad_height)` with `pad_height >= #f - 1` runs its level loop zero times and returns `pad` itself as the root. `frontier_pad_back` has the same gap.
+- `frontier_genesis` and `frontier_load` use `assert(cartesi[hash_type])`, so they accept any truthy field of the `cartesi` module, such as `"tohex"`, as a hash function.
+
+These functions' own comments promise the opposite: "Appending past the tree capacity fails" and "Appending past the tree capacity fails before anything changes". `frontier_store` writes a frontier corrupted this way without error, but `frontier_load(path, L)` then rejects it with "frontier height does not match the expected height".
+
+**Origin:** Pre-existing. `origin/main` has the same `frontier_push_back`, `frontier_append`, `frontier_get_root_hash` and `cartesi[hash_type]` lookups, one line earlier.
+
+**Area:** Lua library `cartesi.hash-tree` (frontier functions).
+
+**Category:** API contract / input validation.
+
+**Location:**
+- `src/cartesi/hash-tree.lua:144-158`: `frontier_padding_fits`, which mishandles a negative `height`
+- `src/cartesi/hash-tree.lua:165-177`: `frontier_push_back`
+- `src/cartesi/hash-tree.lua:186-213`: `frontier_append`
+- `src/cartesi/hash-tree.lua:219-236`: `frontier_get_root_hash`
+- `src/cartesi/hash-tree.lua:248-254`: `frontier_pad_back`
+- `src/cartesi/hash-tree.lua:363-364`: `frontier_genesis`, the `hash_type` lookup
+- `src/cartesi/hash-tree.lua:942-946`: `frontier_load`, the `hash_type` lookup and height check
+
+**Evidence:** The test uses only the public `cartesi.hash-tree` API. Every out-of-range call succeeds, and each one corrupts the tree or returns a wrong root instead of raising an error:
+```
+$ eval $(make -s env); lua5.4 bugs/lua-17-frontier-height-args-unvalidated/test_frontier_height_args.lua
+push_back(f,x,5) ok=	true	nil	#f=	6
+BUG: frontier_push_back with height 5 > log2_max_leaves 3 grew frontier from 4 to 6 levels
+BUG: after that, frontier_get_root_hash returns the pushed hash x as the root of the height-3 tree
+leaf count after:	true	32
+append({x},1,2,4) ok=	true	nil	#g=	5
+BUG: frontier_append with height 4 > log2_max_leaves 3 grew frontier to 5 levels
+BUG: frontier_get_root_hash with pad_height 6 > 3 returns the pad itself as the height-3 root
+BUG: frontier accepts hash_type 'tohex' (not a hash function)
+load corrupted with L=3:	false	.../hash-tree.lua:946: frontier height does not match the expected height
+BUG: stored frontier cannot be reloaded with its original height (...)
+exit=1
+```
+
+**Scenario:** An external validator, such as a Rollups Node or Dave component written in Lua, builds commitment or output trees with `cartesi.hash-tree`. A unit mix-up passes a height in the wrong unit, for example log2 of the bundle size in leaves where the tree counts bundles. Instead of an assertion, the node computes a silently wrong root (or the pad as the root) and a tree whose leaf count is wrong. If it persists that frontier, it cannot reload it after a restart. In-tree callers cannot reach this, because every height is bounded by construction. That covers `src/cartesi-machine.lua` (around lines 3535, 4033, 4158, 4160 and 4198) and the PRT recipes. An honest node that uses the API correctly gets correct roots.
+
+**Possible solution:** Validate the height in `push_back`, `append`, `get_root_hash` and `pad_back`, before anything is mutated:
+```lua
+local h = height or 0
+assert(math.type(h) == "integer" and h >= 0 and h <= #frontier - 1, "subtree height exceeds the tree height")
+```
+`height == #frontier - 1` must stay legal, because one subtree can fill the whole tree. In `frontier_genesis`, `frontier_load` and `frontier_forest`, accept only the supported hash types (`"keccak256"`, `"sha256"`).
+
+**Severity:** Low. Both reviewers rated it low. It can only be triggered by a caller that breaks the precondition with an out-of-range height or a non-hash `hash_type`. No in-tree CLI or PRT path can do that, and correct use always gives correct hashes. The real cost is that such a programming error in an external validator produces silently wrong roots, or a persisted frontier that cannot be reloaded, where the documented behaviour is a clean failure.
+
+**Risks:**
+- Of the bug: a caller's mistake becomes a wrong commitment or root, or a node that cannot restart from its stored frontier, instead of an immediate error. In a fraud-proof setting, that can surface late, during a dispute.
+- Of the fix: low. Valid calls are unchanged. Code that passed `height == log2_max_leaves` stays legal. Callers that relied on the silent growth were already producing wrong trees, and they will now fail loudly.
+
+**Proof of concept:** `bugs/lua-17-frontier-height-args-unvalidated/test_frontier_height_args.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-17-frontier-height-args-unvalidated/test_frontier_height_args.lua`. It uses a temporary file from `os.tmpname()` and removes it at the end. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: frontier rejects out-of-range heights and hash types` once the bug is fixed.
+
+**ID**: `lua-17-frontier-height-args-unvalidated`
+
+**Related**: [B20](#b20-frontier_next_proofs-does-not-check-tree-capacity).
+
+### B30. verify_hash_tree returns true when inner nodes or the root are corrupted
+
+**Title**: verify_hash_tree returns true when dense inner nodes, the dense root or sparse nodes are corrupted
+
+- **Problem**: `hash_tree::verify` is the implementation behind `cm_verify_hash_tree`, Lua `m:verify_hash_tree()` and JSON-RPC `machine.verify_hash_tree`. It checks only three things for each address range:
+  1. It compares each page's recomputed Merkle hash with the dense-tree node at page level.
+  2. It checks that a page or range that is actually dirty is also marked dirty.
+  3. It compares the range's sparse node with its dense root.
+
+  It never recomputes dense inner nodes from their children, and it never recomputes sparse inner nodes or the sparse root. The third check only prints `dense hash tree root does not match sparse node hash` to stderr and never sets `ret = false`. A tree whose inner nodes are stale or corrupted therefore passes, even though `get_root_hash`, `get_node_hash` and `get_proof` return wrong values. This breaks the documented contract ("True if tree is self-consistent").
+- **Origin**: pre-existing. The branch only changed the cache-payload accessors inside the diagnostic branch. The print-only dense/sparse check is the same on `main`.
+- **Area**: hash-tree integrity check API (`cm_verify_hash_tree`, Lua `verify_hash_tree`, JSON-RPC `machine.verify_hash_tree`).
+- **Category**: correctness (false positive in an integrity check).
+- **Location**:
+  - `src/hash-tree.cpp:650-714`: `hash_tree::verify`. Only page-level dense nodes are recomputed (lines 662-666). The dense-root vs sparse-node mismatch at lines 707-710 prints but does not fail.
+  - `src/machine.cpp:1620`: `machine::verify_hash_tree` calls `m_ht.verify` directly.
+  - `src/cm.cpp:1036-1041`: `cm_verify_hash_tree`. Also `src/clua-i-machine.cpp:993` and `src/jsonrpc-remote-machine.cpp:1311`.
+- **Evidence**: The test stores a machine with 1 MiB of RAM, with data written in both halves. It patches the stored hash-tree files and loads them with `sharing = "none"`. For each value it compares the result before and after `clear_hash_tree()`, which forces a full re-hash. The four patches are:
+  - (A) the RAM `.dht` root node (heap index 1, byte 32);
+  - (B) a dense inner node (heap index 2, byte 64), read with `get_node_hash(RAM, 19)` and also seen as the sibling in `get_proof` for the right half;
+  - (C) the sparse root hash inside `hash_tree.sht`.
+
+  In every case `verify_hash_tree()` returns true while the reported value is wrong:
+  ```
+  $ eval $(make -s env); timeout 120 lua5.4 bugs/api-03-verify-hash-tree-misses-inner-nodes/test.lua
+  [A dense root] verify_hash_tree=true  value_before=4d05a7c1d6c16b50  recomputed=27323628b3e7e58f
+  [B dense inner node hash] verify_hash_tree=true  value_before=0202020202020202  recomputed=27e1bd4ef3afd672
+  [B proof sibling] verify_hash_tree=true  value_before=0202020202020202  recomputed=27e1bd4ef3afd672
+  [C sparse root] verify_hash_tree=true  value_before=0303030303030303  recomputed=27323628b3e7e58f
+  BUG: verify_hash_tree accepted 4 corrupted hash trees
+  ```
+- **Scenario**: A validator node (Rollups Node, Dave, or another PRT node) keeps a machine on disk and loads it after a crash or restart. It calls `verify_hash_tree` as a health or recovery check before it trusts the hash tree. The stored `.dht`/`.sht` files may be stale or damaged, either from disk corruption or from the crash-during-update states reported separately (ht-01, ht-03, rpc-12, rpc-14: stale dense inner nodes or a stuck sparse root). The check reports a healthy tree, so the node skips `clear_hash_tree` and then publishes wrong root hashes, proofs or step logs. Without that fix, an honest player could commit to or defend a wrong state. Applications inside the machine are not affected.
+- **Possible solution**: After the leaf checks in `verify`, recompute every dense inner node from its children and compare. Then recompute the sparse inner nodes up to the root, using pristine hashes for pristine children, and compare each one with the stored value. Set `ret = false` on any mismatch. For the existing dense-root vs sparse-node branch, also set `ret = false`, but only when the range is not marked dirty, because a range that is marked dirty and not yet updated can legitimately differ. Alternatively, compare against a simulated update.
+- **Severity**: low. Both reviewers rated it low (one said possibly low-to-medium), and the prover suggested medium. It is a real false positive in a public C, Lua and JSON-RPC API. But it does not produce wrong hashes by itself. The API is documented as "used only for emulator internal tests", and neither the CLI nor the in-branch PRT node calls it. It matters only to a node that relies on it after one of the separately reported corruption bugs.
+- **Risks**: Bug: an operator or node that trusts the check gets a false "OK" on a corrupted tree, and wrong roots or proofs get published. That hides the corruption bugs reported separately. Fix: a full inner-node recomputation is O(size of the dense trees). That is acceptable for a diagnostic but slower than today on large machines. Failing on a dense/sparse mismatch without the dirty-range exception would give false negatives on trees that are healthy but not yet updated.
+- **Proof of concept**: `bugs/api-03-verify-hash-tree-misses-inner-nodes/test.lua` patches stored hash-tree files and checks the result with the public Lua API. It uses a temporary directory, or `$WORKDIR` if that is set. It exits 1 when the bug reproduces. Run from the repo root:
+  `eval $(make -s env); timeout 120 lua5.4 bugs/api-03-verify-hash-tree-misses-inner-nodes/test.lua`
+
+**ID**: `api-03-verify-hash-tree-misses-inner-nodes`
+
+**Reviewer note**: A separate review panel (`ht-05-verify-hash-tree-misses-inner-nodes`) reproduced the same behavior but rejected it 2 to 1, arguing that `verify_hash_tree` is meant to check dirty-page tracking rather than the whole tree. This panel confirmed it. It is listed as low so that readers can weigh both views.
+
+**Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree).

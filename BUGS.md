@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-56 confirmed issues: 4 high, 12 medium, 40 low.
+57 confirmed issues: 4 high, 12 medium, 41 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -81,6 +81,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B54](#b54-a-transient-accept-error-closes-the-json-rpc-servers-listening-socket-for-good) | low | pre-existing | JSON-RPC remote machine server | A transient accept error closes the JSON-RPC server's listening socket for good | `bugs/w2b-06-jsonrpc-accept-error-kills-server/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
 | [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw) | low | pre-existing | Runtime config, hash tree | Out-of-range concurrency.update_hash_tree makes every hash-tree update throw | `bugs/w2b-08-concurrency-update-hash-tree-int-truncation/` |
+| [B57](#b57-readwrite_virtual_memory-silently-do-nothing-for-ranges-that-reach-264) | low | pre-existing | C API (virtual memory access) | read/write_virtual_memory silently do nothing for ranges that reach 2^64 | `bugs/w2b-09-virtual-memory-range-wraparound/` |
 
 ## Issues
 
@@ -3269,3 +3270,71 @@ eval $(make -s env); timeout 60 lua5.4 bugs/w2b-08-concurrency-update-hash-tree-
 It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the value is validated or clamped. Rejecting the value in the constructor also counts as a pass.
 
 **ID**: `w2b-08-concurrency-update-hash-tree-int-truncation`
+
+### B57. read/write_virtual_memory silently do nothing for ranges that reach 2^64
+
+**Title**: `read/write_virtual_memory` report success and do nothing when `vaddr + length` reaches or passes 2^64 (Lua read then returns uninitialized heap bytes)
+
+**Problem:** `machine::read_virtual_memory` and `machine::write_virtual_memory` compute `vaddr_limit = vaddr_start + length` and `vaddr_page_limit = (vaddr_limit + AR_PAGE_SIZE - 1) & ~(AR_PAGE_SIZE - 1)` with no overflow check. There are two failing cases:
+- **Range ends exactly at 2^64** (for example `0xfffffffffffff000`/4096, or `0xffffffffffffffff`/1): `vaddr_page_limit` wraps to 0.
+- **Range crosses 2^64** (for example `0xfffffffffffff000`/8192): `vaddr_page_limit` becomes a small value below `vaddr_page_start`.
+
+In both cases the page loop (`vaddr_page < vaddr_page_limit`) runs zero times. No translation, page-fault check, physical-range check or copy happens, and `cm_read_virtual_memory`/`cm_write_virtual_memory` return `CM_ERROR_OK`. So a read leaves the caller's buffer untouched, and a write reports success but writes nothing. The same write to the neighbouring page `0xffffffffffffe000` is correctly rejected.
+
+The Lua binding allocates its result with an uninitialized `new unsigned char[length]` and returns it as a string, so `m:read_virtual_memory(-4096, 4096)` returns leftover host heap bytes. The JSON-RPC server zero-fills its buffer (`make_unique_calloc`), so a remote machine returns zeros for the same call. Local and remote results therefore differ.
+
+**Origin:** pre-existing. This branch does not touch these functions.
+
+**Area:** libcartesi C API (`cm_read_virtual_memory` / `cm_write_virtual_memory`), Lua binding, and the gdbstub as the in-tree caller.
+
+**Category:** correctness, plus a minor uninitialized-memory disclosure to the in-process Lua caller.
+
+**Location:**
+- `src/machine.cpp:1811-1838` (`machine::read_virtual_memory`: unchecked `vaddr_limit` / `vaddr_page_limit` overflow)
+- `src/machine.cpp:1840-1873` (`machine::write_virtual_memory`: same arithmetic)
+- `src/cm.cpp:1142-1156` (passes the success through)
+- `src/clua-i-machine.cpp:805-823` (uninitialized `new unsigned char[length]` returned to Lua)
+- `src/jsonrpc-remote-machine.cpp:1449-1458` (calloc'd buffer, which is why remote and local results differ)
+- Caller: `src/cartesi/gdbstub.lua:398,412`
+
+**Evidence:** The C test pre-fills the output buffer with `0xAA` on a fresh bare-mode machine (1 MiB RAM). The Lua test checks the bytes returned for an unmapped range, which must be all zero (or the call must raise an error). Run from the repo root with `eval $(make -s env); sh bugs/w2b-09-virtual-memory-range-wraparound/run.sh`:
+```
+read  va=0xffffffffffffe000 len=4096 -> err=0 () buffer written
+write va=0xffffffffffffe000 len=4096 -> rejected (attempted write is not entirely within single memory range)
+read  va=0xfffffffffffff000 len=4096 -> err=0 () buffer UNTOUCHED (still 0xAA)
+BUG: cm_read_virtual_memory(0xfffffffffffff000, 4096) returned success but never wrote the output buffer
+BUG: cm_read_virtual_memory(0xffffffffffffffff, 1) returned success but never wrote the output buffer
+BUG: cm_read_virtual_memory(0xfffffffffffff000, 8192) returned success but never wrote the output buffer
+write va=0xfffffffffffff000 len=4096 -> err=0 ()
+BUG: cm_write_virtual_memory(0xfffffffffffff000, 4096) reported success (wrote nothing) although the same write to the neighbouring page 0xffffffffffffe000 is rejected
+6 defect(s) found
+== Lua binding ==
+read(-8192,4096) nonzero bytes:	no
+read(-4096,4096) first nonzero byte at: 1
+BUG: read_virtual_memory(-4096,4096) returned uninitialized host heap bytes
+write(-8192) ok:	false	write(-4096) ok:	true
+BUG: write_virtual_memory(-4096,4096) reports success but writes nothing
+```
+The C result is deterministic. Whether the Lua read leaks garbage depends on the allocator: the 4 KiB read leaked non-zero bytes in every run, while a 64 KiB read came from fresh zeroed mmap memory.
+
+**Scenario:** Under Sv39/Sv48/Sv57, kernel addresses are sign-extended, so the top virtual page `0xfffffffffffff000` is a legal page. A developer debugging a guest kernel through `cartesi-machine --gdb` (gdbstub.lua forwards GDB-supplied addresses and lengths) can hit it in two ways:
+- Reading memory there gets success with stale or garbage bytes instead of the real contents or an error.
+- Writing memory there (for example a breakpoint or patch) is silently dropped.
+
+Apps or CLI tools that call `cm_read_virtual_memory` directly with a range that touches the last page get an untouched buffer and `CM_ERROR_OK`. PRT validators, Rollups Node and Dave are not affected: these helpers take no part in hashing, proofs, step logs, or the uarch/PRT verification paths, and since nothing is written the root hash does not change.
+
+**Possible solution:**
+- Reject `length > UINT64_MAX - vaddr_start + 1`, that is, any range that wraps past 2^64. The cleaner option is to make the loop wrap-safe: iterate a page count, or loop while `remaining > 0` and advance by `chunklen`, so a range ending exactly at 2^64 is still translated and read or written normally, and a range that crosses 2^64 raises a "page fault" or `invalid_argument`.
+- Apply the same fix to both functions, which could share one helper.
+- In `clua-i-machine.cpp`, value-initialize the buffer (`new unsigned char[length]()`) as defense in depth.
+- Add regression tests for `(-4096, 4096)`, `(-1, 1)` and `(-4096, 8192)`.
+
+**Severity:** low. Both reviewers rated it low and agree on why: it is a real contract violation (silent success with no data, and uninitialized bytes in Lua), but it triggers only for ranges touching the very last page of the 64-bit address space, through debug and inspection APIs. It corrupts nothing, does not crash or hang, has no effect on PRT, hashes or proofs, and the leaked bytes stay in the caller's own process. The remote server zero-fills its buffer.
+
+**Risks:**
+- **Bug:** debugger users see wrong kernel memory, or have writes and breakpoints silently ignored at the top page, which can lead to wrong debugging conclusions. There is also a small in-process heap disclosure through Lua, and local and remote machines behave differently.
+- **Fix:** low risk. The fix changes behavior only for ranges that currently do nothing. A range that ends exactly at 2^64 will start translating the top page and can now raise "page fault" where it used to "succeed". Callers that relied on the silent success (none known in-tree; the gdbstub uses `pcall`) would now see an error. Take care that the new loop does not itself overflow when `vaddr` advances past the last page.
+
+**Proof of concept:** `bugs/w2b-09-virtual-memory-range-wraparound/test-vmem-wrap.cpp` (C API), `bugs/w2b-09-virtual-memory-range-wraparound/test-vmem-wrap.lua` (Lua binding), and `bugs/w2b-09-virtual-memory-range-wraparound/run.sh`, which builds the C test into a temporary directory against `src/libcartesi` and runs both tests. Run from the repo root (after building `src/`) with `eval $(make -s env); sh bugs/w2b-09-virtual-memory-range-wraparound/run.sh`. To run only the Lua test: `eval $(make -s env); lua5.4 bugs/w2b-09-virtual-memory-range-wraparound/test-vmem-wrap.lua`. Exit status 1 means the bug reproduced.
+
+**ID**: `w2b-09-virtual-memory-range-wraparound`

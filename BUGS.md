@@ -412,3 +412,46 @@ exit=1
 **Proof of concept:** `bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It works in a fresh `mktemp -d` directory, or in `$WORKDIR` if that is set. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: remove_stored is idempotent` once fixed.
 
 ID: `ht-09-remove-stored-not-idempotent`
+
+<a id="ht-10-clone-stored-emlink-no-fallback"></a>
+
+### `clone_stored` fails with EMLINK ("Too many links") instead of copying once about 65000 stored clones share one hard-linked read-only file
+
+**Problem:** `os::clone_file` handles a source with no write bits by hard-linking it with a plain `link()`. It falls back to `copy_file` only when the error is `ENOTSUP`, `EXDEV` or `EPERM`, and rethrows every other errno. `machine::store` always writes the PMAs backing file (`0000000000010000-1000.bin`) read-only, and it does the same for read-only flash drives and NVRAM. As a result, `machine::clone_stored` (`cm_clone_stored`) hard-links that file on every clone, and the template, its clones and their clones all share one inode. ext4 allows at most 65000 links per inode. At that point `link()` returns `EMLINK`, the error is rethrown as `std::system_error("Too many links")`, and `clone_stored` fails. A plain copy would have worked. The failure then hits every clone from the template or from any of its descendants, not just one source, for as long as that many links exist. The Lua `cartesi.filesystem.clone_file` binding calls the same function and fails the same way.
+
+**Origin:** Pre-existing. `origin/main` (v0.22.0) has the same `clone_file` with the same fallback list. This branch makes the defect easier to reach by exposing `clone_file` in the new `cartesi.filesystem` Lua module.
+
+**Area:** Stored machine API (`cm_clone_stored` / `machine:clone_stored`), `os::clone_file`, and the Lua `cartesi.filesystem.clone_file`.
+
+**Category:** Availability / unhandled recoverable error. Hashes are not affected.
+
+**Location:**
+- `src/os-filesystem.cpp:598-614`: `os::clone_file` uses `hardlink_file` for read-only sources, and its fallback list does not include `EMLINK`.
+- `src/machine.cpp:454-460`: `store` marks the PMAs backing store, plus read-only flash drives and NVRAM, read-only.
+- `src/machine.cpp:493-541`: `clone_stored` runs every backing file through `os::clone_file`.
+- `src/clua-cartesi-filesystem.cpp:70`: `filesystem.clone_file`.
+
+**Evidence:** The test stores a machine with 4 KiB of RAM and confirms that a clone shares the PMAs file's inode with the template. It then adds hard links to that inode with `os.link` until the ext4 limit is reached, which stands in for about 65000 live stored descendants. Finally it calls `clone_stored` from both the template and a descendant. Run on ext4 (`/dev/vda`), in about 1.5 s:
+```
+$ eval $(make -s env); lua5.4 bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua
+read-only files in stored dir: 0000000000010000-1000.bin
+inode template=936448 clone=936448 (shared=true)
+hit EMLINK after 64998 extra links; st_nlink= 65000
+clone_stored(c1) failed: unable to create hard link from '.../c1/0000000000010000-1000.bin' to '.../c-from-c1/0000000000010000-1000.bin': Too many links
+clone_stored(template) failed: unable to create hard link from '.../template/0000000000010000-1000.bin' to '.../c-from-template/0000000000010000-1000.bin': Too many links
+BUG: clone_stored fails with EMLINK once the shared read-only inode reaches the filesystem link limit; no fallback to copy
+```
+The exit status is 1. Once fixed, the test exits 0 and also checks that each clone's root hash matches the template's.
+
+**Scenario:** A validator (a Rollups Node, Dave, or a PRT node such as `doc/recipes/prt.lua`, which calls `clone_stored` from templates and snapshot caches) keeps stored snapshots, for example one per input or checkpoint, all cloned from one stored template or from each other. The shared inode spreads only through `clone_stored` chains: a machine that is loaded, run and then stored gets fresh files. If the node does not prune, the live directories from one lineage reach about 65000. From then on every `clone_stored` from that lineage throws, so the node can no longer snapshot, fork or revert, and it can stall during a dispute until an operator deletes old clones. Filesystems with lower per-inode link limits hit this sooner. XFS and btrfs allow far more links.
+
+**Possible solution:** In `os::clone_file`, also fall back to `copy_file` on `EMLINK`, and arguably on `EACCES` and `EOPNOTSUPP` (the same value as `ENOTSUP` on Linux, but not on every platform). Check that the copied file keeps the source's read-only mode, so that later clones of it are still hard-linked.
+
+**Severity:** Low. Both reviewers agreed. It is an availability failure that needs about 65000 unpruned live clones of one stored lineage on ext4. It produces no wrong hashes or proofs and no corrupted state. The error is clean and catchable, `scope_remove` cleans up the partial target, and deleting old clones lowers the link count again.
+
+**Risks:** Bug: when the limit is reached, a long-running validator that depends on `clone_stored` loses the ability to snapshot or revert, which could delay its dispute moves. Fix: very low risk. Falling back to a copy only costs disk space and time for the affected file (the PMAs file is 4 KiB). If `EACCES` is added, the fallback must not hide real permission errors on the destination directory. `copy_file` would surface those itself.
+
+**Proof of concept:** `bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`. It needs `python3`, and the `bugs/` directory must be on ext4 or another filesystem with a per-inode link limit. Its temporary files go in a subdirectory next to the test and are removed afterwards. Run from the repo root:
+`eval $(make -s env); lua5.4 bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`
+
+ID: `ht-10-clone-stored-emlink-no-fallback`

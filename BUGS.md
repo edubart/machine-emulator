@@ -304,3 +304,55 @@ eval $(make -s env); sh bugs/ht-08-filesystem-write-file-swallows-close-errors/t
 Both exit 1 while the bug is present and 0 once it is fixed.
 
 ID: `ht-08-filesystem-write-file-swallows-close-errors`
+
+<a id="ht-07-hashtree-lua-write-file-ignores-write-error"></a>
+
+### hash-tree.lua `write_file` ignores `file:write` errors, so `frontier_forest_store` commits a truncated tree file that later stores never repair
+
+**Problem:** The durable `write_file` helper in `cartesi.hash-tree` calls `temporary.file:write(contents)` and never checks the result. Lua's `file:write` does not raise on failure; it returns `nil, err`. When a large `fwrite` fails partway (ENOSPC, EFBIG, EDQUOT), glibc returns a short count and leaves nothing pending in the stdio buffer. The later `fs.sync_file` therefore succeeds (`fflush` returns 0 and `fsync` works). `temporary:rename` in `cartesi.filesystem` also ignores the result of `self.file:close()`, so the truncated temporary file is renamed into place. This breaks the helper's own guarantee that "the name never appears with incomplete contents". `store_tree` writes a tree file only `if not fs.exists(path)`, and files are named by the tree's hash, so no later store rewrites or checks the corrupt file, even in a fresh process with free space. The next `frontier_forest_store` then commits a new frontier file (the store's commit point) that references the unloadable tree.
+
+**Origin:** Introduced by this branch. `src/cartesi/filesystem.lua` and the durable forest store in `src/cartesi/hash-tree.lua` do not exist on `main`.
+
+**Area:** Lua library `cartesi.hash-tree` (frontier forest and frontier persistence) and `cartesi.filesystem`. The `cartesi-machine` CLI's `store_frontier` also goes through `write_file`.
+
+**Category:** Durability / silent data corruption (an unchecked I/O error).
+
+**Location:**
+- `src/cartesi/hash-tree.lua:509-514`: `write_file`, where `temporary.file:write(contents)` is unchecked.
+- `src/cartesi/filesystem.lua:47-51`: `temporary_file_meta.__index:rename`, where `self.file:close()` is unchecked.
+- `src/cartesi/hash-tree.lua:577-596`: `store_tree` skips any tree file that already exists.
+- `src/cartesi/hash-tree.lua:967-990`: `frontier_forest_store` commits the frontier file over the corrupt tree.
+- `src/cartesi/hash-tree.lua:935-938` (`frontier_store`) and `src/cartesi-machine.lua:3274-3277` (CLI `store_frontier`): other users of the same `write_file`.
+
+**Evidence:** The test builds a 512-leaf keccak256 forest, whose single fixed-point tree file is about 35 KB. A child process stores it under `trap '' XFSZ; ulimit -f 8`, so `write(2)` fails with EFBIG at 8 KiB, which is the same short-write path ENOSPC takes on a full disk. The parent then stores again with no limit, reloads the forest, and queries a node hash. Run from the repo root: `eval $(make -s env); lua5.4 bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`
+```
+child (limited store): STORE-OK
+tree file 0x8782ecbf...6e6606a5.json size 8192
+second (unlimited) store:	true	nil
+tree file after second store 0x8782ecbf...6e6606a5.json size 8192
+reload + query:	false	.../src/cartesi/hash-tree.lua:528: failed to parse JSON from a string: [json.exception.parse_error.101] parse error at line 1, column 8193: ... missing closing quote
+BUG: frontier_forest_store reported success although writing the tree file failed (EFBIG)
+BUG: the committed tree file is truncated and the forest cannot be reloaded/queried: ...
+BUG: a later store over the same directory did not repair the truncated file (store_tree skips existing files)
+exit=1
+```
+The prover patched a copy with `assert(temporary.file:write(contents))`. With that change, the limited store raises `hash-tree.lua:511: File too large` and commits nothing, the later store writes the full 35388-byte file, and the reload and query succeed.
+
+**Scenario:** A long-running PRT validator, Rollups Node or Dave component persists its commitment or output forest snapshots with `frontier_forest_store`. Fixed-point tree files hold up to 2^k hashes of about 68 bytes each, so many are larger than the stdio buffer and take this path. If the disk fills or a quota is hit during a store, the store reports success and leaves a truncated tree file. After the operator frees space, later stores succeed but keep the corrupt file and commit frontiers that point at it. `frontier_forest_load` still succeeds because trees load lazily. After a restart, or when a dispute first needs that subtree for bisection or proof siblings, `frontier_forest_get_node_hash` and the related calls raise an error, and the node cannot take part in the dispute from that snapshot until an operator finds and deletes the bad file or rebuilds the forest from the machine. If that takes longer than the tournament's time budget, an honest player can lose on timeout. The CLI's `store_frontier` and `frontier_store` payloads are small and usually fit in the stdio buffer, so for them the failure normally shows up at `fflush` and is caught. Their exposure is lower but not zero.
+
+**Possible solution:**
+- In `write_file`, use `assert(temporary.file:write(contents))`.
+- In `filesystem.lua`'s `rename`, use `assert(self.file:close())` before renaming, so a deferred write error cannot be lost either.
+- Optionally make `store_tree` stronger: check an existing file (parse it and compare its hash) before trusting it, or rewrite trees that the forest has not recorded as durable, so a corrupt file left by earlier code or by external damage is repaired instead of committed.
+
+**Severity:** Medium. Both reviewers agree, and both note it is close to high. It needs a disk-full, quota or file-size-limit event during a store. When that happens, a validator's persisted state is silently corrupted, later stores never self-repair it, and recovery is manual, so a node can fail on restart or mid-dispute. It cannot produce a wrong hash or proof: a truncated file always fails JSON parsing, and `load_tree` checks the hash. The node fails loudly rather than asserting something false on-chain, which keeps it below critical or high.
+
+**Risks:**
+- *Of the bug:* Nodes that once hit a full disk carry corrupt snapshots that look committed. They then hit query failures at the worst time: after a restart or deep in a bisection. Dispute deadlines can be missed while operators diagnose a JSON parse error in a hash-named file.
+- *Of the fix:* Checking the write and close results is low risk. Stores that used to "succeed" on a full disk will now raise, so callers must handle that error, for example by retrying after freeing space. The temporary file is still removed by its `<close>` handler. Validating or rewriting existing files in `store_tree` costs extra reads and hashing per store, and must keep the rule that the frontier file is written only after every tree it reaches is durable.
+
+**Proof of concept:** `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 with `OK:` once it is fixed. It needs `bash` and `ulimit -f` (RLIMIT_FSIZE) and uses a `mktemp -d` work directory that it removes afterwards.
+
+ID: `ht-07-hashtree-lua-write-file-ignores-write-error`
+
+Related: the same unchecked-close pattern in `cartesi.filesystem.write_file` is [`ht-08`](#ht-08-filesystem-write-file-swallows-close-errors).

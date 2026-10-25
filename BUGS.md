@@ -6,9 +6,9 @@ Review branch: `codex/emulator-0.23-bugs`, based on `feature/prt` at
 
 Scope: shipped emulator C/C++/Lua libraries and `cartesi-machine`. The experimental
 Lua validator is excluded; branch `prt.lua` and README supply PRT semantics.
-Existing defects in touched code are identified explicitly. Reportable review
-work is complete; material blocked by automated safeguards was skipped at the
-user's request and is not included as an unconfirmed finding.
+Existing defects in touched code are identified explicitly. A second review round
+is in progress. Material blocked by automated safeguards was skipped at the user's
+request and is not included as an unconfirmed finding.
 
 Workflow: separate agents inspect different areas and propose candidates; executable
 reproductions establish behavior; independent reviewers try to disprove each
@@ -27,6 +27,7 @@ dispute deadlines, as well as general API consumers.
 | 004 | CLI dump rejects valid directory names | Low | Existing |
 | 005 | Empty dynamic-element ABI arrays rejected | Medium | Existing decoder, new API exposure |
 | 006 | Exponential reconstruction of shared forest subtrees | High for tall affected trees | Introduced |
+| 007 | Nesting a lazy forest loses its source storage context | Medium; conditional dispute availability risk | Introduced |
 
 ## 001 — Forest persistence commits truncated tree files after a failed write
 
@@ -205,6 +206,43 @@ dispute deadlines, as well as general API consumers.
   fixed-point-only trees avoid the problem. The test deliberately stays at height
   10 and demonstrates exact operation/object counts, not an actual out-of-memory
   event or missed dispute. Unlike 002, all data is present and hashes remain correct.
+
+## 007 — Nesting a loaded forest loses access to saved descendants
+
+- **Problem:** Appending or padding with a completed loaded forest retains its
+  root tree but discards the source forest's directory. Any descendants still
+  represented by raw hashes are subsequently looked up in the destination's
+  directory, or nowhere when it has none. A successful destination store also
+  omits those descendants because it visits only already loaded tree objects.
+- **Area/category:** Shipped Lua hash-tree composition and persistence; loss of
+  access to proof data. **Introduced** in this branch.
+- **Location:** `src/cartesi/hash-tree.lua:698–700` drops the storage context;
+  `descend_tree` at lines 645–647 uses the destination context; `store_children`
+  at lines 565–569 cannot discover the unloaded source trees.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/007-lazy-forest-composition.lua`.
+  A completed source forest contains two retained bundles and is stored and
+  reloaded without warming its descendants. Nesting it in a larger forest loses
+  leaf queries before storage and after a successful store/reload in a fresh
+  directory. An independently loaded source and an eager-source destination answer
+  those queries, and all roots agree. The independent reviewer also reproduced
+  the defect with two `push_back` calls rather than padding: 0/8 leaves available
+  for a cold nested source versus 8/8 for eager or warmed controls.
+- **Scenario:** A consumer reopens a saved computation subtree and combines it
+  into a larger commitment in another storage directory. The resulting commitment
+  cannot supply descendants that remain available in the source checkpoint.
+  Completed-forest nesting is expressly supported by the public API.
+- **Possible solution:** Preserve the storage context of lazy references, or load
+  and copy all required descendants before transferring a tree between contexts.
+  If storage contexts cannot be combined, reject the operation before mutation
+  rather than accepting an incomplete destination.
+- **Severity:** **Medium (P2)** for supported composition and checkpointing;
+  potentially high if rebuilding the missing proof access costs a validator its
+  dispute deadline.
+- **Risks/limits:** Requires unloaded descendants under a nested source root.
+  Source files remain intact and roots remain correct. Warming the required
+  descendants or sharing their storage directory avoids the failure. Unlike 002,
+  this occurs in a fresh destination without competing same-root representations.
 
 ## Coverage and validation
 

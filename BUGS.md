@@ -28,6 +28,7 @@ dispute deadlines, as well as general API consumers.
 | 005 | Empty dynamic-element ABI arrays rejected | Medium | Existing decoder, new API exposure |
 | 006 | Exponential reconstruction of shared forest subtrees | High for tall affected trees | Introduced |
 | 007 | Nesting a lazy forest loses its source storage context | Medium; conditional dispute availability risk | Introduced |
+| 008 | Failed persisted expansion is omitted by later successful stores | Medium, conditional on persistence error | Introduced |
 
 ## 001 — Forest persistence commits truncated tree files after a failed write
 
@@ -243,6 +244,41 @@ dispute deadlines, as well as general API consumers.
   Source files remain intact and roots remain correct. Warming the required
   descendants or sharing their storage directory avoids the failure. Unlike 002,
   this occurs in a fresh destination without competing same-root representations.
+
+## 008 — Failed persisted expansion remains unsaved through successful retries
+
+- **Problem:** `expand_leaf` installs a replacement tree in memory before saving
+  it. If persistence fails, the replacement stays installed while the ancestor
+  remains marked durable. Retrying the same expansion fails because the leaf is
+  already expanded. Later successful stores skip that durable ancestor and never
+  save the new descendant, so reopening loses the available expansion.
+- **Area/category:** Shipped Lua forest persistence; incorrect recovery after a
+  reported I/O error. **Introduced** in this branch.
+- **Location:** `src/cartesi/hash-tree.lua:894–895` mutates before persisting;
+  `store_tree` at line 578 skips the ancestor and its new children. The expansion
+  retry reaches the height check at line 892.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/008-failed-expansion-retry.lua`.
+  The test temporarily moves a checkpoint directory aside and restores it after
+  `expand_leaf` correctly reports its sync error. The expanded leaf is now visible
+  in memory, but the identical expansion retry fails. Two subsequent stores return
+  successfully; reloading still cannot retrieve the leaf, and the expansion's
+  tree file is absent. This holds for both an originally stored forest and a
+  freshly loaded one. Discarding the mutated object, reloading the prior checkpoint,
+  and expanding again succeeds and persists the leaf. Independently confirmed.
+- **Scenario:** A validator handles a transient storage failure while saving newly
+  computed proof descendants and retries its checkpoint after storage recovers.
+  Successful checkpoint calls fail to preserve the new proof material.
+- **Possible solution:** Persist the replacement before installing it, roll back
+  installation on failure, or track unsaved expansions and traverse them on the
+  next store. Retrying an identical expansion can also be made idempotent.
+- **Severity:** **Medium (P2)**, conditional on a persistence error; a deadline can
+  increase the impact on proof availability.
+- **Risks/limits:** Mutation after a failed call alone would not establish a bug
+  because strong exception atomicity is not promised. The demonstrated failure is
+  that later successful stores still omit available data. Recovery by discarding
+  the object and reloading works. Unlike 001, the initial I/O error is reported;
+  unlike 002, no existing expansion file prevents the missing write.
 
 ## Coverage and validation
 

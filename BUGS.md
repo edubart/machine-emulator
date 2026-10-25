@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-8 confirmed issues: 2 high, 4 medium, 2 low.
+9 confirmed issues: 2 high, 5 medium, 2 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -31,6 +31,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B06](#b06-frontier_forest_store-commits-truncated-tree-files-on-write-errors) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | frontier_forest_store commits truncated tree files on write errors | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
+| [B09](#b09-json-rpc-server-exits-when-an-error-message-contains-invalid-utf-8) | medium | pre-existing | JSON-RPC remote machine server | JSON-RPC server exits when an error message contains invalid UTF-8 | `bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 
@@ -474,3 +475,67 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 `eval $(make -s env); lua5.4 bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`
 
 **ID**: `ht-10-clone-stored-emlink-no-fallback`
+
+### B09. JSON-RPC server exits when an error message contains invalid UTF-8
+
+**Title**: JSON-RPC server process exits when a response error message contains invalid UTF-8 (2-byte POST body, or `load()` of a non-UTF-8 `config.json`)
+
+**Problem:** `jsonrpc_http_reply` serializes every response with `j.dump()`. That uses nlohmann's default `strict` error handler, which throws `type_error.316` when any string in the response holds a byte that is not valid UTF-8. Error messages are copied into responses verbatim, so they can carry such bytes:
+- (a) For a malformed request body, `handle_request` passes the nlohmann `parse_error.101` text to `jsonrpc_response_parse_error`. That text echoes the raw bytes it last read ("last read: '...<0xFF>'").
+- (b) For an exception raised by machine code, `jsonrpc_response_from_exception` copies the exception message, which can embed file contents. One example is the parse error `machine::load` raises for a `config.json` that contains non-UTF-8 bytes.
+
+Nothing catches the `type_error` thrown by `dump()`. Neither `handle_request` nor `http_session::on_read_request` has a try/catch, and the Asio handler does not either. The exception leaves `ioc.run()`, `main()` logs `fatal ... caught exception` and returns 1, and the whole server process exits along with the machine it holds. Forked snapshot/backup children run the same code and die the same way. A local (in-process) machine given the same input just returns a normal error.
+
+**Origin:** Pre-existing. `j.dump()` in `jsonrpc_http_reply` and `jsonrpc_response_parse_error(x.what())` are unchanged on `main`. This branch did not introduce them, but they sit in the remote-machine server that PRT validator nodes use.
+
+**Area:** JSON-RPC remote machine server (`cartesi-jsonrpc-machine`, `src/jsonrpc-remote-machine.cpp`) and its Lua/C clients (`cartesi.jsonrpc`, `cm_jsonrpc_*`).
+
+**Category:** Crash (an untrapped exception kills the server process).
+
+**Location:**
+- `src/jsonrpc-remote-machine.cpp:1791`: `std::string body = j.dump();` in `jsonrpc_http_reply`, which uses the strict UTF-8 handler.
+- `src/jsonrpc-remote-machine.cpp:1946-1950`: the parse-error path, `jsonrpc_response_parse_error(x.what())`.
+- `src/jsonrpc-remote-machine.cpp:499-505` and `1896-1897`: `jsonrpc_response_from_exception` copies machine exception text into the response.
+- `src/jsonrpc-remote-machine.cpp:217-246`: `http_session::on_read_request` calls `handle_request` and `send_response` with no try/catch.
+- `src/jsonrpc-remote-machine.cpp:2188` and `2192-2194`: the exception escapes `ioc.run()` into `main`'s catch, which returns 1.
+
+**Evidence:** The test spawns servers with `jsonrpc.spawn_server()`.
+- Scenario 1 sends a raw HTTP POST whose body is the 2 bytes `\xff\xfe`.
+- Scenario 2 calls `m:load(dir)`, where `dir/config.json` is `{"a":\xff}`. For comparison, it first loads the same directory into a local machine.
+
+After each scenario the test checks whether the server is still alive. Both scenarios kill the server; the local load just raises a Lua error:
+```
+scenario 1 response: "" err=closed
+... fatal cartesi-jsonrpc-machine pid:3893 ... caught exception: [json.exception.type_error.316] invalid UTF-8 byte at index 130: 0xFF
+BUG: scenario 1: server at 127.0.0.1:36537 died after POST body \xff\xfe: jsonrpc error: post error contacting 127.0.0.1:36537 (Connection refused ...)
+local load: ok=false err="...[json.exception.parse_error.101] parse error at line 1, column 6: syntax error while parsing value - invalid literal; last read: '\"a\":<0xFF>'"
+... fatal cartesi-jsonrpc-machine pid:3897 ... caught exception: [json.exception.type_error.316] invalid UTF-8 byte at index 134: 0xFF
+remote load: ok=false err="...jsonrpc error: post error contacting 127.0.0.1:37023 (end of stream ...)"
+BUG: scenario 2: server at 127.0.0.1:37023 died after load() of corrupted config.json: ... (Connection refused ...)
+exit=1
+```
+Run command: `eval $(make -s env); timeout 60 lua5.4 bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/test_jsonrpc_invalid_utf8_crash.lua`
+
+**Scenario:**
+- A validator (Rollups Node, Dave, or the PRT Lua node) runs its working or backup machine in a remote `cartesi-jsonrpc-machine` and calls `load()` on a stored snapshot whose `config.json` was corrupted on disk (bit flip, partial write) into non-UTF-8 bytes. The same can happen with any error message that embeds non-UTF-8 bytes, such as a file path.
+  - Locally this is a recoverable error. Remotely the server process dies: the client sees "end of stream", then "Connection refused".
+  - The load fails either way, and `load` only runs on an empty machine, so no machine state is lost. But any retry or fallback over the same connection (for example, loading an older snapshot) now fails. That defeats the node's error handling and can stall it until a supervisor respawns the server.
+- Anything that can reach the port can kill the server with `curl -X POST --data-binary $'\xff\xfe' http://HOST:PORT/`. The server is unauthenticated and binds to 127.0.0.1 by default, and such a party can already call `shutdown`. This trigger therefore adds no new attack capability; it only shows that malformed input becomes a crash instead of an error.
+- Hashes, proofs and step logs are not affected.
+
+**Possible solution:**
+- In `jsonrpc_http_reply`, serialize with `j.dump(-1, ' ', false, json::error_handler_t::replace)`. Alternatively, sanitize error messages to valid UTF-8 (or escape non-ASCII bytes) when building error responses in `jsonrpc_response_parse_error` and `jsonrpc_response_machine_error`.
+- As defense in depth, wrap `handle_request` and `send_response` in `on_read_request` in a try/catch that returns a 500 or JSON-RPC internal error and keeps the server running.
+
+**Severity:** Medium. The server crashes and exits, where it should return a recoverable error. Both reviewers rated it medium rather than the suspected high, for three reasons:
+- The legitimate trigger, a corrupted snapshot `config.json` or a non-UTF-8 string in an error message, is uncommon.
+- The network trigger gives no capability beyond the existing unauthenticated `shutdown` method.
+- Hashes, proofs and dispute outcomes are not affected directly.
+
+**Risks:**
+- Of the bug: a remote working or backup machine disappears on a recoverable error, which breaks retry or fallback logic in validator nodes. A malformed request from a buggy client or a stray local process takes down the server and the machine it holds.
+- Of the fix: with `replace`, error messages a client receives will contain U+FFFD in place of the raw bytes, so clients matching on exact error text may see different strings. A catch-all in `on_read_request` must not hide failures that leave the server in an inconsistent state, such as exceptions thrown around `fork` or snapshot handling; it should log them and reply with an error, not swallow them silently.
+
+**Proof of concept:** `bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/test_jsonrpc_invalid_utf8_crash.lua`. It needs LuaSocket (`socket`) for the raw POST, and creates its temporary directory with `os.tmpname()`. Run it from the repo root with `eval $(make -s env); timeout 60 lua5.4 bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/test_jsonrpc_invalid_utf8_crash.lua`. While the bug is present it prints `BUG:` lines and exits 1. Once fixed it prints `OK: server survived both scenarios` and exits 0.
+
+**ID**: `rpc-01-jsonrpc-server-crash-invalid-utf8-error-message`

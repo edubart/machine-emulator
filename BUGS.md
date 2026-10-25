@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-69 confirmed issues: 4 high, 16 medium, 49 low.
+70 confirmed issues: 4 high, 16 medium, 50 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -94,6 +94,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B65](#b65-frontier-stores-fail-for-native-windows-paths-because-hash-treelua-splits-paths-only-on-slashes) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for native Windows paths because hash-tree.lua splits paths only on slashes | `bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/` |
 | [B68](#b68-first-frontier_forest_store-of-an-in-memory-expansion-skips-the-per-level-directory-sync) | low | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | First frontier_forest_store of an in-memory expansion skips the per-level directory sync | `bugs/p2-06-forest-store-batch-expansion-unordered-dir-sync/` |
 | [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
+| [B70](#b70-json-rpc-client-cmio-response-functions-read-from-a-null-data-pointer) | low | pre-existing | JSON-RPC client (cmio), C API | JSON-RPC client cmio response functions read from a NULL data pointer | `bugs/p2-05-jsonrpc-cmio-null-data-segfault/` |
 
 ## Issues
 
@@ -4031,6 +4032,48 @@ The result is a stuck query or expansion at one position, never a wrong hash or 
 **ID**: `p2-07-clua-arrayindex-signed-overflow`
 
 **Related**: [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays).
+
+### B70. JSON-RPC client cmio response functions read from a NULL data pointer
+
+**Title**: JSON-RPC client send/log/verify_send_cmio_response read `length` bytes from a NULL data pointer (SIGSEGV), while the local machine returns an error or a no-op
+
+- **Problem**: The local machine handles `data == NULL` in `send_cmio_response` and `log_send_cmio_response` on purpose:
+  - NULL with `0 < length <= rx buffer` throws `invalid_argument("invalid data buffer")`.
+  - NULL with an oversized `length` is accepted as a no-op ("Oversized responses do not consume the data buffer").
+  - The static `verify_send_cmio_response` throws `"data is null"` for a small length.
+
+  The JSON-RPC client (`jsonrpc_machine`) never checks for NULL. `do_send_cmio_response`, `do_log_send_cmio_response` and `do_verify_send_cmio_response` all call `encode_base64(std::span<const unsigned char>{data, length})` on the client side, so they read `length` bytes starting at address 0. The calling process gets SIGSEGV before any request reaches the server, where the local machine would have returned `cm_error` or succeeded. The spawned server process is left orphaned.
+- **Origin**: pre-existing. The same NULL handling is already in `machine.cpp` on `origin/main`, and the branch does not touch the client code.
+- **Area**: cmio / JSON-RPC client (`libcartesi_jsonrpc`).
+- **Category**: crash (NULL dereference). Local and remote behave differently.
+- **Location**:
+  - `src/jsonrpc-machine.cpp:977-987`: `do_send_cmio_response`, `encode_base64(std::span{data, length})` at line 980.
+  - `src/jsonrpc-machine.cpp:989-999`: `do_log_send_cmio_response` (line 993).
+  - `src/jsonrpc-machine.cpp:1049-1058`: `do_verify_send_cmio_response` (line 1052).
+  - For comparison: `src/machine.cpp:2004-2010` and `2016-2021` (the local NULL checks), and `src/replay-send-cmio-state-access.hpp:280` (`"data is null"`).
+  - Reached via `src/cm.cpp:1349-1400` and `src/i-machine.hpp:333-385`, which forward `data` unchecked.
+- **Evidence**: The C++ test uses the public C API to build a machine with 1 MiB of RAM. It sets `htif.tohost` to a manual rx-accepted yield and sets `iflags.Y=1`. Then it calls each of the three APIs with `data=NULL`, once with `length=3 MiB` (oversized) and once with `length=5`, using the current root hash as the revert hash. It runs each call on a local machine (`cm_new`) and on a spawned remote machine (`cm_jsonrpc_spawn_server`). Each case runs in a forked child, so a crash shows up as a signal. The local machine always returns cleanly; the remote one segfaults in all 6 cases:
+  ```
+  $ eval $(make -s env); sh bugs/p2-05-jsonrpc-cmio-null-data-segfault/run.sh
+  cm_send_cmio_response          data=NULL len=3145728  local: returned success             [ok] | remote: CRASH signal 11 (Segmentation fault) []
+  cm_send_cmio_response          data=NULL len=5        local: returned error (exit 1)      [invalid data buffer] | remote: CRASH signal 11 (Segmentation fault) []
+  cm_log_send_cmio_response      data=NULL len=3145728  local: returned success             [ok] | remote: CRASH signal 11 (Segmentation fault) []
+  cm_log_send_cmio_response      data=NULL len=5        local: returned error (exit 1)      [invalid data buffer] | remote: CRASH signal 11 (Segmentation fault) []
+  cm_verify_send_cmio_response   data=NULL len=3145728  local: returned success             [ok] | remote: CRASH signal 11 (Segmentation fault) []
+  cm_verify_send_cmio_response   data=NULL len=5        local: returned error (exit 1)      [data is null] | remote: CRASH signal 11 (Segmentation fault) []
+  BUG: 6 remote NULL-data cases crashed the client
+  ```
+  The script exits 1 and runs in about 3 s.
+- **Scenario**: A validator written against the C API through FFI (C/C++, or Go/Rust with raw pointers) uses spawned JSON-RPC machines, as the PRT node and the Rollups Node do. Suppose it rejects an oversized advance-state input without materializing it, passing NULL with the declared length, which the local implementation treats as valid. Or suppose an error path leaves `data` NULL with `length > 0`. The whole validator process then crashes with SIGSEGV instead of getting an error. It also orphans its server, and the same code passes in tests against a local machine. The Lua bindings always pass a Lua string, so the Lua PRT node and the CLI cannot reach this. Well-formed Rust slices are never NULL. The emulated application is not affected.
+- **Possible solution**: Do the NULL check once in the `i_machine` wrappers (`src/i-machine.hpp`) or in `cm.cpp`, so every backend behaves the same. At minimum, check in the three `jsonrpc_machine::do_*` methods the way `machine.cpp` does: throw `invalid_argument` for NULL with `0 < length <= AR_CMIO_RX_BUFFER_LENGTH`. For NULL with an oversized length, the server still needs `length` to apply the oversized-response path. The client therefore cannot just send an empty buffer. It should either send a buffer of the right size (for example, encode `length` zero bytes, which costs bandwidth) or carry the length separately, which is a protocol change. A simpler alternative is to reject NULL with any `length > 0` across all backends and document that in `cm.h`.
+- **Severity**: low. Both reviewers rated it low; the prover said low to medium. It only happens when a caller passes `data=NULL` with `length>0`, which `cm.h` does not document as valid ("Response data to send"), and normal callers (Lua, Rust slices) do not produce that. It does not affect hashes, proofs or dispute outcomes. Still, the result is a whole-process crash plus a local/remote divergence on an input that the local backend deliberately validates.
+- **Risks**: Bug: an FFI validator process crashes and leaks a spawned server, and code tested against local machines behaves differently in production with remote machines. Fix: rejecting NULL plus oversized length everywhere would change the documented local no-op behavior. Encoding zero bytes on the client for oversized NULL inputs sends up to `length` bytes over the wire. Changing the RPC to carry an explicit length needs a protocol version bump.
+- **Proof of concept**: `bugs/p2-05-jsonrpc-cmio-null-data-segfault/test_cmio_null_data.cpp` is a C++ program using the C API (`cm.h`, `cm-jsonrpc.h`). `bugs/p2-05-jsonrpc-cmio-null-data-segfault/run.sh` builds it against `src/libcartesi` and `src/libcartesi_jsonrpc` in a temp dir and runs it. It needs `cartesi-jsonrpc-machine` on `PATH`, which the env provides. It exits 1 while the bug is present. Run from the repo root:
+  `eval $(make -s env); sh bugs/p2-05-jsonrpc-cmio-null-data-segfault/run.sh`
+
+**ID**: `p2-05-jsonrpc-cmio-null-data-segfault`
+
+**Related**: [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer).
 
 ## Candidates that were not confirmed
 

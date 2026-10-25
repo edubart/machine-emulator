@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-62 confirmed issues: 4 high, 14 medium, 44 low.
+64 confirmed issues: 4 high, 14 medium, 46 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -87,6 +87,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
 | [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays) | low | pre-existing | Lua bindings (JSON conversion) | Lua-to-JSON conversion fails on numeric keys and expands sparse integer keys into huge arrays | `bugs/w2b-13-clua-json-numeric-keys-lua-next/` |
+| [B63](#b63-cartesifilesystemlua-collides-with-the-v022-tests-package-breaking-upgrades) | low | introduced by branch | Packaging (Lua modules) | cartesi/filesystem.lua collides with the v0.22 tests package, breaking upgrades | `bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/` |
+| [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 
 ## Issues
 
@@ -3060,6 +3062,8 @@ Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not r
 
 **ID**: `w2b-04-sharing-all-enospc-sigbus`
 
+**Related**: [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus).
+
 ### B53. run aborts when a non-blocking console output descriptor is briefly full
 
 **Title**: `machine:run` aborts with "console output flush failed: Resource temporarily unavailable" when the console output fd is non-blocking and briefly full (EAGAIN is not retried)
@@ -3611,3 +3615,122 @@ eval $(make -s env); lua5.4 bugs/w2b-13-clua-json-numeric-keys-lua-next/test.lua
 It needs the built `cartesi.so` and `lua5.4` on `PATH`, because the sparse cases run in `lua5.4` child processes. Expect about 30 s, mostly the 20 s timeout on the `1<<40` case. It prints `BUG:` lines and exits 1 while the bug is present, and prints `OK` and exits 0 once fixed.
 
 **ID**: `w2b-13-clua-json-numeric-keys-lua-next`
+
+### B63. cartesi/filesystem.lua collides with the v0.22 tests package, breaking upgrades
+
+**Title**: Emulator 0.23 ships `cartesi/filesystem.lua` at the path the v0.22 tests package already owns: dpkg upgrade aborts, and a mixed install crashes `cartesi-machine` and `cartesi.hash-tree` at load time
+
+**Problem**: This branch moves the `cartesi.filesystem` module out of the tests tree (`tests/lua/cartesi/filesystem.lua`) and into the emulator package (`src/cartesi/filesystem.lua`). Both versions install to `$(LUA_INSTALL_PATH)/cartesi/filesystem.lua`. The two modules have incompatible APIs. The v0.22 helper has `write_file(filename, data)` and does `require("cartesi.tests.util")`. The new module has `write_file(data, filename)` and adds `new_temporary_file`, `sync_file`, `sync_directory` and others. Neither Debian control template handles the move. `control.template` declares no `Breaks`/`Replaces`, and `tests-control.template` keeps `Depends: cartesi-machine-emulator (>= ARG_VERSION)`. That dependency means the published 0.22 tests deb still accepts emulator 0.23, so both packages claim the same file.
+- With dpkg, upgrading the emulator to 0.23 is refused because of the file conflict.
+- With a source or overlay install where the old helper is installed last, the old `filesystem.lua` requires `cartesi.tests.util`, which requires `cartesi.hash-tree`, which requires `cartesi.filesystem` again. This circular require overflows the C stack ("C stack overflow") while modules are loading. Every `cartesi-machine` invocation then dies at startup, even `--help`, and so does any program that loads `cartesi.hash-tree`.
+- The candidate expected a garbage-named file from the swapped `write_file` arguments and nil `new_temporary_file`/`sync_directory` calls. Neither happens, because the crash comes before that code runs.
+
+**Origin**: Introduced by this branch (commit 956a179). On v0.22.0 (f9e4f82) and origin/main, the file belongs only to the tests package.
+
+**Area**: Lua libraries / packaging (`src/cartesi/filesystem.lua`, Makefile `install-lua-libs`/`install-tests`, Debian control templates).
+
+**Category**: api-contract (packaging / install-path ownership).
+
+**Location**:
+- `Makefile:80`: `EMU_TO_LUA_PATH` now includes `src/cartesi/filesystem.lua`.
+- v0.22 `Makefile:88` and `Makefile:435`: `TESTS_LUA_TO_LUA_PATH=tests/lua/cartesi` is copied into `$(LUA_INSTALL_PATH)`. That tree contains `cartesi/filesystem.lua`.
+- `tools/template/control.template`: no `Breaks`/`Replaces: cartesi-machine-tests`.
+- `tools/template/tests-control.template:8`: `Depends: cartesi-machine-emulator (>= ARG_VERSION)`.
+- `src/cartesi/filesystem.lua:91`: `write_file(data, filename)`. The v0.22 helper's `tests/lua/cartesi/filesystem.lua:41` has `write_file(filename, data)`, and its line 17 has `require("cartesi.tests.util")`.
+- `src/cartesi/hash-tree.lua:2` and `src/cartesi-machine.lua:2677`: `require("cartesi.filesystem")`.
+- `.github/workflows/build.yml:933-935`: the tests debs are published as release assets.
+
+**Evidence**: The test has two parts.
+- Part A builds real debs from the real control templates and file lists: emulator 0.22, tests 0.22, and emulator 0.23 from this branch. It installs them with dpkg into a private root.
+- Part B simulates a source install: this branch's `install-lua-libs`, then a v0.22 `install-tests` (`cp -RP`) over it. It then runs the shipped CLI and `hash-tree`.
+
+Run from the repo root: `eval $(make -s env); lua5.4 bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/test.lua`
+```
+[A] dpkg -i emulator 0.23 over emulator 0.22 + tests 0.22: rc=1
+    dpkg: error processing archive /tmp/w2a-05-fs-collision.XXXX/emu-0.23.0.deb (--install):
+     trying to overwrite '/usr/share/lua/5.4/cartesi/filesystem.lua', which is also in package cartesi-machine-tests 0.22.0
+BUG: dpkg upgrade of cartesi-machine-emulator to 0.23 aborts: file conflict with installed cartesi-machine-tests 0.22 (no Replaces/Breaks declared)
+[B1] cartesi-machine --final-hash rc=1 hash file exists=false size=nil
+    lua5.4: error loading module 'cartesi.hash-tree' from file '.../cartesi/hash-tree.lua':
+[B2] hash-tree frontier_store rc=1
+3 defect(s) found
+(cartesi-machine.lua --help: "C stack overflow ... cartesi/tests/util.lua:18 ... cartesi/filesystem.lua:17 ...")
+```
+
+**Scenario**: A host (CI runner, developer box, or validator/node image) has the published 0.22 `cartesi-machine-emulator` and `cartesi-machine-tests` debs installed and upgrades only the emulator to 0.23. `dpkg -i` aborts on the file conflict, and `apt` may fail too, depending on the order it unpacks the two packages. On a source-built host, an `install-tests` from an older checkout that runs after `make install` of 0.23 overwrites the new module. After that, `cartesi-machine` (used by PRT/Dave tooling and app developers' CLI workflows) and any Lua program that loads `cartesi.hash-tree` crash at load time.
+
+**Possible solution**: Pick one or more of these:
+- Add `Breaks: cartesi-machine-tests (<< 0.23.0)` and `Replaces: cartesi-machine-tests (<< 0.23.0)` to `tools/template/control.template`.
+- Make the tests package depend on the exact emulator version (`Depends: cartesi-machine-emulator (= ARG_VERSION)`).
+- Rename the new shipped module (for example `cartesi.fs`) so it does not share a path with the old helper.
+
+**Severity**: low. Both reviewers rated it low, and the prover rated it low to medium. It is packaging and upgrade breakage only. dpkg refuses the upgrade loudly instead of leaving a corrupted install. Only hosts that have the 0.22 tests deb installed are affected, which production validators rarely have. No hash, proof or stored state is affected. The load-time crash needs a hand-mixed install.
+
+**Risks**:
+- Of the bug: upgrades are blocked, and CI or provisioning scripts fail. In a mixed source install, the CLI and `cartesi.hash-tree` are completely unusable until the stale file is removed.
+- Of the fix: `Breaks`/`Replaces` are low risk. They make apt remove or upgrade the old tests package, and the version bounds must match the release that moves the file. An exact `=` dependency forces the two packages to upgrade in lockstep. Renaming the module changes the public Lua module name that new callers (`hash-tree.lua`, `cartesi-machine.lua`, tests) use, so all of them must be updated together.
+
+**Proof of concept**: `bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/test.lua`. It needs `git` with tag commit f9e4f82 (v0.22.0) reachable, plus `dpkg-deb`/`dpkg` and built `src/cartesi.so`. Run it from the repo root:
+`eval $(make -s env); lua5.4 bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/test.lua`
+It exits 1 with `BUG:` lines while the defect is present and 0 once it is fixed. `REPO` and `WORK` environment variables can override the repo root and the scratch dir (a fresh `mktemp -d` by default).
+
+**ID**: `w2a-05-filesystem-module-collides-with-v022-tests-package`
+
+### B64. clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS
+
+**Title**: mapped_memory::clear punches holes in shared .dht backing files, so after cm_clear_hash_tree on a full filesystem the next get_root_hash dies with SIGBUS instead of returning an error
+
+**Problem**: `mapped_memory::clear()` handles a shared writable mapping (`m_backing_sync_length > 0`) by calling `fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)` (`F_PUNCHHOLE` on macOS) over the whole backing file. Every allocated block of the file is freed. `dense_hash_tree::do_clear()` reaches this code, and `hash_tree::clear()` calls that and then marks every page dirty. The next `get_root_hash`, `get_proof` or `collect_*` call therefore rewrites every dense node through the `MAP_SHARED` mapping. Pristine-page hashes are nonzero, so every node really is written. Each first touch of a punched page has to allocate a block from inside a page fault. If the filesystem is full or the quota is used up, the fault cannot be served and the kernel sends SIGBUS. The process is killed and the C API returns no error. A plain zero-fill (`std::ranges::fill`) would write over blocks that are already allocated and would need no new space. The punch saves almost nothing, because the blocks are filled again right away. `clear_hash_tree` is a recovery path, so it is likely to run on a node that is already short on disk.
+
+**Origin**: introduced by this branch. `mapped_memory::clear()`, `i_dense_hash_tree::clear` / `dense_hash_tree::do_clear` and the dense-tree part of `hash_tree::clear` are all new (`git diff origin/main...HEAD -- src/os-mapped-memory.cpp src/dense-hash-tree.hpp src/hash-tree.cpp`). On `origin/main`, `clear_hash_tree` never touched the dense trees. There is a related limitation that existed before the branch: stored RAM, flash and `.dht` files are sparse, so a `SHARING_ALL` machine loaded on a disk that is already full can SIGBUS on its first write to a hole. The branch makes this worse: a machine that was running fine on a full disk is turned into one that crashes as soon as someone else takes the freed space.
+
+**Area**: OS memory mapping / hash tree (`src/os-mapped-memory.cpp` `clear()`, `hash_tree::clear`, `cm_clear_hash_tree`, runtime option `clear_hash_tree`).
+
+**Category**: crash (SIGBUS, process kill with no error reported).
+
+**Location**:
+- `src/os-mapped-memory.cpp:536-566`: `mapped_memory::clear()`, the `fallocate(PUNCH_HOLE|KEEP_SIZE)` / `F_PUNCHHOLE` branch
+- `src/dense-hash-tree.hpp:80-82`: `dense_hash_tree::do_clear()` calls `m_mapped_memory.clear()`
+- `src/hash-tree.cpp:717-728`: `hash_tree::clear()` clears every dense tree and marks every page dirty
+- `src/hash-tree.cpp:310-320`: `hash_tree::return_updated_dirty_pages`, where the fault fires (the `std::ranges::equal` / `copy` on the dense node in the punched `.dht` mapping)
+
+**Evidence**: The test mounts a 96 MiB tmpfs. It stores a machine with 16 MiB of RAM there using `SHARING_ALL`, then runs a child process that does the following:
+1. Loads the machine with `SHARING_ALL` and calls `get_root_hash`, which allocates every `.dht` block.
+2. Fills the filesystem to ENOSPC.
+3. Calls `get_root_hash` again. This still works.
+4. Calls `clear_hash_tree()`. Free space goes from 0 to 376832 bytes, about the total size of the `.dht` files, which shows the punch really freed the blocks.
+5. Fills the filesystem again, the way another process would.
+6. Calls `get_root_hash`.
+
+The child dies with SIGBUS. In the control run, which skips step 5, the child succeeds with the same root hash. A gdb backtrace places the fault in `std::__memcmp` under `cartesi::hash_tree::return_updated_dirty_pages(...)._omp_fn.0` at `hash-tree.cpp:317`.
+```
+$ eval $(make -s env); lua5.4 bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/test_clear_punch_sigbus.lua
+child: avail after clear:  376832 (blocks freed by PUNCH_HOLE)
+child: get_root_hash after clear ok
+control (no refill): true exit 0
+...
+child: avail after clear:  376832 (blocks freed by PUNCH_HOLE)
+child: avail after refill: 0
+Bus error
+refill case: nil exit 135
+BUG: get_root_hash after clear_hash_tree on a full filesystem killed the process with SIGBUS (...)
+```
+On tmpfs, a read fault on a hole also needs a page, so the fault comes at the `memcmp` read. On ext4 or xfs, a read of a hole maps the zero page and the SIGBUS comes at the first write, when `page_mkwrite` fails. The result is the same crash.
+
+**Scenario**: A PRT/Dave validator or a Rollups Node keeps its machine stored with `SHARING_ALL` on a volume that is nearly full. It suspects a damaged hash tree and calls `cm_clear_hash_tree`, or reloads with runtime `clear_hash_tree=true`. While that runs, logs, snapshots or another machine use up the blocks the punch just freed. On the next `cm_get_root_hash` or `cm_get_proof`, the node is killed by SIGBUS in the middle of a dispute or epoch, and it gets no error it could handle. A CLI user running `cartesi-machine` on a shared stored machine on a full disk sees "Bus error" with no explanation.
+
+**Possible solution**: Drop the punch for dense hash trees and zero the shared mapping in place (`std::ranges::fill(data, 0)`), so blocks that are already allocated are reused. If space reclamation is wanted, make the punch opt-in and call `fallocate(0, ...)` (plain allocate, without `PUNCH_HOLE`) right after it to reserve the blocks again. That turns ENOSPC into an `errno` that can be reported as an error from `clear()`. The function is currently `noexcept`/`void`, so it would need to be made able to fail. This touches the same code as B04/`api-07` (the dense tree is cleared before its pages are marked dirty). A fill through the shared mapping has the same ordering problem as the punch, so this change should go together with the mark-dirty-first fix described there. In general, a shared mapping on a full disk can SIGBUS on any hole. A broader fix would preallocate (`posix_fallocate`) shared backing files at load time, or handle SIGBUS, but that is outside the scope of this branch's regression.
+
+**Severity**: low. Triggering it needs four things at once: `SHARING_ALL` storage, a full disk or used-up quota, a call to the rare `clear_hash_tree` recovery path, and another consumer taking the freed blocks before the next hash update. The result is a hard process kill with no wrong hash, wrong proof or corruption, and a restart after space is freed recovers. Both reviewers rated it low. The prover said low/medium, because it is a silent kill on a recovery path. The final rating is low: shared-mmap SIGBUS on a full disk already exists before the branch, and the branch only widens it slightly.
+
+**Risks**: Bug: a validator or node can be killed without warning while computing a root hash or proof after a hash-tree reset, which can cost it time in a dispute. Disk pressure is common exactly when operators reach for recovery tools. Fix: replacing the punch with a fill means the cleared `.dht` files keep their full allocation. They are rewritten right away anyway, so space use does not change. A zero-fill of a large dense tree costs more CPU and dirty page writeback than a punch, but the next update rewrites all of it regardless. Adding `fallocate` preallocation changes the API contract of `clear()` (it can now fail), and that error has to be passed through `hash_tree::clear` and `cm_clear_hash_tree`.
+
+**Proof of concept**: `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/test_clear_punch_sigbus.lua`. It needs root, because it mounts a 96 MiB tmpfs at `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/mnt` and unmounts it afterwards. Run it from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/test_clear_punch_sigbus.lua
+```
+Exit 1 with `BUG: ... SIGBUS` means the bug reproduced. Exit 0 means fixed (no crash, or an error reported instead). Exit 77 means skipped (not root), and exit 2 means an unexpected result.
+
+**ID**: `w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc`
+
+**Related**: [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).

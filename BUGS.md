@@ -239,6 +239,7 @@ Earlier timed kills (no gdb) of a 64 MiB loop made the later load fail in 5 of 6
 
 - `rpc-13-phtc-borrowed-unloadable`: run with `eval $(make -s env); lua5.4 bugs/rpc-13-phtc-borrowed-unloadable/test.lua; lua5.4 bugs/rpc-13-phtc-borrowed-unloadable/kill_test.lua 512`. Unloadable-directory mode.
 - `rpc-12-crash-during-update-stale-dense`: run with `eval $(make -s env); lua5.4 bugs/rpc-12-crash-during-update-stale-dense/test_stale_dense.lua; bugs/rpc-12-crash-during-update-stale-dense/test_sigkill_gdb.sh`. Silent wrong-root mode (stale dense inner nodes).
+- `api-02-phtc-borrowed-unrecoverable-even-with-clear`: run with `eval $(make -s env); lua5.4 bugs/api-02-phtc-borrowed-unrecoverable-even-with-clear/test.lua`. Unloadable-directory mode.
 
 **Related**: [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).
 

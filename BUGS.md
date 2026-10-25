@@ -25,7 +25,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
-| [B01](#b01-stale-page-hash-tree-cache-after-a-mixed-sharing-session-yields-wrong-proofs) | high | pre-existing | Hash tree (page cache, store/load) | Stale page hash-tree cache after a mixed-sharing session yields wrong proofs | `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/` |
+| [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs) | high | pre-existing | Hash tree (page cache, store/load) | Persisted page cache is not checked against memory, so a reload yields wrong proofs | `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/` |
 | [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
 | [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files) | high | introduced by branch | Lua cartesi.hash-tree and cartesi.filesystem (durable writes) | frontier_forest_store and fs.sync_file ignore write errors and commit truncated files | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
 | [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
@@ -62,7 +62,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Issues
 
-### B01. Stale page hash-tree cache after a mixed-sharing session yields wrong proofs
+### B01. Persisted page cache is not checked against memory, so a reload yields wrong proofs
 
 **Title**: Persisted page hash-tree cache keeps stale entries after a mixed-sharing session, so get_proof and uarch-cycle root hashes come out wrong while get_root_hash and verify_hash_tree pass
 
@@ -130,6 +130,10 @@ The honest player then commits to, or tries to prove, a state that does not matc
 **Proof of concept**: `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua` (get_proof, both routes) and `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua` (collect_uarch_cycle_root_hashes). Run them from the repo root with `eval $(make -s env); lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua && lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua`. Both use temporary directories under the system temp dir, create a phtc file of about 50 MB, and print `BUG:` lines and exit 1 while the bug is present.
 
 **ID**: `ht-02-phtc-stale-entries-after-mixed-sharing-session`
+
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `api-06-persisted-phtc-not-validated-against-backing`: run with `eval $(make -s env); lua5.4 bugs/api-06-persisted-phtc-not-validated-against-backing/test-replace-memory-range.lua; lua5.4 bugs/api-06-persisted-phtc-not-validated-against-backing/test-mixed-sharing.lua`. It adds a second, more common trigger: `replace_memory_range` on a machine loaded with `SHARING_ALL` writes the new image's page entries into the shared `hash_tree.phtc` while the stored range files still describe the old image. Reloading the directory with `SHARING_ALL` then gives wrong `get_proof`, `get_node_hash` and uarch-cycle root hashes, with a correct `get_root_hash`. No mixed-sharing session is needed.
 
 ### B02. Crash in sparse-tree update freezes the root hash of a shared hash tree
 
@@ -1951,7 +1955,7 @@ While the bug is present it prints `BUG:` lines and exits 1. Once fixed it print
 
 **ID**: `api-05-torn-phtc-silent-wrong-hash`
 
-**Related**: [B01](#b01-stale-page-hash-tree-cache-after-a-mixed-sharing-session-yields-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
+**Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
 ### B33. Lua bindings call luaL_error inside C++ catch handlers and leak the exception
 

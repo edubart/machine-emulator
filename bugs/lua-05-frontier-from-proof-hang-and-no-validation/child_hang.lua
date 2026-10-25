@@ -1,6 +1,0 @@
-local cartesi = require("cartesi")
-local ht = require("cartesi.hash-tree")
-local fs = io.open(arg[1]):read("a")
-local proof = cartesi.fromjson(fs, "Proof")
-local ok, err = pcall(ht.frontier, proof, "keccak256")
-print("returned", ok, err)

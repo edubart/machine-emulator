@@ -1,5 +1,0 @@
-lua5.4: /home/user/machine-emulator/src/cartesi-machine.lua:3111: unable to get size of file 'rootfs.ext2': No such file or directory
-stack traceback:
-	[C]: in method 'create'
-	/home/user/machine-emulator/src/cartesi-machine.lua:3111: in main chunk
-	[C]: in ?

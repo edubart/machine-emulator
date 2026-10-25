@@ -3276,6 +3276,10 @@ It exits with 1 and prints `BUG:` lines while the bug is present, and exits with
 
 **ID**: `w2b-08-concurrency-update-hash-tree-int-truncation`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `w2a-04-concurrency-update-hash-tree-int-truncation`: run with `eval $(make -s env); lua5.4 bugs/w2a-04-concurrency-update-hash-tree-int-truncation/test.lua`.
+
 ### B57. read/write_virtual_memory silently do nothing for ranges that reach 2^64
 
 **Title**: `read/write_virtual_memory` report success and do nothing when `vaddr + length` reaches or passes 2^64 (Lua read then returns uninitialized heap bytes)

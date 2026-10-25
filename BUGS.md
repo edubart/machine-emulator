@@ -6,8 +6,8 @@ Review branch: `codex/emulator-0.23-bugs`, based on `feature/prt` at
 
 Scope: shipped emulator C/C++/Lua libraries and `cartesi-machine`. The experimental
 Lua validator is excluded; branch `prt.lua` and README supply PRT semantics.
-Existing defects in touched code are identified explicitly. A second review round
-is in progress. Material blocked by automated safeguards was skipped at the user's
+Existing defects in touched code are identified explicitly. Two review rounds are
+complete. Material blocked by automated safeguards was skipped at the user's
 request and is not included as an unconfirmed finding.
 
 Workflow: separate agents inspect different areas and propose candidates; executable
@@ -29,7 +29,7 @@ dispute deadlines, as well as general API consumers.
 | 006 | Exponential reconstruction of shared forest subtrees | High for tall affected trees | Introduced |
 | 007 | Nesting a lazy forest loses its source storage context | Medium; conditional dispute availability risk | Introduced |
 | 008 | Failed persisted expansion is omitted by later successful stores | Medium, conditional on persistence error | Introduced |
-| 009 | Collected uarch reset differs from verified reset for custom initial RAM | Medium; conditional incorrect-commitment risk | Existing |
+| 009 | Collected uarch reset differs from verified reset for custom initial RAM | High for validators accepting the affected initial state | Existing |
 
 ## 001 — Forest persistence commits truncated tree files after a failed write
 
@@ -313,9 +313,11 @@ dispute deadlines, as well as general API consumers.
   non-pristine uarch state, retaining the dirty-word optimization only when its
   initial-state assumption has been established. Alternatively, explicitly validate
   and reject unsupported initial states before collection executes.
-- **Severity:** **Medium (P2)** because it requires custom/non-pristine initial
-  uarch RAM. For a validator accepting such a state, an incorrect commitment can
-  cause dispute failure.
+- **Severity:** **High for a validator accepting the affected initial state**:
+  collection commits a reset root that its valid canonical reset proof cannot
+  reproduce, which can cause an honest player to lose that dispute. The reachability
+  is narrow because it requires custom/non-pristine initial uarch RAM; for general
+  custom-image API usage without a dispute, this is a medium correctness defect.
 - **Risks/limits:** Default pristine images pass. Custom uarch RAM is supported by
   configuration; the public collection contracts describe implicit resets without
   requiring fully pristine initial RAM. This is actual retained state, not a stale
@@ -331,7 +333,7 @@ Lua frontier/forest construction and persistence, selectorless ABI wrappers and
 their shared decoder, filesystem helpers, and changed CLI paths. Branch PRT usage
 was consulted for semantics only. No experimental validator findings are included.
 
-All six committed reproductions ran successfully and established the described
+All nine committed reproductions ran successfully and established the described
 incorrect behavior. Existing suites also passed: filesystem (6 cases), ABI (6),
 Lua hash tree (60), backing stores (89), local/remote machine API (91), and C API
 (166). The C API run passed 165 cases in the sandbox; its loopback-server case
@@ -345,6 +347,17 @@ and persisted reloads (64 matrix checkpoints). Collected micro-cycle hashes also
 matched cleared and uncleared machines for three instructions at each cache size.
 C API handle/error/configuration checks passed. `make -q -C src` confirmed the
 existing build was current; no production source was changed.
+
+The second round used fresh hunting passes and independent confirmation tasks to
+find 007–009, excluding the first six findings from the candidate search. Its
+additional controls covered cold/eager/warmed forest composition, separate versus
+shared storage directories, expansion failure and recovery on both newly stored
+and loaded forests, custom uarch configuration and snapshot reload, verified reset
+proofs, and pristine-image controls including a halted machine needing no revert
+tail. The existing local collection tests for one root hash and an already halted
+machine also passed. A deterministic set of 1,500 bounded ABI round trips passed
+across nested tuples, fixed/dynamic arrays, strings, bytes, signed/unsigned integers,
+and booleans, excluding the already known empty dynamic-element-array case.
 
 The checks ran on this Linux host, not every supported platform. No claim is made
 that every possible defect was found. Findings distinguish measured failures from

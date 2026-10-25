@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-74 confirmed issues: 4 high, 16 medium, 54 low.
+76 confirmed issues: 4 high, 16 medium, 56 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -99,6 +99,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys) | low | pre-existing | Lua bindings (JSON conversion) | tojson and fromjson truncate object keys at NUL bytes, merging distinct keys | `bugs/p3-06-json-nul-in-keys-truncated-merged/` |
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
+| [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
+| [B76](#b76-filesystemget_file_size-returns-263-1-for-directories-and-blocks-on-fifos) | low | introduced by branch | Lua cartesi.filesystem | filesystem.get_file_size returns 2^63-1 for directories and blocks on FIFOs | `bugs/p3-09-fs-get-file-size-directory-fifo/` |
 
 ## Issues
 
@@ -4305,6 +4307,91 @@ The test exits 1 while the bug is present. It exits 0 once `tojson` raises an er
 **Proof of concept**: `bugs/p3-07-json-nan-inf-serialized-as-null/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/p3-07-json-nan-inf-serialized-as-null/test.lua`. It exits 1 while the bug is present and 0 once it is fixed.
 
 **ID**: `p3-07-json-nan-inf-serialized-as-null`
+
+### B75. tojson writes unsigned 64-bit values of 2^63 or more as negative integers
+
+**Title**: Lua tojson writes uint64 values >= 2^63 as negative JSON integers (e.g. `--store-config` with `format:json`)
+
+- **Problem**: Lua 5.4 has only signed 64-bit integers. So when the Lua binding converts JSON to Lua (`clua_push_json_value`), a `number_unsigned` value at or above 2^63 becomes a negative Lua integer through `static_cast<int64_t>`. That step alone is unavoidable. The problem is the way back out. `clua_push_managed_toclose_json_ref` always stores a Lua integer as `int64_t`, and the only schema primitive it treats specially is `ArrayIndex`. No primitive writes the value back as `uint64_t`. As a result, JSON produced by `cartesi.tojson` (and anything built on it) contains negative numbers for fields that the JSON-RPC schema (`src/jsonrpc-discover.cpp`) documents as `UnsignedInteger`. Examples are `"ilrsc": -1`, `"imcyclemax": -1` and `"misa": -9223372036853460691`. For the same machine, the C API (`cm_get_initial_config`) writes `18446744073709551615` and `9223372036856090925`.
+- **Origin**: pre-existing. `origin/main` has the same code, and the branch makes no relevant change to these paths.
+- **Area**: Lua JSON layer (`cartesi.tojson` / `fromjson`) and the CLI's `--store-config=...,format:json`.
+- **Category**: api-contract (interoperability).
+- **Location**:
+  - `src/clua-i-machine.cpp:509-515`: `clua_push_json_value`, `number_unsigned` case, `static_cast<int64_t>(j.get<uint64_t>())`.
+  - `src/clua-i-machine.cpp:412-423`: `clua_push_managed_toclose_json_ref`, `LUA_TNUMBER` case, `int64_t v = lua_tointeger(...); j = v;`. Only `ArrayIndex` is special-cased.
+  - `src/clua-cartesi.cpp:164-170`: `cartesi_mod_tojson`, which exposes the path to Lua.
+  - `src/cartesi-machine.lua:3114-3116`: `serialize_config`, which writes `cartesi.tojson(config, 2)` to the user's file.
+  - `src/json-util.cpp:802-826`: `ju_get_opt_field<uint64_t>`, which casts negative integers back to unsigned. This is why the emulator's own loaders do not notice the problem.
+- **Evidence**: `test.lua` round-trips `m:get_initial_config()` through `cartesi.tojson`, runs `cartesi-machine.lua --store-config=<tmp>.json,format:json`, and looks for negative values in both outputs. `c.cpp` is a control that prints the same fields as the C API emits them. Run with `eval $(make -s env); timeout 120 lua5.4 bugs/p3-08-tojson-uint64-written-as-negative/test.lua`:
+  ```
+  tojson(get_initial_config()) negative fields: ilrsc=-1, imcyclemax=-1, misa=-9223372036853460691
+  Lua value of processor.registers.ilrsc = -1 (C API value is 2^64-1 = 18446744073709551615)
+  cartesi-machine --store-config JSON negative fields: ilrsc=-1, imcyclemax=-1, misa=-9223372036853460691
+  BUG: Lua tojson writes uint64 fields >= 2^63 as negative JSON integers (violates UnsignedInteger schema)
+  (exit status 1)
+  ```
+  The C API control (`c.cpp`) prints `"ilrsc":18446744073709551615,...` and `"misa":9223372036856090925,...`.
+- **Scenario**: Suppose a Rollups Node, Dave component or other tool written in another language (Rust serde `u64`, Go `uint64`, or jq/JS scripts comparing magnitudes) reads a machine config or other JSON file written by the Lua tooling, for example `cartesi-machine --store-config=cfg.json,format:json`. That reader rejects `-1`, or it misreads a sentinel such as `imcyclemax` or `ilrsc` as a small signed value. The same applies to any Lua-produced JSON sent to a JSON-RPC server that is not the emulator. The PRT Lua node itself is not affected in practice. Its own `tojson` messages carry small integers, and the fields PRT depends on (`mcycle`, target addresses, log2 sizes) stay far below 2^63. Nodes that call the C API directly get correct unsigned JSON.
+- **Possible solution**: In `clua_push_managed_toclose_json_ref`, write `j = static_cast<uint64_t>(v)` when the field schema marks the value as unsigned. One way is to add an `UnsignedInteger` primitive to the Lua schema dictionary and use it for the config, register and other `uint64` fields. Another is to default integer fields of known-unsigned schemas, such as the machine config, to unsigned output. Leave `fromjson` as is: the two's-complement Lua integer is the correct bit pattern.
+- **Severity**: low. Both reviewers agreed. Hashes, proofs, step logs and machine state are unaffected, and the emulator's own consumers (C API, `cartesi-jsonrpc-machine`, `--load-config`) accept the negative values by design and round-trip them bit-exactly. The only impact is on strict external `u64` parsers reading JSON produced from Lua, and only for the few fields whose values reach 2^63 or more (`ilrsc`, `imcyclemax`, `misa`).
+- **Risks**: Of the bug: stored configs and other Lua-produced JSON break the documented `UnsignedInteger` contract, which can cause parse failures or misread sentinels in tooling written in other languages. Of the fix: emitting unsigned values for fields that really are signed would turn small negative values into huge positive ones, so the unsigned primitive must only be applied to fields that are actually `uint64`. Users or tests that compare existing stored JSON byte for byte would see output change from `-1` to `18446744073709551615`. The C++ loaders accept both forms, so reading stays compatible.
+- **Proof of concept**: `bugs/p3-08-tojson-uint64-written-as-negative/test.lua` (reproducer; exits 1 while the bug is present) and `bugs/p3-08-tojson-uint64-written-as-negative/c.cpp` (C API control). Run from the repo root:
+  ```
+  eval $(make -s env); timeout 120 lua5.4 bugs/p3-08-tojson-uint64-written-as-negative/test.lua
+  # optional control:
+  g++ -std=c++20 -Isrc bugs/p3-08-tojson-uint64-written-as-negative/c.cpp -Lsrc -lcartesi -o /tmp/p3-08-c && /tmp/p3-08-c
+  ```
+
+**ID**: `p3-08-tojson-uint64-written-as-negative`
+
+**Related**: [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices).
+
+### B76. filesystem.get_file_size returns 2^63-1 for directories and blocks on FIFOs
+
+**Title**: `cartesi.filesystem.get_file_size` returns 2^63-1 for directories and blocks forever on FIFOs
+
+**Problem**: `filesystem.get_file_size` uses `io.open(filename, "rb")` followed by `f:seek("end")` and never calls `stat`, so it does not check that the path is a regular file. On Linux, `fopen` in read mode succeeds on a directory, and `lseek(SEEK_END)` on an ext4 (htree) directory returns `LLONG_MAX`. The function therefore returns `9223372036854775807` where it should raise an error. On a FIFO, a read-mode `fopen` blocks until a writer appears, so the call hangs forever. A file without read permission also fails, even though `stat` could still read its size. The documented contract is "Returns the size of a file in bytes".
+
+**Origin**: Introduced by this branch. `src/cartesi/filesystem.lua` was added in commit 956a179 ("feat: add the cartesi.filesystem Lua module") and does not exist on `origin/main`.
+
+**Area**: `cartesi.filesystem` Lua module, used by the PRT node recipe.
+
+**Category**: Correctness (missing file-type validation; possible hang).
+
+**Location**:
+- `src/cartesi/filesystem.lua:96-100`: `filesystem.get_file_size`
+- `doc/recipes/prt.lua:2734`: `assert(fs.get_file_size(outputs_log_path) >= outputs_log_size, "outputs.log lost committed records")`
+- `src/os-filesystem.cpp:130-139`: `os::file_size`, a `stat`-based version that rejects directories but is not exposed to Lua
+
+**Evidence**: The test creates a fresh directory under `/tmp` (ext4) and calls `pcall(fs.get_file_size, dir)`. It then creates a FIFO and calls `get_file_size` on it in a child process under a 3-second `timeout`.
+```
+$ eval $(make -s env); lua5.4 bugs/p3-09-fs-get-file-size-directory-fifo/test.lua
+get_file_size(directory) ->	true	9223372036854775807
+BUG: get_file_size on a directory returned 9223372036854775807 instead of failing
+BUG: assert(fs.get_file_size(dir) >= outputs_log_size) would pass for any size
+get_file_size(fifo) child output:	rc=124
+BUG: get_file_size on a FIFO blocked (killed by 3s timeout)
+exit=1
+```
+The test exits 1 while the bug is present and 0 once it is fixed. Both reviewers reproduced the directory result independently.
+
+**Scenario**: During recovery, the PRT node runs the `outputs.log lost committed records` guard before it truncates `outputs.log`. If `outputs.log` in the node's data directory is a directory, for example from a bad layout, a leftover, or an operator mistake, the guard passes with a bogus size instead of reporting the problem. The next call, `fs.truncate_file`, then fails with "open() failed: Is a directory". The node stops with a misleading error and no state is corrupted. If a FIFO is planted at that path, or at any path a tool size-checks with this helper, the process hangs forever instead of failing. Hashes, proofs and step logs are not affected.
+
+**Possible solution**: Expose a `stat`-based size function through `cartesi.filesystem`'s C core (`os::file_size`) and have it require `S_ISREG`. Note that `os::file_size` today rejects only `S_ISDIR`, so it should be tightened to reject FIFOs, sockets and devices too. An alternative is to open with `O_RDONLY|O_NONBLOCK`, `fstat`, require `S_ISREG`, and return `st_size`.
+
+**Severity**: Low. Both reviewers agree. The trigger needs a malformed or hostile local data directory (an attacker with write access there can already disrupt the node in simpler ways). In the only real caller, the very next truncate fails anyway, so the visible effect is a different error message or a hang. No hashes, proofs or stored state are affected.
+
+**Risks**:
+- Of the bug: the guard passes for the wrong reason and the node reports a misleading error; a FIFO at a checked path causes an indefinite hang (local DoS); readable-size checks fail on files without read permission.
+- Of the fix: low. Callers that relied on `get_file_size` working on non-regular files, such as block devices, which `seek("end")` sizes correctly while `stat` reports `st_size == 0`, would now get an error. If block devices must be supported, handle them explicitly (for example with `BLKGETSIZE64` or by keeping the seek path for `S_ISBLK`).
+
+**Proof of concept**: `bugs/p3-09-fs-get-file-size-directory-fifo/test.lua`. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/p3-09-fs-get-file-size-directory-fifo/test.lua
+```
+Requires `mkfifo` and `timeout` (coreutils). Exit code 1 means the bug reproduces; 0 means it is fixed.
+
+**ID**: `p3-09-fs-get-file-size-directory-fifo`
 
 ## Candidates that were not confirmed
 

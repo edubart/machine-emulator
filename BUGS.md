@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-65 confirmed issues: 4 high, 14 medium, 47 low.
+67 confirmed issues: 4 high, 16 medium, 47 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -43,6 +43,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B53](#b53-run-aborts-when-a-non-blocking-console-output-descriptor-is-briefly-full) | medium | pre-existing | Machine console (run) | run aborts when a non-blocking console output descriptor is briefly full | `bugs/w2b-05-console-eagain-fails-run/` |
 | [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
+| [B66](#b66-verifying-through-a-json-rpc-machine-object-crashes-on-short-sibling-lists-and-accepts-logs-the-local-verifier-rejects) | medium | pre-existing | JSON-RPC client (verify_*), access-log JSON | Verifying through a JSON-RPC machine object crashes on short sibling lists and accepts logs the local verifier rejects | `bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/` |
+| [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -3797,6 +3799,113 @@ eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backsla
 **ID**: `w2a-07-hash-tree-lua-parent-dir-ignores-backslash`
 
 **Related**: [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root), [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows).
+
+### B66. Verifying through a JSON-RPC machine object crashes on short sibling lists and accepts logs the local verifier rejects
+
+**Title**: Verifying through a JSON-RPC machine object re-serializes an unchecked access log: the client segfaults on an empty `sibling_hashes` (out-of-bounds read on a short one), and logs the local verifier rejects are accepted
+
+**Problem**: `cm_verify_step_uarch`, `cm_verify_reset_uarch` and `cm_verify_send_cmio_response` first parse the caller's JSON log into a C++ `access_log` with `from_json`. `from_json(access)` accepts a `sibling_hashes` array of any length. The count is checked against the proof depth (`64 - max(log2_size, 5)`) only later, in `access::make_proof`, during a local replay. When `m` is a JSON-RPC machine, `jsonrpc_machine::do_verify_*` skips the local replay. It sends the parsed log to the server through `to_json(access)`, and that function has two defects:
+- It runs `for (int i = 0; i < depth; i++) s.push_back(encode_base64(sibling_hashes[i]))` and never compares `depth` with `sibling_hashes.size()`. A short vector is read out of bounds. An empty vector has a null data pointer, so the client segfaults every time.
+- It drops data. Siblings beyond `depth` are cut off, and `written` / `written_hash` are emitted only for `write` accesses. So the server verifies a cleaned-up log and accepts logs that the local or static verifier rejects. The verdict on the same log depends on whether the verifier object is local or remote.
+
+**Origin**: pre-existing. `origin/main` has the same `to_json(access)` loop and the same `jsonrpc_machine::do_verify_*` forwarding. This branch does not touch them.
+
+**Area**: JSON-RPC client verification of access logs: `verify_step_uarch`, `verify_reset_uarch` and `verify_send_cmio_response` called on a remote machine object (C API with a `jsonrpc_machine`, Lua `remote:verify_*`). The bug is in access-log JSON (de)serialization in `json-util.cpp`.
+
+**Category**: crash (client-side null or out-of-bounds read on untrusted input) / input validation (local vs. remote verifier inconsistency).
+
+**Location**:
+- `src/json-util.cpp:2278-2290`: the `sibling_hashes` loop in `to_json(const access &)` indexes `sibling_hashes[i]` up to `depth` with no bounds check (line 2287).
+- `src/json-util.cpp:2269-2278`: `written_hash` / `written` are serialized only when `type == write`, so they are dropped silently from a `read` access.
+- `src/json-util.cpp:1403-1408`: `from_json(access)` accepts a `sibling_hashes` vector of any length.
+- `src/jsonrpc-machine.cpp:1033-1058`: `do_verify_step_uarch`, `do_verify_reset_uarch` and `do_verify_send_cmio_response` re-serialize the parsed `access_log` into the request.
+- `src/cm.cpp:915-960` (`cm_verify_step_uarch`, `cm_verify_reset_uarch`) and `src/cm.cpp:1381` (`cm_verify_send_cmio_response`): parse the log, then dispatch to `m` when `m != nullptr`.
+- For comparison, the local checks that the remote path skips: `src/access-log.hpp:188` ("access sibling hash count is inconsistent with proof size") and `src/uarch-replay-state-access.hpp:158` ("unexpected written data in ... read access").
+
+**Evidence**: The test builds a 1 MiB RAM-only machine, runs `log_step_uarch`, spawns a JSON-RPC server, and verifies modified copies of the log two ways: locally (`cartesi.machine:verify_step_uarch`) and through the remote object. The two crash cases run in child processes.
+```
+honest log: local and remote accept
+extra sibling: local	false	access sibling hash count is inconsistent with proof size	| remote	true	== after
+BUG: extra sibling hash: local verifier rejects, remote verifier accepts
+written on read access: local	false	unexpected written data in 1st access read access to uarch.cycle	| remote	true	== after
+BUG: written data on read access: local verifier rejects, remote verifier accepts
+missing siblings (empty): child exit=139
+Segmentation fault
+BUG: remote verify_step_uarch with empty sibling_hashes crashed the client process (exit 139, SIGSEGV)
+missing siblings (few): child exit=0
+child remote result:	false	siblings and read hash do not match root hash before 1st access to uarch.cycle
+```
+Run: `eval $(make -s env); lua5.4 bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/test-remote-verify-log.lua` (exits 1, under 1 s). With 40 siblings removed, this build does not crash. The loop reads heap memory past the vector and sends it to the server, which then rejects the log with a misleading error. Whether that read crashes depends on heap layout.
+
+**Scenario**: A validator, dispute tool or app verifies a log it did not produce through a remote machine object, for example Lua `remote:verify_step_uarch(root, log)` or C `cm_verify_step_uarch(jsonrpc_m, ...)`. The counterparty or a corrupted store supplies the honest log with `accesses[1].sibling_hashes = []`. The verifying process segfaults inside `to_json` instead of getting an error, and the node or tool dies. With extra siblings, or `written` data on a read access, the remote verifier returns the honest after-hash where the local or static verifier raises an error. Tooling that compares the two, or relies on the remote verifier to reject malformed logs before passing them on (for example, before submitting them on-chain), gets inconsistent results. The PRT node recipes (`doc/recipes/prt.lua`, `prt-ethereum.lua`, `vg.lua`) are not affected. They call the static `cartesi.machine:verify_*`, which takes the local path and rejects these logs cleanly.
+
+**Possible solution**:
+- In `to_json(const access &)`, throw (or serialize the vector as-is) when `sibling_hashes.size() != depth`. Never index past `size()`.
+- Serialize `written` / `written_hash` whenever they are present, whatever the access type, so the server sees exactly what the caller sent.
+- Better still, check access-log shape in `from_json(access)`: the sibling count must equal `64 - max(log2_size, 5)`, read and written sizes must match `log2_size`, and a read access must have no written fields. Then the local and remote paths reject the same logs at parse time.
+- Alternatively, have `jsonrpc_machine::do_verify_*` forward the caller's original JSON text instead of a round-tripped `access_log`.
+
+Add regression tests: an empty or short `sibling_hashes`, an extra sibling, and `written` on a read access, each through a remote machine object, must raise an error the same way the local verifier does.
+
+**Severity**: medium. Both reviewers rated it medium, down from the suspected high. The crash is a deterministic client segfault (a null or out-of-bounds read, not a write) on untrusted input passed to a legitimate public API. But the main validator path, the static or local verifier used by the PRT node, is not affected. The strictness mismatch only accepts logs that encode the honest transition and returns the honest after-hash, so no wrong state transition, hash or proof is ever accepted.
+
+**Risks**:
+- Of the bug: a process that verifies untrusted logs through a JSON-RPC machine can be crashed remotely by one malformed field. A short sibling list leaks client heap bytes to the server in the request. The verdict on the same log depends on whether the verifier is local or remote, which can mislead tooling that uses a remote verifier as a gate.
+- Of the fix: a stricter `from_json` could reject logs that some callers produce today with redundant fields, such as written data on read accesses or extra siblings. Those logs are already rejected by the local verifier, so the change mainly affects the remote path. Changing what `to_json` emits for read accesses changes the JSON that `log_*` APIs return only if such logs can be produced, which the emulator itself never does.
+
+**Proof of concept**: `bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/test-remote-verify-log.lua`. It needs `cartesi`, `cartesi.jsonrpc` and `cartesi-jsonrpc-machine` on PATH; no machine images are needed. Run from the repo root with `eval $(make -s env); lua5.4 bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/test-remote-verify-log.lua`. It exits 1 and prints BUG lines while the defect is present, and prints "OK: no defect" and exits 0 once fixed.
+
+**ID**: `p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-`
+
+**Related**: [B44](#b44-json-parsers-truncate-64-bit-log2-sizes-in-access-logs-and-proofs-without-range-checks).
+
+### B67. Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable
+
+**Title**: Config validation allows memory ranges inside the 2^22 uarch-state hash node (0x401000-0x5fffff), so log_reset_uarch fails and collect_uarch_cycle_root_hashes commits to a reset root that cannot be proven
+
+**Problem**: The uarch reset is proven as a single write of the whole 2^22-byte hash-tree node at `UARCH_STATE_START_ADDRESS` (0x400000-0x7fffff). Replay (`do_reset_uarch` in `uarch-replay-state-access.hpp`), and the on-chain verifier modeled on it, set that node's hash to the constant `machine::get_uarch_pristine_hash()`. That constant assumes the node holds only the uarch shadow (0x400000-0x400fff) and the uarch RAM (0x600000-0x7fffff), with the gap 0x401000-0x5fffff all zero. Config validation does not enforce this. `machine_address_ranges::check` only checks that a range is addressable and does not overlap another range, so a flash drive (or other memory range) with an explicit `start` in the gap is accepted. On the record side, `m_m.reset_uarch()` resets only the uarch shadow and uarch RAM and leaves the gap alone. The code admits the guard is missing: `//??D I'd like to add an static_assert or some other guard mechanism to guarantee that uarch.ram and uarch.shadow are alone in the entire span of their common hash tree parent node`. Once a range in the gap holds non-zero data:
+- `log_reset_uarch` always throws `written hash for uarch.state does not match expected hash in 1st access`;
+- `reset_uarch` and `collect_uarch_cycle_root_hashes` (and so `collect_uarch_cycle_bundle`) produce a post-reset root that still contains the drive data, while the on-chain reset wipes the whole node to the pristine hash.
+
+The emulator's commitment then differs from the state transition the verifier enforces, and no reset proof can be produced.
+
+**Origin**: pre-existing. `origin/main` has the same overlap-only check and the same `??D` comment.
+
+**Area**: machine config validation / uarch reset (`log_reset_uarch`, `verify_reset_uarch`, `reset_uarch`, `collect_uarch_cycle_root_hashes`, `collect_uarch_cycle_bundle`).
+
+**Category**: correctness (unprovable commitment / divergence from on-chain semantics).
+
+**Location**:
+- `src/machine-address-ranges.cpp:382-400`: `machine_address_ranges::check` checks only addressability and overlap; nothing reserves 0x401000-0x5fffff.
+- `src/uarch-replay-state-access.hpp:368-371`: `do_reset_uarch` checks a write of the whole node `(UARCH_STATE_START_ADDRESS, UARCH_STATE_LOG2_SIZE)` against `get_uarch_pristine_hash()`.
+- `src/uarch-record-state-access.hpp:277-292`: `do_reset_uarch` logs a write of the same node, but `reset_uarch()` touches only the shadow and uarch RAM (`??D` comment at 278-280).
+- `src/uarch-defines.h:24-27`: `UARCH_STATE_START_ADDRESS_DEF` = 0x400000, `UARCH_STATE_LOG2_SIZE_DEF` = 22. `src/address-range-defines.h:30-32`: shadow at 0x400000 (length 0x1000), uarch RAM at 0x600000.
+
+**Evidence**: The test builds machines with a 4 KiB flash drive at 0x401000, 0x500000 and 0x5ff000. All three configs are accepted. It writes `"app data"` to the drive, runs the uarch to halt and calls `log_reset_uarch`, which fails every time. In each case the last leaf of `collect_uarch_cycle_root_hashes(1, 0, ...)` equals the root after `reset_uarch()`, which still includes the drive data. A control run with the same placement but an all-zero drive proves and verifies the reset without error, which is why the bug goes unnoticed.
+```
+BUG: flash drive at 0x401000 (inside uarch-state node 0x400000..0x800000) accepted; log_reset_uarch fails: written hash for uarch.state does not match expected hash in 1st access
+  collect_uarch_cycle_root_hashes last leaf == reset_uarch root (unprovable root committed)
+BUG: flash drive at 0x500000 (...) accepted; log_reset_uarch fails: written hash for uarch.state does not match expected hash in 1st access
+  collect_uarch_cycle_root_hashes last leaf == reset_uarch root (unprovable root committed)
+BUG: flash drive at 0x5ff000 (...) accepted; log_reset_uarch fails: written hash for uarch.state does not match expected hash in 1st access
+  collect_uarch_cycle_root_hashes last leaf == reset_uarch root (unprovable root committed)
+control: all-zero drive at 0x500000, log_reset_uarch + verify_reset_uarch ok
+```
+Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/test-memory-range-in-uarch-state-node.lua` (exit 1).
+
+**Scenario**: A dapp author builds a template with an explicit drive start in the gap, for example `--flash-drive=start:0x500000,length:4096,...` or `flash_drive = {{start = 0x500000, ...}}`. The config is accepted, and `doc/README.md` describes flash drive placement as "configurable with constraints" without listing this gap as reserved. The drive holds non-zero data, either from its image or written by the guest at runtime. An honest PRT validator (Dave, the Rollups Node, or the Lua PRT node) computes its commitment with `collect_uarch_cycle_root_hashes`. Its reset leaves keep the drive data. When the dispute reaches a uarch-reset step, `log_reset_uarch` throws, so the honest player cannot produce the reset proof. Even with a proof, its leaf differs from the on-chain reset result. The honest player loses to an opponent whose roots follow the verifier's wipe-the-node semantics. The template is fixed in advance, so a dispute adversary cannot trigger this unless the template already has such a range. Default flash-drive placement never uses the gap.
+
+**Possible solution**: In config validation (`machine_address_ranges::check` or where the machine registers its ranges), reject any address range other than the uarch shadow and the uarch RAM that intersects `[UARCH_STATE_START_ADDRESS, UARCH_STATE_START_ADDRESS + 2^UARCH_STATE_LOG2_SIZE)`, with a clear error. Replace the `??D` comment with that check, plus a `static_assert` that the shadow and uarch RAM both lie inside the node. Document 0x400000-0x7fffff as reserved in the physical memory map.
+
+**Severity**: medium. Both reviewers rated it medium (one said possibly high). When triggered, the impact is critical: the reset proof cannot be produced and the commitment diverges from on-chain semantics, so an honest player loses the dispute. But it needs a rare, author-chosen config: a non-default explicit `start` in the 2 MiB gap, with a range that holds non-zero data.
+
+**Risks**: Bug: affected templates fail silently. Nothing goes wrong until the gap range holds non-zero data and a dispute reaches a reset step, and by then the template is fixed on chain. Fix: low risk. Rejecting ranges in the gap could break an existing template or snapshot that already uses that placement. Such machines cannot produce valid reset proofs today anyway, so failing at load time is better than losing a dispute later. Loading a stored snapshot with such a range would also fail after the fix; the error message should explain why.
+
+**Proof of concept**: `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/test-memory-range-in-uarch-state-node.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/test-memory-range-in-uarch-state-node.lua`. It exits 1 and prints `BUG:` lines while the bug is present. Once the gap is reserved, it prints `rejected by config validation ... (fixed)` for each start, then the control line and `OK`, and exits 0.
+
+**ID**: `p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo`
+
+**Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
 
 ## Candidates that were not confirmed
 

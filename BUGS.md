@@ -356,3 +356,59 @@ The prover patched a copy with `assert(temporary.file:write(contents))`. With th
 ID: `ht-07-hashtree-lua-write-file-ignores-write-error`
 
 Related: the same unchecked-close pattern in `cartesi.filesystem.write_file` is [`ht-08`](#ht-08-filesystem-write-file-swallows-close-errors).
+
+<a id="ht-09-remove-stored-not-idempotent"></a>
+
+### `remove_stored` is not idempotent: after an interrupted removal it cannot remove the leftover directory, and that directory blocks `store`/`clone_stored`/`rename_stored` to the same name
+
+**Problem:** `machine::remove_stored` calls `for_each_stored_filename(dir, os::remove_file)`, then `os::remove_directory(dir)`. `for_each_stored_filename` first runs `machine_config::load(dir)`, which needs `config.json`. It then unlinks a fixed list of files: the data, dht and dpt files of every backing store, then the sht and phtc files, and `config.json` last. `os::remove_file` throws on any `unlink` error, including `ENOENT`. If the process dies partway through (SIGKILL, OOM kill, power loss), the next `remove_stored` call fails one of two ways:
+- if `config.json` is still there, it throws on the first file that is already gone;
+- if `config.json` was already unlinked (the directory is empty or nearly empty), it throws because it cannot read the config.
+
+Either way the directory never gets removed. `clone_stored` and `store` create the target with `mkdir`, so they fail with `EEXIST`. `rename_stored` uses `RENAME_NOREPLACE`, so it fails with "destination exists". No emulator API can recover the name. A `clone_stored` or `store` killed partway through leaves the same kind of partial directory, because its scope cleanup never runs, and `remove_stored` cannot clean that up either.
+
+**Origin:** Pre-existing. `remove_stored` and `for_each_stored_filename` are the same on `origin/main`. The CLI's stored revert mode and the branch's PRT recipe use them.
+
+**Area:** Stored machine API (`cm_remove_stored`, `cm_clone_stored`, `cm_rename_stored`, `cm_store`), Lua bindings, and `cartesi-machine --revert-mode=stored`.
+
+**Category:** Durability / crash recovery (liveness).
+
+**Location:**
+- `src/machine.cpp:576-609` (`for_each_stored_filename`: loads `config.json` first and removes it last)
+- `src/machine.cpp:611-619` (`machine::remove_stored`)
+- `src/os-filesystem.cpp:193-197` (`os::remove_file` throws on `ENOENT`)
+- `src/cm.h:603` (documents only that "some files or the directory may remain"; it gives no way to recover)
+- Callers that hit it: `src/cartesi-machine.lua:3739` (`revert_stored:commit`), `src/cartesi-machine.lua:3748-3749` (`revert_stored:revert`: `remove_stored` then `rename_stored`)
+- Workaround in this branch: `doc/recipes/prt.lua:1119` (`remove_leftover_stored_machine` falls back to listing the directory and unlinking each entry)
+
+**Evidence:** The test stores a real machine through the public Lua API. It simulates two crash points by deleting files with `os.remove`, then calls the real `remove_stored`, `clone_stored` and `rename_stored`:
+```
+$ eval $(make -s env); lua5.4 bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua
+stored files:	27
+A: retry remove_stored:	false	unable to remove file '/tmp/tmp.../victim/0000000000000000-8000.bin': No such file or directory
+A: directory still exists:	true	files left:	26
+BUG: remove_stored cannot finish a partially removed stored machine (aborts on first missing file: ...)
+A: clone_stored to same name:	false	unable to create directory '/tmp/tmp.../victim': File exists
+A: rename_stored to same name:	false	... unable to rename directory from '/tmp/tmp.../other' to '/tmp/tmp.../victim': destination exists: File exists
+BUG: name stays blocked for clone_stored and rename_stored
+B: retry remove_stored on empty leftover dir:	false	unable to read file '/tmp/tmp.../victim/config.json': open() failed: No such file or directory	exists:	true
+BUG: remove_stored cannot remove the empty directory left after config.json was unlinked (...)
+exit=1
+```
+
+**Scenario:** A validator node (Rollups Node, Dave, or a custom PRT node) keeps a revert snapshot or scratch stored machine under a fixed name. It discards the snapshot with `cm_remove_stored`, or replaces the machine with `cm_remove_stored` followed by `cm_rename_stored`. The node is killed during the roughly 27 unlinks. After restart, the leftover can never be removed: `cm_remove_stored` fails with `ENOENT`, and `cm_clone_stored`/`cm_rename_stored`/`cm_store` to that name fail with `EEXIST`. The node stays stuck until custom code or an operator deletes the directory by hand. An honest PRT player stuck this way can miss tournament deadlines. The `cartesi-machine` CLI with `--revert-mode=stored` gets stuck the same way: a stale `<dir>.revert` makes the next snapshot's `clone_stored` fail, and an interrupted revert leaves `<dir>` unremovable. Hashes and proofs are never affected.
+
+**Possible solution:** Make removal idempotent and crash-safe:
+- Ignore `ENOENT` in the remover used by `remove_stored`.
+- If `config.json` is missing, don't fail. Fall back to removing the known file patterns, or every regular file in the directory, and then the directory itself.
+- Better still, first rename the directory atomically to a unique tombstone name, such as `<dir>.removing.<pid>`, and sync the parent directory. Then delete the tombstone's contents. The original name is then free right after one atomic step, and leftovers are easy to find and remove.
+
+**Severity:** Medium. Both reviewers rated it medium, at the low end. Crashes are expected over a long-running validator's life, and this one can leave a node or CLI stuck with no API path to recover. On the other hand, it never produces wrong or nondeterministic hashes or proofs, recovery outside the API is trivial (`rm -rf`), and `cm.h` already warns that files may remain after a failure.
+
+**Risks:**
+- Of the bug: lost liveness after a crash. Unattended validators stay down until someone cleans up by hand, which can mean missed dispute deadlines. Integrators may write ad-hoc recursive deletes, which can remove the wrong directory if a path is wrong.
+- Of the fix: a fallback that deletes every entry when `config.json` is missing must not run on a directory that is not a stored machine, for example a user path passed by mistake. Limit it to known file-name patterns, or to the tombstone created by the API itself. Ignoring `ENOENT` must not hide real errors such as `EACCES` or `EIO`. The tombstone approach adds a rename and a sync and needs a unique-name scheme.
+
+**Proof of concept:** `bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It works in a fresh `mktemp -d` directory, or in `$WORKDIR` if that is set. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: remove_stored is idempotent` once fixed.
+
+ID: `ht-09-remove-stored-not-idempotent`

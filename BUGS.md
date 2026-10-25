@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-76 confirmed issues: 4 high, 16 medium, 56 low.
+77 confirmed issues: 4 high, 16 medium, 57 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -101,6 +101,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
 | [B76](#b76-filesystemget_file_size-returns-263-1-for-directories-and-blocks-on-fifos) | low | introduced by branch | Lua cartesi.filesystem | filesystem.get_file_size returns 2^63-1 for directories and blocks on FIFOs | `bugs/p3-09-fs-get-file-size-directory-fifo/` |
+| [B77](#b77-filesystemremove_directory-deletes-files-and-remove_file-deletes-empty-directories) | low | introduced by branch | Lua cartesi.filesystem | filesystem.remove_directory deletes files and remove_file deletes empty directories | `bugs/p3-10-fs-remove-directory-removes-files/` |
 
 ## Issues
 
@@ -4392,6 +4393,53 @@ eval $(make -s env); lua5.4 bugs/p3-09-fs-get-file-size-directory-fifo/test.lua
 Requires `mkfifo` and `timeout` (coreutils). Exit code 1 means the bug reproduces; 0 means it is fixed.
 
 **ID**: `p3-09-fs-get-file-size-directory-fifo`
+
+### B77. filesystem.remove_directory deletes files and remove_file deletes empty directories
+
+**Title**: cartesi.filesystem: remove_directory deletes regular files and remove_file deletes empty directories (both call os.remove)
+
+**Problem:** `filesystem.remove_file` and `filesystem.remove_directory` are both `assert(os.remove(path))`. Lua's `os.remove` calls C `remove(3)`, which unlinks a file and also rmdirs an empty directory. Neither function checks what kind of entry it gets. Their doc comments promise "Removes a file." and "Removes an empty directory.", but `remove_directory(file)` silently deletes the file, and `remove_file(empty_dir)` silently deletes the directory. The C++ helpers `os::remove_directory` (`rmdir`) and `os::remove_file` (`unlink`) do check the kind, but `cartesi.filesystem.core` does not expose them.
+
+**Origin:** Introduced by this branch. `src/cartesi/filesystem.lua` was added in commit 956a179 ("feat: add the cartesi.filesystem Lua module") and does not exist on `origin/main`.
+
+**Area:** `cartesi.filesystem` Lua module (public Lua API used by the PRT node recipe `doc/recipes/prt.lua` and by the emulator's Lua code).
+
+**Category:** api-contract
+
+**Location:**
+- `src/cartesi/filesystem.lua:123-124`: `filesystem.remove_file(filename)` is `assert(os.remove(filename))`.
+- `src/cartesi/filesystem.lua:129-130`: `filesystem.remove_directory(dirname)` is `assert(os.remove(dirname))`.
+- `src/os-filesystem.cpp:147-148` (`os::remove_directory`, `rmdir`) and `src/os-filesystem.cpp:193-194` (`os::remove_file`, `unlink`): kind-checking versions that already exist in C++.
+- `src/clua-cartesi-filesystem.cpp:139-148`: the `filesystem_core_mod` table binds neither of them.
+
+**Evidence:** `test.lua` creates a regular file and an empty directory in a temporary directory. It calls `fs.remove_directory` on the file and `fs.remove_file` on the directory, and checks whether each call raised an error or deleted the entry. Both calls succeed and delete the entry:
+```
+$ eval $(make -s env); lua5.4 bugs/p3-10-fs-remove-directory-removes-files/test.lua
+BUG: fs.remove_directory(regular file) succeeded and deleted the file
+BUG: fs.remove_file(empty directory) succeeded and deleted the directory
+(exit 1)
+```
+When the bug is fixed, both calls fail, and the test prints `ok: ...` twice, then `PASS`, and exits 0.
+
+**Scenario:** A caller uses `remove_directory` as a guard meaning "delete only if this is an empty directory", or `remove_file` as "delete only if this is a file". If the path is the other kind, the entry is deleted quietly instead of raising an error. The PRT node cannot reach the harmful direction. In `doc/recipes/prt.lua`, every `fs.remove_directory` call follows an `fs.list_directory` of the same path: `remove_leftover_stored_machine` (line 1126), `clear_epoch_directory` for `entries`/`forests`/`inputs`/`outputs` (lines 2628, 2633), and `remove_epoch_directory` (line 2645). So a regular file under one of those names makes `list_directory` fail first. The other direction is reachable: if `state.json`, `outputs.log`, an epoch file, or an entry inside `forests`/`inputs`/`outputs` were an empty directory, `remove_file` would rmdir it without complaint. That only removes an empty directory the node is already clearing. Other apps and CLI scripts that use the module, and future callers, lose the type check that the docs promise. None of this affects hashes, proofs, step logs, disputes, or stored machine state.
+
+**Possible solution:** Bind `os::remove_file` (`unlink(2)`) and `os::remove_directory` (`rmdir(2)`) in `cartesi.filesystem.core` (`src/clua-cartesi-filesystem.cpp`). Then implement `filesystem.remove_file` and `filesystem.remove_directory` with those bindings instead of `os.remove`. Keep raising Lua errors that carry the path and the errno message (`EISDIR`/`EPERM` for unlink on a directory, `ENOTDIR` for rmdir on a file). Add a regression test, for example this PoC, to the Lua filesystem tests.
+
+**Severity:** low. Both reviewers agree, and so does the prover. The documented contract does not hold in a newly shipped public API, but no in-scope caller relies on the check. The PRT node lists each directory before removing it. The only reachable wrong-kind deletion is an empty directory the node was clearing anyway. There is no effect on dispute correctness or validator liveness.
+
+**Risks:**
+- *Of the bug:* Silent deletion of the wrong kind of entry, for callers that treat the remove functions as kind-checked guards. A wrong-directory safety check like the one `clear_epoch_directory` aims for could quietly stop working in future code.
+- *Of the fix:* Behavior gets stricter. Any existing caller that passes a directory to `remove_file`, or a file to `remove_directory`, will now get an error. No such caller was found in `src/`, `tests/` or `doc/recipes/prt.lua`. Error message text may change if callers or tests match on it. Error messages on platforms where `unlink` on a directory returns `EPERM` instead of `EISDIR` (macOS) differ, which matters only for tests that match on the message.
+
+**Proof of concept:** `bugs/p3-10-fs-remove-directory-removes-files/test.lua` (pure Lua, no machine images needed). Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/p3-10-fs-remove-directory-removes-files/test.lua
+```
+It exits 1 and prints the two `BUG:` lines while the bug is present. It prints `PASS` and exits 0 once fixed.
+
+**ID**: `p3-10-fs-remove-directory-removes-files`
+
+**Related**: [B76](#b76-filesystemget_file_size-returns-263-1-for-directories-and-blocks-on-fifos).
 
 ## Candidates that were not confirmed
 

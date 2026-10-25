@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-51 confirmed issues: 4 high, 11 medium, 36 low.
+52 confirmed issues: 4 high, 11 medium, 37 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -76,6 +76,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B48](#b48-evmu-hex-decoding-accepts-sign-characters) | low | pre-existing | Lua cartesi.evmu (ABI) | evmu hex decoding accepts sign characters | `bugs/lua-33-evmu-fromhex-sign-chars/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B51](#b51-log_step-on-an-empty-or-destroyed-local-machine-dereferences-a-null-pointer) | low | pre-existing | C API (local machine) | log_step on an empty or destroyed local machine dereferences a null pointer | `bugs/w2b-02-log-step-empty-machine-null-deref/` |
+| [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 
 ## Issues
 
@@ -3000,3 +3001,51 @@ In both cases the node process crashes with SIGSEGV. Every other call on that ha
 **Proof of concept**: `bugs/w2b-02-log-step-empty-machine-null-deref/run.sh` (driver), `test_log_step_empty.cpp` (C API test, compiled against `src/libcartesi`), and `test_log_step_empty.lua` (Lua test: one control case plus a `cartesi.new()` case and a destroyed-machine case). Run from the repo root with libcartesi built: `eval $(make -s env); sh bugs/w2b-02-log-step-empty-machine-null-deref/run.sh`. The script exits non-zero while the bug is present and prints `OK` for every case once it is fixed.
 
 **ID**: `w2b-02-log-step-empty-machine-null-deref`
+
+### B52. A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages
+
+**Title**: A full disk kills the process with SIGBUS when a SHARING_ALL machine writes to a sparse page
+
+**Problem**: When a machine is loaded or created with `SHARING_ALL` (or with shared backing stores), its RAM, flash drive and phtc payload files are mapped `MAP_SHARED` straight from the stored directory, and those files stay sparse. The first write to a page that is still a hole makes the kernel allocate a disk block during the page fault. If the filesystem is full at that point, the kernel raises SIGBUS. The writer can be the guest during `run` or the host through `write_memory` and similar calls. Nothing reserves space when the machine loads: `mapped_memory` only checks that `st_size` equals the expected length, which a sparse file passes, and it never calls `fallocate`/`posix_fallocate`. libcartesi also installs no SIGBUS handler. So the process dies in the middle of an instruction or an API call, and no error ever reaches the caller (no C error code, no Lua error). The `cartesi-jsonrpc-machine` server dies the same way, because it deliberately leaves SIGBUS out of its Asio signal set. The SHARING_ALL directory is left part-written.
+
+**Origin**: Pre-existing. `origin/main` (v0.22.0) has the same `MAP_SHARED` mapping and also reserves no space. The branch makes the failure a little more likely: its new `mapped_memory::clear()` punches holes (`FALLOC_FL_PUNCH_HOLE`) across the shared backing file, so pages written after a clear need disk space again when they fault. Commit ff9ac85 on the branch ("fix: let SIGBUS terminate the JSON-RPC server") deliberately keeps the current kill-on-SIGBUS behaviour and leaves graceful recovery for later.
+
+**Area**: os-mapped-memory / machine load with `SHARING_ALL`, both in-process (C API, Lua, CLI) and in the JSON-RPC server.
+
+**Category**: Crash / robustness: an uncontrolled process kill on ENOSPC instead of a returned error.
+
+**Location**:
+- `src/os-mapped-memory.cpp:161-182`: the backing file is checked only by `st_size` against the expected length. Sparse files pass, and no space is reserved.
+- `src/os-mapped-memory.cpp:187`, `:227`, `:253`: `MAP_SHARED` mmap of the backing file.
+- `src/os-mapped-memory.cpp:536-566`: `mapped_memory::clear()` (added on the branch) punches holes in the shared backing file.
+- `src/machine.cpp:1730-1775`: `machine::write_memory` does a plain `memcpy` into the shared mapping, which faults with SIGBUS on ENOSPC.
+- `src/jsonrpc-remote-machine.cpp:328`: SIGBUS is deliberately not handled, so the server process dies.
+
+**Evidence**: `test.lua` runs `child.lua` inside `unshare -m`, on a private 60 MiB tmpfs. The child stores a machine with 64 MiB of RAM there; the directory takes about 33 MiB because the RAM file is sparse. It then reloads the machine with `cartesi.SHARING_ALL` and calls `write_memory` one 4 KiB page at a time, wrapping each call in `pcall`. After about 6-7k pages the tmpfs is full and the child is killed by SIGBUS. `pcall` never sees an error. Run with `eval $(make -s env); lua5.4 bugs/w2b-04-sharing-all-enospc-sigbus/test.lua` as root; it takes about 0.2 s and exits 1:
+```
+stored; df:
+tmpfs              61440 33676     27764  55% .../mnt
+pages written: 2048
+pages written: 4096
+pages written: 6144
+Bus error
+EXIT=135
+BUG: process killed by SIGBUS (exit 135) on write_memory to SHARING_ALL machine when disk fills; no error returned
+```
+
+**Scenario**: A PRT validator, a Dave node, or anything following `doc/recipes/prt.lua` (lines 1021, 1113, 1172) loads its epoch machine in-process with `SHARING_ALL`. If the host disk fills up while the guest touches fresh RAM or flash pages during `run`, or while the node calls `write_memory` / `send_cmio_response`, the node process is killed with a bare "Bus error". There is no log line and no error to handle. The working directory is left torn in the middle of a step. A Rollups Node or app using a `cartesi-jsonrpc-machine` with shared stores sees the connection drop and gets no reason for it. CLI users running `cartesi-machine` with shared stores see the same crash.
+
+**Possible solution**: Choose one or combine:
+- Optionally reserve the backing file's blocks for shared-writable mappings on load and after `clear()`: `posix_fallocate`/`fallocate(mode=0)`, enabled by a runtime flag such as `preallocate`. This turns ENOSPC into a load-time `std::system_error`, at the cost of giving up sparseness.
+- Before load or `run`, check free space with `statvfs` against the number of hole blocks (`SEEK_HOLE`/`SEEK_DATA`), and warn or fail early.
+- At minimum, document that `SHARING_ALL` needs headroom of up to the full RAM and flash sizes, and have the JSON-RPC server log a clear "SIGBUS on mapped memory (disk full?)" message before it dies, using a `sigaction` handler that only writes and calls `_exit`.
+
+Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not recommended.
+
+**Severity**: Low. Both reviewers rated it low and the prover rated it medium. It needs a full host disk, which stops the node in any case. Hashes, proofs and step logs are never wrong. The torn directory is the same outcome as any other crash during a `SHARING_ALL` run, which nodes already have to recover from via snapshots. The practical cost is a sudden kill that is hard to diagnose, instead of a clean error.
+
+**Risks**: Of the bug: an operator whose disk fills sees validators die with no explanation, and the shared working directory is left inconsistent, so recovery depends on a good snapshot or clone existing. Of the fix: preallocating removes the disk savings of sparse RAM and flash images, which can be several GiB per machine and per snapshot. Calling `fallocate` after `clear()` undoes the point of punching holes. A SIGBUS handler that tries to resume execution can corrupt state or loop on the faulting instruction.
+
+**Proof of concept**: `bugs/w2b-04-sharing-all-enospc-sigbus/test.lua` (driver: makes a private mount namespace and a 60 MiB tmpfs; needs root) and `bugs/w2b-04-sharing-all-enospc-sigbus/child.lua` (stores, reloads with `SHARING_ALL`, and writes pages). Run from the repo root: `eval $(make -s env); lua5.4 bugs/w2b-04-sharing-all-enospc-sigbus/test.lua`. Exit 1 means the bug reproduced (SIGBUS); exit 0 means it is fixed (`write_memory` raised an error, or every page was written); exit 2 means `unshare`/`mount` were unavailable.
+
+**ID**: `w2b-04-sharing-all-enospc-sigbus`

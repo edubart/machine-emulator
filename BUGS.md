@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-30 confirmed issues: 3 high, 9 medium, 18 low.
+31 confirmed issues: 3 high, 9 medium, 19 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -55,6 +55,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B29](#b29-frontier-api-accepts-heights-above-the-tree-height-and-silently-grows-the-frontier) | low | pre-existing | Lua cartesi.hash-tree (frontier) | Frontier API accepts heights above the tree height and silently grows the frontier | `bugs/lua-17-frontier-height-args-unvalidated/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
+| [B31](#b31-a-failed-expansion-store-is-never-retried-by-later-frontier_forest_store-calls) | low | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | A failed expansion store is never retried by later frontier_forest_store calls | `bugs/lua-20-failed-expansion-store-never-retried/` |
 
 ## Issues
 
@@ -240,6 +241,7 @@ Earlier timed kills (no gdb) of a 64 MiB loop made the later load fail in 5 of 6
 - `rpc-13-phtc-borrowed-unloadable`: run with `eval $(make -s env); lua5.4 bugs/rpc-13-phtc-borrowed-unloadable/test.lua; lua5.4 bugs/rpc-13-phtc-borrowed-unloadable/kill_test.lua 512`. Unloadable-directory mode.
 - `rpc-12-crash-during-update-stale-dense`: run with `eval $(make -s env); lua5.4 bugs/rpc-12-crash-during-update-stale-dense/test_stale_dense.lua; bugs/rpc-12-crash-during-update-stale-dense/test_sigkill_gdb.sh`. Silent wrong-root mode (stale dense inner nodes).
 - `api-02-phtc-borrowed-unrecoverable-even-with-clear`: run with `eval $(make -s env); lua5.4 bugs/api-02-phtc-borrowed-unrecoverable-even-with-clear/test.lua`. Unloadable-directory mode.
+- `api-01-kill-during-hash-update-stale-root`: run with `eval $(make -s env); lua5.4 bugs/api-01-kill-during-hash-update-stale-root/test.lua; lua5.4 bugs/api-01-kill-during-hash-update-stale-root/test-boundary.lua`. Silent wrong-root mode. It also shows that the reloaded root is often exactly the root from before the interrupted write, so a node that compares against the previous known state hash would accept it, and that this mode is pre-existing on main.
 
 **Related**: [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).
 
@@ -1817,3 +1819,47 @@ assert(math.type(h) == "integer" and h >= 0 and h <= #frontier - 1, "subtree hei
 **Reviewer note**: A separate review panel (`ht-05-verify-hash-tree-misses-inner-nodes`) reproduced the same behavior but rejected it 2 to 1, arguing that `verify_hash_tree` is meant to check dirty-page tracking rather than the whole tree. This panel confirmed it. It is listed as low so that readers can weigh both views.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree).
+
+### B31. A failed expansion store is never retried by later frontier_forest_store calls
+
+**Title**: After a failed expansion store, `frontier_forest_expand_leaf` leaves the expansion only in memory, and no later `frontier_forest_store` writes it
+
+**Problem:** `frontier_forest_expand_leaf` puts the replacement subtree in the in-memory forest (`values[index] = replacement`) before it calls `store_expansion`. If `store_expansion` raises, for example when `write_file` hits a `sync_file`, write or rename failure such as ENOSPC or EIO, the forest stays expanded in memory but the replacement's `<hash>.json` file is never written. An earlier store already put the fixed-point tree that holds the leaf, and every tree above it, in `forest.durable`. That map is keyed by the tree object, and changing the tree in place does not remove it. So on the next `frontier_forest_store`, `store_tree` returns at once at each durable top tree, and the walk never reaches the replacement. That store reports success and commits the frontier file, but the directory still lacks the expansion. This breaks the documented contract that "later expansions are stored there as well". After a reload, the leaf is opaque again.
+
+**Origin:** introduced by this branch (new `src/cartesi/hash-tree.lua` frontier-forest persistence).
+
+**Area:** Lua library `cartesi.hash-tree`: frontier forest persistence (`frontier_forest_expand_leaf`, `store_expansion`, `store_tree`, `frontier_forest_store`).
+
+**Category:** durability / consistency between the in-memory and stored state after an error.
+
+**Location:**
+- `src/cartesi/hash-tree.lua:894-895`: `frontier_forest_expand_leaf` assigns `values[index] = replacement` and then calls `store_expansion(forest, replacement)`, with no rollback if that call fails.
+- `src/cartesi/hash-tree.lua:578`: `store_tree` returns early with `if forest.durable[tree] ... then return end`, which hides trees below a durable tree that were never stored.
+- `src/cartesi/hash-tree.lua:606-613`: `store_expansion`.
+- `src/cartesi/hash-tree.lua:960-966`: the `frontier_forest_store` contract.
+
+**Evidence:** The test builds an outer forest of height 4 from four bundle roots at height 2 and stores it. It then makes `fs.sync_file` fail once while bundle 1 (leaves 4..7) is expanded at position 4, and catches that error with `pcall`. Next it stores again, reloads the forest and queries `(5,0)`. A control run does the same steps with no injected failure.
+```
+$ eval $(make -s env); lua5.4 bugs/lua-20-failed-expansion-store-never-retried/test_failed_expansion_store.lua
+expand_leaf with injected failure:	false	...test_failed_expansion_store.lua:35: injected transient I/O error
+in-memory node hash at (5,0):	0xb4f6c549a55037ee98548e37dbf8ee91322007c4a901157138bb753027104cb1
+bundle tree file exists after snapshot 2:	false
+reloaded node hash at (5,0):	nil	the node is below an opaque hash
+control (no failure) reloaded node hash at (5,0):	0xb4f6c549a55037ee98548e37dbf8ee91322007c4a901157138bb753027104cb1
+BUG: frontier_forest_store after a failed expansion store did not persist the in-memory expansion; ...
+```
+Exit status 1 means the bug reproduced; 0 means it is fixed. The I/O error is simulated by stubbing `fs.sync_file`, which `write_file` looks up through the shared module table on each call. Every other step uses only the public API.
+
+**Scenario:** A validator built on `cartesi.hash-tree` (a Rollups Node, a Dave-style node or another PRT player) opens a bundle during a dispute by calling `frontier_forest_expand_leaf` on a stored forest, and hits a transient disk error such as a full disk. If the node catches the error and keeps going, as a retrying event loop would, every later snapshot succeeds. After a restart, though, the reloaded forest is opaque below that bundle, and queries and proofs there fail with "the node is below an opaque hash". The node must recompute the bundle; a node with no recompute path cannot produce the proof in time. The reference node `doc/recipes/prt.lua:1748` does not catch the error, so it crashes and on restart reopens the bundle by recomputing it, which means it is not affected. Only the second variant of the claim, where a second forest changes a durable tree through a shared reference, was not shown.
+
+**Possible solution:** Make the expansion atomic with its store. If `store_expansion` fails, restore `values[index]` to the previous hash before re-raising (`local ok, err = pcall(store_expansion, ...); if not ok then values[index] = old; error(err, 0) end`). Another option is to store the replacement before assigning it to the tree. Or keep a list of pending expansions that the next `frontier_forest_store` retries, or mark the trees on the path as not durable so that `store_tree` descends again.
+
+**Severity:** low. Both reviewers agreed: hashes and proofs are never wrong, `load_tree` checks every file against its hash, and nothing is corrupted. The bug needs both a transient I/O error during an expansion and a caller that swallows it, and the worst effect is that the bundle has to be recomputed after a restart.
+
+**Risks:** Of the bug, the stored snapshot says less than the in-memory forest and nothing reports it, so a node that trusts its snapshots can lose an opened bundle across a restart and then fail to answer a dispute step if it cannot recompute it. If `sync_directory` is the call that fails, the files exist but their directory entries are never synced by a later store, which leaves a power-loss window (not tested). Of the fix, rolling back must restore the exact previous value (the raw hash), and the change must not make `store_tree` rewalk the whole durable forest on every store, which would cost time on large forests.
+
+**Proof of concept:** `bugs/lua-20-failed-expansion-store-never-retried/test_failed_expansion_store.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-20-failed-expansion-store-never-retried/test_failed_expansion_store.lua`. It uses scratch directories under `$WORKDIR`, then `$TMPDIR`, then `/tmp`, and removes them when done.
+
+**ID**: `lua-20-failed-expansion-store-never-retried`
+
+**Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files), [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees).

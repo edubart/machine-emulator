@@ -6,8 +6,7 @@ introduces and bugs that already existed in the APIs it touches or that the PRT 
 (`doc/recipes/prt*.lua`) was not reviewed.
 
 Each issue was proposed by a bug-hunting agent, reproduced by a separate agent with a test case, and confirmed by
-independent reviewers who tried to disprove it. Entries are added as soon as they are confirmed, so the list is
-ordered by confirmation time, not by severity.
+independent reviewers who tried to disprove it. Issues are numbered in the order they were confirmed. The summary table is sorted by severity.
 
 Severity scale:
 
@@ -20,12 +19,26 @@ Proofs of concept live under `bugs/<id>/`. Run them from the repo root after bui
 from `eval $(make -s env)` and `CARTESI_IMAGES_PATH` pointing at a directory with `linux.bin` and `rootfs.ext2`.
 A test exits non-zero and prints a `BUG:` line while the bug is present.
 
+## Summary
+
+8 confirmed issues: 2 high, 4 medium, 2 low.
+
+| # | Severity | Origin | Area | Issue | Proof of concept |
+|---|---|---|---|---|---|
+| [B01](#b01-stale-page-hash-tree-cache-after-a-mixed-sharing-session-yields-wrong-proofs) | high | pre-existing | Hash tree (page cache, store/load) | Stale page hash-tree cache after a mixed-sharing session yields wrong proofs | `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/` |
+| [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
+| [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
+| [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
+| [B06](#b06-frontier_forest_store-commits-truncated-tree-files-on-write-errors) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | frontier_forest_store commits truncated tree files on write errors | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
+| [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
+| [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
+| [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
+
 ## Issues
 
+### B01. Stale page hash-tree cache after a mixed-sharing session yields wrong proofs
 
-<a id="ht-02-phtc-stale-entries-after-mixed-sharing-session"></a>
-
-### Persisted page hash-tree cache keeps stale entries after a mixed-sharing session, so get_proof and uarch-cycle root hashes come out wrong while get_root_hash and verify_hash_tree pass
+**Title**: Persisted page hash-tree cache keeps stale entries after a mixed-sharing session, so get_proof and uarch-cycle root hashes come out wrong while get_root_hash and verify_hash_tree pass
 
 **Problem**: The page hash-tree cache (phtc) is reused across store/load with no check that its entries still match the memory of the range they describe. The only guard is in the `hash_tree` constructor. It evicts an entry only when the range's `shared` flag *in the session now loading* differs from the cache's `shared` flag. Entries go stale in an earlier session, one where the phtc and a range were persisted differently. Two cases:
 - RAM shared, hash tree private: writes reach the RAM `.bin/.dht/.dpt` files, but the phtc on disk keeps the old page hashes.
@@ -90,11 +103,11 @@ The honest player then commits to, or tries to prove, a state that does not matc
 
 **Proof of concept**: `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua` (get_proof, both routes) and `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua` (collect_uarch_cycle_root_hashes). Run them from the repo root with `eval $(make -s env); lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua && lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua`. Both use temporary directories under the system temp dir, create a phtc file of about 50 MB, and print `BUG:` lines and exit 1 while the bug is present.
 
-ID: `ht-02-phtc-stale-entries-after-mixed-sharing-session`
+**ID**: `ht-02-phtc-stale-entries-after-mixed-sharing-session`
 
-<a id="ht-03-persisted-sparse-marked-flag-stale-root"></a>
+### B02. Crash in sparse-tree update freezes the root hash of a shared hash tree
 
-### A crash inside `update_sparse_tree` leaves transient `marked` flags and stale inner hashes in a shared `hash_tree.sht`; the loader accepts them and the root hash stays silently wrong (`verify_hash_tree` still returns true)
+**Title**: A crash inside `update_sparse_tree` leaves transient `marked` flags and stale inner hashes in a shared `hash_tree.sht`; the loader accepts them and the root hash stays silently wrong (`verify_hash_tree` still returns true)
 
 - **Problem**: `update_sparse_tree` uses `node.marked` in the sparse nodes as a transient "already queued" flag. It sets the flag when it pushes a node and clears it only when it pops that node, and it enqueues a parent only when `marked == 0`. The sparse nodes live directly in the `hash_tree.sht` mapping, which is `MAP_SHARED` when a machine is stored or loaded with `SHARING_ALL` or backed by a directory. If the process dies between push and pop, the file keeps `marked = 1`. The loading constructor rejects only `marked > 1`. It never resets the flag and never rehashes inner nodes. From then on that node (for example the root) is never enqueued again, so its hash is frozen across every later update. A kill can also land after the address-range leaf hashes were copied but before the inner nodes were rehashed (the SIMD queue defers hashing until `flush()`). On reload the leaves already match the dense roots, so nothing is enqueued and the stale inner nodes and root survive even when the flag is 0. `verify_hash_tree` never checks sparse inner nodes or the root against their children. Its leaf-vs-dense-root mismatch branch only prints a message and does not set `ret = false`, so it returns true on the corrupted tree. Only `cm_clear_hash_tree` (`hash_tree::clear`) repairs it.
 - **Origin**: pre-existing. The branch did not introduce the flag logic.
@@ -126,11 +139,13 @@ ID: `ht-02-phtc-stale-entries-after-mixed-sharing-session`
 - **Proof of concept**: `bugs/ht-03-persisted-sparse-marked-flag-stale-root/test.lua` (driver), `bugs/ht-03-persisted-sparse-marked-flag-stale-root/kill.py` (gdb script: watchpoint on the root `marked` field, then SIGKILL), `bugs/ht-03-persisted-sparse-marked-flag-stale-root/child2.lua` (child that loads, writes and hashes). Part A needs `gdb` and is skipped without it; Part B always runs. The test exits 1 when the bug reproduces. Run from the repo root:
   `eval $(make -s env); timeout 200 lua5.4 bugs/ht-03-persisted-sparse-marked-flag-stale-root/test.lua`
 
-ID: `ht-03-persisted-sparse-marked-flag-stale-root`
+**ID**: `ht-03-persisted-sparse-marked-flag-stale-root`
 
-<a id="ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover"></a>
+**Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
-### A process kill during a hash-tree update of a SHARING_ALL machine corrupts the stored directory: it becomes unloadable even with clear_hash_tree=true, or it loads with a silently wrong root hash
+### B03. Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong
+
+**Title**: A process kill during a hash-tree update of a SHARING_ALL machine corrupts the stored directory: it becomes unloadable even with clear_hash_tree=true, or it loads with a silently wrong root hash
 
 **Problem**: When a machine is loaded with `SHARING_ALL`, or created in a directory, its hash-tree state lives in `MAP_SHARED` files: the page hash-tree cache (`hash_tree.phtc`), the dense hash trees (`.dht`) and the dirty page trees (`.dpt`). The updates to these files are not crash-safe. Two failure modes follow from a kill during an update.
 - **Unloadable directory.** `update_dirty_pages` borrows a whole batch of cache entries (up to `phtc_size`, 2048 by default) and keeps them borrowed while every page in the batch is hashed. The per-entry `m_borrowed` flag and the intrusive LRU links are part of the persisted metadata. If the process is SIGKILLed, OOM-killed or stopped in that window, the file keeps `borrowed=1` entries. The new `check_metadata()` then throws `corrupted page hash-tree cache: borrowed entry` (or an LRU/payload-index error for half-spliced links) inside the `page_hash_tree_cache` constructor. That constructor runs first in the `hash_tree` constructor, which runs in the `machine` member-initializer list. The new `clear_hash_tree` runtime option runs only at the end of the `machine` constructor body, so it can never recover. The directory cannot be loaded with any sharing mode, and copies made by `clone_stored` inherit the problem. Deleting `hash_tree.phtc` fails too (`unable to open backing file`). The only repair is to replace it by hand with an all-zero file of the same size. Even `get_root_hash` on a freshly loaded machine is enough to open the window, because `mark_always_dirty_pages` always marks pages dirty.
@@ -192,13 +207,13 @@ Earlier timed kills (no gdb) of a 64 MiB loop made the later load fail in 5 of 6
 
 **Proof of concept**: `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/test-phtc-crash.lua`, with helpers `child.lua` (the process that gets killed) and `killat.py` (gdb Python script that sends SIGKILL at the N-th hit of a function). Run from the repo root with `eval $(make -s env); lua5.4 bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/test-phtc-crash.lua`. It needs `gdb` with Python for the deterministic kill points; without gdb, case 1 falls back to a timed SIGKILL and case 2 is skipped. It uses a temporary directory under the system temp dir and prints `BUG:` lines and exits 1 while the bug is present.
 
-ID: `ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover`
+**ID**: `ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover`
 
-Related: the sparse-tree counterpart of this crash-consistency problem is [`ht-03`](#ht-03-persisted-sparse-marked-flag-stale-root).
+**Related**: [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).
 
-<a id="ht-04-clear-hash-tree-zeroes-before-marking-dirty"></a>
+### B04. Crash during clear_hash_tree leaves zeroed hashes on clean pages
 
-### hash_tree::clear punches a range's .dht before marking its .dpt dirty, so a process kill mid-clear leaves a stored machine whose reload silently reports wrong root hashes and zero proofs
+**Title**: hash_tree::clear punches a range's .dht before marking its .dpt dirty, so a process kill mid-clear leaves a stored machine whose reload silently reports wrong root hashes and zero proofs
 
 **Problem**: `hash_tree::clear` processes each address range in this order:
 1. It zeroes the range's dense hash tree with `ar.get_dense_hash_tree().clear()`. For a shared `.dht` file this becomes `mapped_memory::clear`, which calls `fallocate(PUNCH_HOLE|KEEP_SIZE)` on the backing file.
@@ -242,11 +257,13 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 
 **Proof of concept**: `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/run.sh`, `test.lua` and `killshim.c`. `run.sh` builds the shim into a temporary directory and runs `test.lua`. Run it from the repo root with `eval $(make -s env); sh bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/run.sh`. It needs `gcc` and `lua5.4`, exits 1 with `BUG:` lines while the defect is present, and exits 0 once it is fixed.
 
-ID: `ht-04-clear-hash-tree-zeroes-before-marking-dirty`
+**ID**: `ht-04-clear-hash-tree-zeroes-before-marking-dirty`
 
-<a id="ht-08-filesystem-write-file-swallows-close-errors"></a>
+**Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
-### `cartesi.filesystem.write_file` reports success when the final flush fails, so CLI hash and proof files can be left empty
+### B05. cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files
+
+**Title**: `cartesi.filesystem.write_file` reports success when the final flush fails, so CLI hash and proof files can be left empty
 
 **Problem:** `filesystem.write_file` opens the file as a to-be-closed variable (`local f <close> = ...`), calls `assert(f:write(data))`, and never closes the file explicitly. For small payloads (32-byte hashes, proofs, reports) `f:write` only fills the stdio buffer, so it succeeds. The real `write(2)` happens in `fclose`, which runs from the `<close>` handler. Lua 5.4's file `__close` (the same function as `__gc`) throws away `fclose`'s result. So ENOSPC, EFBIG, EIO or quota errors are lost: `write_file` returns normally and leaves an empty or truncated file. `write_temp_file` wraps `write_file` in `pcall`, so it cannot see the error either. The CLI then exits 0.
 
@@ -303,11 +320,13 @@ eval $(make -s env); sh bugs/ht-08-filesystem-write-file-swallows-close-errors/t
 ```
 Both exit 1 while the bug is present and 0 once it is fixed.
 
-ID: `ht-08-filesystem-write-file-swallows-close-errors`
+**ID**: `ht-08-filesystem-write-file-swallows-close-errors`
 
-<a id="ht-07-hashtree-lua-write-file-ignores-write-error"></a>
+**Related**: [B06](#b06-frontier_forest_store-commits-truncated-tree-files-on-write-errors).
 
-### hash-tree.lua `write_file` ignores `file:write` errors, so `frontier_forest_store` commits a truncated tree file that later stores never repair
+### B06. frontier_forest_store commits truncated tree files on write errors
+
+**Title**: hash-tree.lua `write_file` ignores `file:write` errors, so `frontier_forest_store` commits a truncated tree file that later stores never repair
 
 **Problem:** The durable `write_file` helper in `cartesi.hash-tree` calls `temporary.file:write(contents)` and never checks the result. Lua's `file:write` does not raise on failure; it returns `nil, err`. When a large `fwrite` fails partway (ENOSPC, EFBIG, EDQUOT), glibc returns a short count and leaves nothing pending in the stdio buffer. The later `fs.sync_file` therefore succeeds (`fflush` returns 0 and `fsync` works). `temporary:rename` in `cartesi.filesystem` also ignores the result of `self.file:close()`, so the truncated temporary file is renamed into place. This breaks the helper's own guarantee that "the name never appears with incomplete contents". `store_tree` writes a tree file only `if not fs.exists(path)`, and files are named by the tree's hash, so no later store rewrites or checks the corrupt file, even in a fresh process with free space. The next `frontier_forest_store` then commits a new frontier file (the store's commit point) that references the unloadable tree.
 
@@ -353,13 +372,13 @@ The prover patched a copy with `assert(temporary.file:write(contents))`. With th
 
 **Proof of concept:** `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 with `OK:` once it is fixed. It needs `bash` and `ulimit -f` (RLIMIT_FSIZE) and uses a `mktemp -d` work directory that it removes afterwards.
 
-ID: `ht-07-hashtree-lua-write-file-ignores-write-error`
+**ID**: `ht-07-hashtree-lua-write-file-ignores-write-error`
 
-Related: the same unchecked-close pattern in `cartesi.filesystem.write_file` is [`ht-08`](#ht-08-filesystem-write-file-swallows-close-errors).
+**Related**: [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files).
 
-<a id="ht-09-remove-stored-not-idempotent"></a>
+### B07. Interrupted remove_stored leaves a directory that blocks the name forever
 
-### `remove_stored` is not idempotent: after an interrupted removal it cannot remove the leftover directory, and that directory blocks `store`/`clone_stored`/`rename_stored` to the same name
+**Title**: `remove_stored` is not idempotent: after an interrupted removal it cannot remove the leftover directory, and that directory blocks `store`/`clone_stored`/`rename_stored` to the same name
 
 **Problem:** `machine::remove_stored` calls `for_each_stored_filename(dir, os::remove_file)`, then `os::remove_directory(dir)`. `for_each_stored_filename` first runs `machine_config::load(dir)`, which needs `config.json`. It then unlinks a fixed list of files: the data, dht and dpt files of every backing store, then the sht and phtc files, and `config.json` last. `os::remove_file` throws on any `unlink` error, including `ENOENT`. If the process dies partway through (SIGKILL, OOM kill, power loss), the next `remove_stored` call fails one of two ways:
 - if `config.json` is still there, it throws on the first file that is already gone;
@@ -411,11 +430,11 @@ exit=1
 
 **Proof of concept:** `bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It works in a fresh `mktemp -d` directory, or in `$WORKDIR` if that is set. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/ht-09-remove-stored-not-idempotent/test_remove_stored_idempotent.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: remove_stored is idempotent` once fixed.
 
-ID: `ht-09-remove-stored-not-idempotent`
+**ID**: `ht-09-remove-stored-not-idempotent`
 
-<a id="ht-10-clone-stored-emlink-no-fallback"></a>
+### B08. clone_stored fails with EMLINK instead of falling back to a copy
 
-### `clone_stored` fails with EMLINK ("Too many links") instead of copying once about 65000 stored clones share one hard-linked read-only file
+**Title**: `clone_stored` fails with EMLINK ("Too many links") instead of copying once about 65000 stored clones share one hard-linked read-only file
 
 **Problem:** `os::clone_file` handles a source with no write bits by hard-linking it with a plain `link()`. It falls back to `copy_file` only when the error is `ENOTSUP`, `EXDEV` or `EPERM`, and rethrows every other errno. `machine::store` always writes the PMAs backing file (`0000000000010000-1000.bin`) read-only, and it does the same for read-only flash drives and NVRAM. As a result, `machine::clone_stored` (`cm_clone_stored`) hard-links that file on every clone, and the template, its clones and their clones all share one inode. ext4 allows at most 65000 links per inode. At that point `link()` returns `EMLINK`, the error is rethrown as `std::system_error("Too many links")`, and `clone_stored` fails. A plain copy would have worked. The failure then hits every clone from the template or from any of its descendants, not just one source, for as long as that many links exist. The Lua `cartesi.filesystem.clone_file` binding calls the same function and fails the same way.
 
@@ -454,4 +473,4 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 **Proof of concept:** `bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`. It needs `python3`, and the `bugs/` directory must be on ext4 or another filesystem with a per-inode link limit. Its temporary files go in a subdirectory next to the test and are removed afterwards. Run from the repo root:
 `eval $(make -s env); lua5.4 bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`
 
-ID: `ht-10-clone-stored-emlink-no-fallback`
+**ID**: `ht-10-clone-stored-emlink-no-fallback`

@@ -21,13 +21,14 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-31 confirmed issues: 3 high, 9 medium, 19 low.
+34 confirmed issues: 4 high, 9 medium, 21 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
 | [B01](#b01-stale-page-hash-tree-cache-after-a-mixed-sharing-session-yields-wrong-proofs) | high | pre-existing | Hash tree (page cache, store/load) | Stale page hash-tree cache after a mixed-sharing session yields wrong proofs | `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/` |
 | [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
 | [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files) | high | introduced by branch | Lua cartesi.hash-tree and cartesi.filesystem (durable writes) | frontier_forest_store and fs.sync_file ignore write errors and commit truncated files | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
+| [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
@@ -56,6 +57,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B29](#b29-frontier-api-accepts-heights-above-the-tree-height-and-silently-grows-the-frontier) | low | pre-existing | Lua cartesi.hash-tree (frontier) | Frontier API accepts heights above the tree height and silently grows the frontier | `bugs/lua-17-frontier-height-args-unvalidated/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B31](#b31-a-failed-expansion-store-is-never-retried-by-later-frontier_forest_store-calls) | low | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | A failed expansion store is never retried by later frontier_forest_store calls | `bugs/lua-20-failed-expansion-store-never-retried/` |
+| [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
+| [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for files directly under the filesystem root | `bugs/lua-24-hash-tree-root-parent-directory/` |
 
 ## Issues
 
@@ -1867,3 +1870,212 @@ Exit status 1 means the bug reproduced; 0 means it is fixed. The I/O error is si
 **ID**: `lua-20-failed-expansion-store-never-retried`
 
 **Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files), [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees).
+
+### B32. Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes
+
+**Title**: Interrupted store or clone_stored leaves a torn hash_tree.phtc that loads silently and gives wrong hashes
+
+**Problem**: If `store()` or `clone_stored()` is killed while it writes `hash_tree.phtc`, the file is left full-size with a valid header and metadata but zeroed page payloads. A later load accepts it without error. The page hash-tree cache then treats the zeroed payloads as valid cached pages, and the machine silently computes wrong root hashes. Proofs and uarch cycle hashes that read the same payloads are also wrong.
+
+Why this happens:
+- `hash_tree.phtc` is the last file written (store) or copied (clone_stored). Every other file is already complete at that point.
+- `os::create_file` and `os::copy_file` first `ftruncate` the file to its full length, then `pwrite` 4 KiB blocks in order. `clone_file` falls back to `copy_file` when reflink is not available, as on ext4.
+- The initialized tag, the LRU and the entry metadata sit at the front of the file, so they are written first. A kill partway through leaves them valid, followed by zeros.
+- At load, the `page_hash_tree_cache` constructor checks only the tag and `check_metadata()`. It never checks the payloads.
+- `enqueue_hash_entry` rehashes only words that differ from the cached page. Zero words in RAM match the zeroed payload, so their leaves keep a zero hash instead of keccak(0). On an LRU eviction, a torn payload is also reused as the diff base for the page newly assigned to that entry, so the corruption spreads beyond the original hits.
+
+A torn phtc is the only partial state that loads silently. An interruption at any earlier point leaves later files missing, and the load fails.
+
+**Origin**: pre-existing. The write order and payload trust are in code this branch touches (store, clone_stored, page hash-tree cache).
+
+**Area**: Hash tree persistence (page hash-tree cache, `store` / `clone_stored`, `os-filesystem`).
+
+**Category**: Correctness / crash consistency (silent wrong state hash and proofs).
+
+**Location**:
+- `src/machine.cpp:475-482`: `store()` writes `hash_tree.sht`, then `hash_tree.phtc`, last.
+- `src/machine.cpp:535-538`: `clone_stored()` clones the sht, then the phtc, last.
+- `src/os-filesystem.cpp:348-390`: `create_file` (`ftruncate` to full size, then sequential `pwrite`).
+- `src/os-filesystem.cpp:397-490`: `copy_file`.
+- `src/os-filesystem.cpp:575+`: `clone_file`, which falls back to `copy_file` without reflink.
+- `src/page-hash-tree-cache.hpp:414-455`: the constructor validates only the initialized tag and `check_metadata()`.
+- `src/page-hash-tree-cache.hpp:340-375`: `enqueue_hash_entry` diffs against the untrusted cached page.
+
+**Evidence**: The test makes no hand edits to any file. A child `lua5.4` process runs `machine:store(dir, SHARING_ALL)` or `cartesi.machine:clone_stored(src, dst)` under an `LD_PRELOAD` shim, which sends a real SIGKILL after N `pwrite()` calls to `hash_tree.phtc`. The machine has 16 MiB of RAM and the default `phtc_size` of 4096, which makes a phtc of about 50 MB. The parent then:
+1. loads the directory, which succeeds;
+2. writes one word per RAM page;
+3. compares the root with an in-memory reference machine and with the same directory loaded with `clear_hash_tree = true`.
+
+Output of `eval $(make -s env); sh bugs/api-05-torn-phtc-silent-wrong-hash/run.sh` (default kill point 4000):
+```
+child store exited: nil exit 137
+[store] load accepted; root on load matches reference: false
+[store] root after touching pages: b2117719d1c48798bf6237ce4eaf64b6a2680eea9dd26b7fb105862d35b90269
+[store] reference root           : c3b78b028e6361ae065e47902f6c753a06d8fabe221bb47a84f7f91c0767c41e
+[store] same dir, clear_hash_tree: c3b78b028e6361ae065e47902f6c753a06d8fabe221bb47a84f7f91c0767c41e
+BUG: [store] torn hash_tree.phtc accepted at load; machine computes a wrong root hash (clear_hash_tree rebuild matches reference)
+[intact-source] root after touching pages: c3b78b028e63...c41e   (control: complete store is correct)
+child clone_stored exited: nil exit 137
+[clone_stored] root after touching pages: b2117719d1c4...0269
+BUG: [clone_stored] torn hash_tree.phtc accepted at load; machine computes a wrong root hash (clear_hash_tree rebuild matches reference)
+```
+Exit status is 1.
+
+With `KILL_AFTER_PHTC=12000`, the output starts with `[store] load accepted; root on load matches reference: true`. The root after touching pages is still wrong (`60289b49...` vs `c3b78b02...`). So the usual "load, then assert root == expected" check does not catch it.
+
+With `VERIFY=1`, `verify_hash_tree()` returns false, but nothing calls it at load.
+
+**Scenario**: A Rollups Node, Dave or other validator snapshots with `cm_store`, or with `cm_clone_stored` on ext4, straight into its final snapshot directory. The process is killed (OOM killer, container stop timeout, crash) during the roughly 50 MB phtc write. On restart, the node loads that directory with no error, and the root may even match the expected state hash. Then it processes inputs or bisects a dispute, and commits wrong state hashes and proofs. An honest player can lose the dispute this way, with no error anywhere.
+
+The reference PRT node (`doc/recipes/prt.lua`) is not affected. It stores or clones into a temporary directory, then calls `sync_stored` and `rename_stored`, and deletes leftover temporary directories. However, nothing in the `cm_store` / `cm_clone_stored` API says they are not crash-atomic.
+
+**Possible solution**: Make the phtc write all-or-nothing. Either option works:
+- Write the payloads and metadata first and the initialized tag last, with an fsync before the tag write when durability is needed. A torn file then fails the tag check, or is reinitialized as empty.
+- Or write and copy to a temporary name and rename it into place.
+
+As defense in depth:
+- validate the active entries' payloads at load (re-hash each page and compare with its stored page root, dropping mismatched entries), or add per-entry checksums;
+- document that `store` / `clone_stored` are not atomic and that the temp-dir, `sync_stored`, `rename_stored` protocol is required.
+
+**Severity**: high. Both reviewers agree. The impact is silent wrong state hashes and proofs, which can lose a PRT dispute, and some kill points pass the post-load root check. It is not critical because it needs both a process kill inside the phtc write window and an integrator that does not use the documented temp-dir, sync and rename protocol.
+
+**Risks**:
+- Bug: silent divergence of a validator's state hash and proofs after a realistic process kill. The only signal is `verify_hash_tree()`, which nobody calls at load and which is very noisy on stderr.
+- Fix: writing the tag last only changes write order. Note that a reinitialized (empty) cache must still be consistent with the stored sht, or the sht must be rebuilt. Otherwise dropping the cache could expose other stale-hash issues. Payload validation at load costs about one page hash per active entry (4096 by default), which adds to load time. A temp-file-plus-rename approach needs care with `SHARING_ALL` mappings and with cleaning up leftover temporary files.
+
+**Proof of concept**: `bugs/api-05-torn-phtc-silent-wrong-hash/run.sh`, `test_torn_phtc.lua` and `killshim.c`. `run.sh` builds the `LD_PRELOAD` shim into a `mktemp -d` directory and runs `test_torn_phtc.lua` with its work directory there. It needs `gcc` and `lua5.4`, and creates two phtc files of about 50 MB. The `clone_stored` case needs the temp dir on a filesystem without reflink, such as ext4, and is skipped otherwise. Optional settings: `KILL_AFTER_PHTC=<n>` sets the kill point, and `VERIFY=1` also runs `verify_hash_tree()`. Run from the repo root:
+```
+eval $(make -s env); sh bugs/api-05-torn-phtc-silent-wrong-hash/run.sh
+```
+While the bug is present it prints `BUG:` lines and exits 1. Once fixed it prints `OK: no wrong hash` and exits 0.
+
+**ID**: `api-05-torn-phtc-silent-wrong-hash`
+
+**Related**: [B01](#b01-stale-page-hash-tree-cache-after-a-mixed-sharing-session-yields-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
+
+### B33. Lua bindings call luaL_error inside C++ catch handlers and leak the exception
+
+**Title**: Lua bindings call `luaL_error` inside C++ `catch` handlers, so every failed call leaks the exception object (about 200-500 B each)
+
+**Problem:** Many Lua bindings are function-try-blocks with this handler:
+```cpp
+} catch (const std::exception &e) {
+    luaL_error(L, "%s", e.what());
+    return 1;
+}
+```
+Lua is built as C, so `luaL_error` raises the error with `longjmp`. Calling it inside the handler jumps straight out of the handler, which means `__cxa_end_catch` never runs. The exception object from `__cxa_allocate_exception` is never freed, and neither is anything it owns, such as the message string of a nlohmann `parse_error` or a `std::system_error`. The entry also stays on the thread's `caughtExceptions` chain. Formally this is undefined behaviour: a `longjmp` out of a handler, across frames with non-trivial destructors. Each failed call leaks memory that `collectgarbage` cannot reclaim. Most `machine` methods are not affected, because they call `cm_*`, check the returned error code and call `luaL_error` outside any handler.
+
+**Origin:** Mixed.
+- Introduced by this branch: the new `cartesi.filesystem` core module (`src/clua-cartesi-filesystem.cpp`, which is not on `origin/main`) repeats the pattern in all 8 of its functions.
+- Pre-existing: the sites in `src/clua-cartesi.cpp` (the same 7 handlers exist on `origin/main`) and in `src/clua-i-machine.cpp`.
+
+**Area:** Lua bindings. These are `cartesi.filesystem`; `cartesi.tobase64`, `frombase64`, `tohex`, `fromhex`, `tojson`, `fromjson` and `new`; and the `clua-i-machine` helpers (register-name conversion, schema dictionary, `clua_tojson`, `clua_fromjson`).
+
+**Category:** Resource leak (unbounded native memory growth on error paths) and undefined behaviour.
+
+**Location:**
+- `src/clua-cartesi-filesystem.cpp:41-43, 49-51, 63-65, 73-75, 84-86, 105-107, 125-127, 133-135`
+- `src/clua-cartesi.cpp:123-125, 135-137, 147-149, 159-161, 171-173, 181-183, 192-194` (tobase64, frombase64, tohex, fromhex, tojson, fromjson, new)
+- `src/clua-i-machine.cpp:228-229` (register conversion), `605-606` (schema dictionary), `634-635` (`clua_tojson`), `650-651` (`clua_fromjson`), `1188`
+
+**Evidence:** The test runs 200,000 failing `pcall`s per case. It measures `VmRSS` after two full GC cycles and compares against a control case that fails through `luaL_argerror`, with no C++ exception involved. The control grows by 0 KiB. The three exception paths grow linearly:
+```
+$ eval $(make -s env); timeout 300 lua5.4 bugs/lua-22-lual-error-in-catch-leaks-exceptions/test.lua
+control: cartesi.fromhex(non-string)     RSS 14432 KiB -> 14432 KiB (+0 KiB, 0.0 bytes/failed call)
+cartesi.fromjson('{bad')                 RSS 15180 KiB -> 99900 KiB (+84720 KiB, 433.8 bytes/failed call)
+cartesi.fromhex('zz')                    RSS 100092 KiB -> 138756 KiB (+38664 KiB, 198.0 bytes/failed call)
+filesystem.create_directory(bad)         RSS 139552 KiB -> 240096 KiB (+100544 KiB, 514.8 bytes/failed call)
+BUG: cartesi.fromjson('{bad') leaks ~434 bytes per failed call (...)
+BUG: filesystem.create_directory(bad) leaks ~515 bytes per failed call (...)
+exit=1
+```
+`/usr/bin/lua5.4` imports `_setjmp` and `__longjmp_chk` and does not link libstdc++, which confirms it is a C build that raises errors with `longjmp`.
+
+**Scenario:** The leak hits a long-running Lua process that handles expected failures with `pcall`. Examples:
+- a Lua PRT validator, or a JSON-RPC client script, that parses JSON or hex from counterparties that may be malformed or adversarial;
+- a process that probes filesystem paths through `cartesi.filesystem`.
+
+Such a process loses a few hundred bytes for every handled failure, and memory grows without bound. An attacker who can make a Lua validator parse many bad inputs can drive memory up slowly, at roughly 2-5 million failures per GB. Hashes, proofs and machine state are not affected. The C API that the Rollups Node and Dave use does not have this pattern, so only Lua-hosted processes are affected. The `cartesi-machine` CLI usually exits on the first error, so in practice it is not affected.
+
+**Possible solution:** Never raise a Lua error while a C++ exception is still being handled. Two ways to do that:
+- Inside the `catch`, push the message onto the Lua stack with `lua_pushstring(L, e.what())`, or copy it into a buffer the function owns. Let the handler finish normally, then call `lua_error(L)` after the `try`/`catch`.
+- Factor this into a shared helper that wraps the body (for example `clua_protect(L, [&]{ ... })`), which returns a flag and calls `lua_error` after the handler.
+
+The `cm_*` wrappers already raise errors outside any handler. Also check that no C++ object with a non-trivial destructor is still alive in the frame when `lua_error` is called. Temporaries should stay owned by Lua through `clua_push_new_managed_toclose_ptr`.
+
+**Severity:** Low. Both reviewers rated it low. The leak is real and unbounded, but it happens only on error paths in the Lua bindings and it does not corrupt anything. Results stay correct, and memory becomes a problem only after millions of handled failures in one long-running Lua process.
+
+**Risks:**
+- Of the bug: slow memory growth, which could end in an OOM kill of a long-running Lua validator or tool fed many malformed inputs. In theory, stale `caughtExceptions` entries could also change what `std::current_exception()` or a bare `throw;` sees later.
+- Of the fix: low. The change is mechanical, but it touches many bindings. The fix must keep the same error messages, which callers and tests may match on. It must also keep the message alive until `lua_error` runs (push it before leaving the handler), and it must keep the existing `catch (...)` fallbacks.
+
+**Proof of concept:** `bugs/lua-22-lual-error-in-catch-leaks-exceptions/test.lua`. Run it from the repo root:
+```
+eval $(make -s env); timeout 300 lua5.4 bugs/lua-22-lual-error-in-catch-leaks-exceptions/test.lua
+```
+It exits with 1 and prints `BUG:` lines while the leak is present. It exits with 0 and prints `OK: no per-call leak detected` once the leak is fixed.
+
+**ID**: `lua-22-lual-error-in-catch-leaks-exceptions`
+
+### B34. Frontier stores fail for files directly under the filesystem root
+
+**Title**: hash-tree `frontier_store` / `frontier_forest_store` raise "unable to sync directory ''" for a file directly under `/`, after the file has already been replaced
+
+**Problem**: `get_parent_directory(path)` is `path:match("^(.*)/[^/]*$") or "."`. For a path directly under the root, such as `/frontier.json`, the capture is `""`, not `"/"`. In Lua `""` is truthy, so the `"."` fallback never applies.
+- `write_file` calls `fs.new_temporary_file("", ...)`. That still works, because the template becomes `/<prefix>.XXXXXX`. The temporary file is synced and renamed onto the target, so the new frontier is committed.
+- `frontier_store` and `frontier_forest_store` then call `fs.sync_directory("")`. `open("", O_DIRECTORY)` fails with ENOENT, so the store raises.
+
+Result: the public store APIs report failure even though the new file is already in place, and the rename is never made durable by a directory fsync. The C++ counterpart (`parent_directory` in machine.cpp, which uses `std::filesystem::path::parent_path()`) correctly returns `/`. Paths with repeated leading slashes, such as `//x`, behave the same way.
+
+**Origin**: introduced by this branch. `get_parent_directory`, `write_file` and the `sync_directory` calls do not exist in `main`'s hash-tree.lua.
+
+**Area**: Lua library `cartesi.hash-tree` (frontier and frontier-forest persistence); `cartesi-machine` CLI (`frontier:<filename>` / `outputs_frontier:<filename>` options).
+
+**Category**: correctness / durability (wrong error reporting after a commit; missing fsync).
+
+**Location**:
+- `src/cartesi/hash-tree.lua:505`: `get_parent_directory`
+- `src/cartesi/hash-tree.lua:510`: `write_file` (temporary file directory)
+- `src/cartesi/hash-tree.lua:937`: `frontier_store` → `fs.sync_directory(get_parent_directory(path))`
+- `src/cartesi/hash-tree.lua:989`: `frontier_forest_store` → `fs.sync_directory(get_parent_directory(frontier_path))`
+- `src/cartesi-machine.lua:3276`: the CLI's `store_frontier` passes the user-given filename to `hash_tree.frontier_store`
+
+**Evidence**: the test runs as root. It re-executes itself in a private mount namespace, chrooted into a tmpfs-backed overlay of `/`, so the real root is never written. Inside, it stores a frontier at `/frontier-<t>.json` and a forest frontier at `/forest-frontier-<t>.json`. Both calls raise, yet both files exist with the new contents. `sync_directory("/")` succeeds and `sync_directory("")` fails. Run command: `eval $(make -s env); lua5.4 bugs/lua-24-hash-tree-root-parent-directory/test-root-parent-directory.lua`
+```
+frontier_store(/frontier-1792962320.json): ok=false err=.../hash-tree.lua:937: unable to sync directory '': open() failed: No such file or directory file_exists=true
+frontier_forest_store(/forest-trees-1792962320, /forest-frontier-1792962320.json): ok=false err=.../hash-tree.lua:989: unable to sync directory '': open() failed: No such file or directory file_exists=true
+sync_directory('/') ok=true
+sync_directory('')  -> unable to sync directory '': open() failed: No such file or directory
+rc=1
+```
+
+**Scenario**:
+- A validator node or tool running in a container keeps its frontier at a root-level path such as `/state.json` or `/frontier.json`. Every `frontier_store` / `frontier_forest_store` raises, and every `cartesi-machine ... frontier:/frontier.json` run fails the same way.
+- A caller that treats the error as "store failed, old state still current" is wrong: the frontier has already been replaced. With `frontier_forest_store`, the trees are already written and `forest.directory` is already updated.
+- Because the directory is never fsynced, a crash shortly afterwards can lose the rename.
+- Hashes, proofs and dispute outcomes are not affected.
+
+**Possible solution**: map an empty capture to `/`, matching `std::filesystem::path::parent_path()`. For example:
+```lua
+local function get_parent_directory(path)
+    local d = path:match("^(.*)/[^/]*$")
+    if d == nil then return "." end
+    if d:match("^/*$") then return "/" end
+    return d
+end
+```
+
+**Severity**: low. Both reviewers rated it low, and the prover agrees. It only triggers for frontier files stored directly in the filesystem root, which is rare outside containers. When it triggers it fails reliably and visibly: there is a spurious error after a successful commit, plus one skipped directory fsync. It never corrupts stored data, hashes or proofs, and it does not hang.
+
+**Risks**:
+- Of the bug: callers may misjudge whether the persisted state changed, or abort at a store boundary. In root-level layouts the rename is not durable after a crash.
+- Of the fix: minimal. The helper is local to hash-tree.lua and only used for the temporary-file directory and the directory sync. Returning `/` for root-level paths gives the same temporary-file location and makes the sync succeed. Relative paths and deeper absolute paths are unchanged.
+
+**Proof of concept**: `bugs/lua-24-hash-tree-root-parent-directory/test-root-parent-directory.lua`. It must run as root and needs `unshare`, overlayfs and `chroot`. It sandboxes itself in a private mount namespace over a throwaway overlay of `/`. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/lua-24-hash-tree-root-parent-directory/test-root-parent-directory.lua
+```
+Exit status 1 together with `BUG:` lines means the bug reproduced; exit status 0 means it is fixed.
+
+**ID**: `lua-24-hash-tree-root-parent-directory`

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-80 confirmed issues: 4 high, 16 medium, 60 low.
+82 confirmed issues: 4 high, 17 medium, 61 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -45,6 +45,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B66](#b66-verifying-through-a-json-rpc-machine-object-crashes-on-short-sibling-lists-and-accepts-logs-the-local-verifier-rejects) | medium | pre-existing | JSON-RPC client (verify_*), access-log JSON | Verifying through a JSON-RPC machine object crashes on short sibling lists and accepts logs the local verifier rejects | `bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
+| [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -105,6 +106,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B78](#b78-evmu-function-signature-cache-never-evicts-entries) | low | pre-existing | Lua cartesi.evmu | evmu function-signature cache never evicts entries | `bugs/p3-12-evmu-func-sig-cache-never-evicts/` |
 | [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
 | [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
+| [B81](#b81-load-or-create-on-a-non-empty-local-machine-object-leaks-the-previous-machine-and-its-locks) | low | pre-existing | C API (local machine) | load or create on a non-empty local machine object leaks the previous machine and its locks | `bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/` |
 
 ## Issues
 
@@ -4609,6 +4611,117 @@ It exits with code 1 and prints `BUG:` lines while the defect is present, and pr
 **ID**: `p3-14-bint-new-returns-non-numeric-input`
 
 **Related**: [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264).
+
+### B81. load or create on a non-empty local machine object leaks the previous machine and its locks
+
+**Title**: Local `cm_load`/`cm_create` on a non-empty machine object leak the previous machine (fds, flocks, ~57 MiB of mappings each); `destroy()` frees only the newest one
+
+**Problem**: `local_machine::do_create` and `local_machine::do_load` run `m_machine = new machine(...)`. They do not check whether `m_machine` is already set, and they do not delete the old value. No layer above them checks either: `i_machine::create/load`, `cm_create`/`cm_load` and the Lua bindings `machine_obj_index_create`/`machine_obj_index_load` all pass the call straight through, without testing `cm_is_empty`. `cm.h` says `m` must be "an empty machine object", but nothing enforces that. So a second `create`/`load` on a loaded local object succeeds and orphans the first `machine`. The orphan keeps its mappings, its page hash-tree cache, and its open backing-file descriptors with their `flock` locks (`LOCK_EX` for `SHARING_ALL`, `LOCK_SH` otherwise). `destroy()` deletes only the newest machine and then reports `is_empty() == true`, but the leaked machine cannot be reached or released until the process exits. The JSON-RPC server rejects the same calls with `"machine exists"`, so a local machine and a remote machine behave differently under the same C API.
+
+**Origin**: pre-existing. `src/local-machine.cpp` and `cm_create`/`cm_load` in `src/cm.cpp` are the same on `origin/main` (v0.22.0).
+
+**Area**: libcartesi C API / local machine lifecycle (`cm_create`, `cm_load`, Lua `machine:create`/`machine:load`).
+
+**Category**: resource-leak (memory, file descriptors, file locks), plus an API contract that is not enforced.
+
+**Location**:
+- `src/local-machine.cpp:48-55`: `do_create`/`do_load` overwrite `m_machine` without a null check or `delete`
+- `src/cm.cpp:609-638`: `cm_create`/`cm_load` do not check that the object is empty
+- `src/clua-i-machine.cpp:1249,1334`: `machine_obj_index_create`/`machine_obj_index_load` forward the call unchecked
+- `src/cm.h:502,542`: the documented precondition, "Pointer to an empty machine object"
+- `src/jsonrpc-remote-machine.cpp:914-917,944-947`: the remote server does enforce it (`"machine exists"`)
+
+**Evidence**: The test stores a 1 MiB RAM machine as `A` and `B` and runs three scenarios:
+1. `M:load(A,nil,SHARING_ALL)`, then `M:load(B,nil,SHARING_ALL)`, then `M:destroy()`. Afterwards, `A` is still locked.
+2. `create()` called 5 more times on a non-empty object, then `destroy()`. The virtual memory is not released.
+3. `load()` called 5 more times, then `destroy()`. The fds are not closed.
+
+Run with `eval $(make -s env); lua5.4 bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/test_load_leak.lua`:
+```
+second load on non-empty object:	true	cartesi machine object: 0x55fc2ded5198
+is_empty after destroy:	true
+clone_stored(A,C) after destroy:	false	unable to clone file from '.../A/0000000000000000-8000.bin' to '.../C/0000000000000000-8000.bin': flock() failed: Resource temporarily unavailable
+fresh load(A, SHARING_ALL) after destroy:	false	unable to lock backing file '.../A/0000000000000000-8000.bin': Resource temporarily unavailable when initializing shadow state
+BUG: second load() on non-empty local machine succeeded and leaked the first machine; stored machine A remains locked after destroy(): ...
+VmSize before=81152 KiB after destroy=370620 KiB (leaked 289468 KiB)
+create() repeated on non-empty object succeeded 5 times; fds before=31 after destroy=30
+BUG: create() on non-empty local machine silently accepted (old machine leaked)
+load() repeated 5 times; fds before=30 after destroy=160
+BUG: repeated load() leaks 130 fds that destroy() never releases
+```
+The test exits 1. Each leaked machine costs about 57 MiB of VmSize and, when loaded from a directory, 26 fds. Repeated in-memory `create()` leaks no fds because it uses anonymous mappings.
+
+**Scenario**: A long-running PRT validator, Rollups Node or Dave process keeps a local machine object and calls `load`/`create` on it again without calling `destroy()` first, for example in a retry or error path, or when it reuses the object after a rollback. The call succeeds silently. The stored snapshot it loaded first is now locked for the life of the process: `clone_stored`, and any new `SHARING_ALL` load of that directory, fail with `flock() failed` or `unable to lock backing file`. Fds and about 57 MiB of mappings pile up on every repetition, and the only way out is to restart the node. The same mistake against a remote machine fails cleanly with `"machine exists"`, so code tested against the JSON-RPC backend can leak once switched to the local backend. No in-tree caller does this today: `doc/recipes/prt.lua` (`new_stored_machine`, `clone_loaded_directory`, rollback) and `src/cartesi-machine.lua` (revert_stored, main load/create) always use a fresh object or call `destroy()` before reloading.
+
+**Possible solution**: Reject the call when the object already holds a machine, as the server does. In `local_machine::do_create`/`do_load`, add `if (m_machine != nullptr) { throw std::runtime_error("machine exists"); }` (or put the check in `i_machine::create/load`, or in `cm_create`/`cm_load` through `cm_is_empty`, so every backend shares it). Do not choose "silently destroy the old machine first": that would hide caller bugs and could release locks the caller still depends on. Add a test that a second `create`/`load` on a non-empty local object fails and leaves the original machine untouched.
+
+**Severity**: low. Both reviewers rated it low (the candidate suggested medium). It fires only when a caller breaks the documented `cm.h` precondition, and no in-tree caller does (prt.lua and cartesi-machine.lua always destroy before reloading). It cannot affect hashes, proofs or dispute outcomes. When it is triggered the damage lasts until restart: a locked stored directory, plus leaked fds and memory. That makes the one-line enforcement fix worthwhile, and the severity would rise to medium if a real validator path were found that reloads without destroying first.
+
+**Risks**: Of the bug: when an application has this caller bug, memory and fds are exhausted slowly, and stored snapshots stay locked, which blocks `clone_stored` and new `SHARING_ALL` loads. The `flock` errors that result point at the wrong cause and are hard to diagnose. Of the fix: any external caller that, perhaps by accident, relies on overwriting a loaded object will now get an error instead of a silent leak. That is the intended behaviour and matches the remote backend, but it is a visible behaviour change worth a changelog note. The check must leave the existing machine intact on rejection, so throw before constructing the new one.
+
+**Proof of concept**: `bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/test_load_leak.lua`. Run it from the repo root: `eval $(make -s env); lua5.4 bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/test_load_leak.lua`. It needs no machine images, works in a temporary directory (override it with `WORKDIR`), prints `BUG:` lines and exits 1 while the defect is present, and exits 0 once a second `create`/`load` is rejected or the old machine is released.
+
+**ID**: `p1-01-local-load-create-on-nonempty-object-leaks-machine-and`
+
+**Related**: [B51](#b51-log_step-on-an-empty-or-destroyed-local-machine-dereferences-a-null-pointer).
+
+### B82. Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot
+
+**Title**: store() of a SHARING_ALL-loaded machine writes `shared:true` into config.json, so a later SHARING_CONFIG load changes the snapshot in place
+
+**Problem**: `machine_config::load(dir, sharing_mode::all)` overrides the configuration the machine keeps. It sets `shared=true` on every address range and on the hash tree, sets `create=false`, and points every filename into the loaded directory. That adjusted config becomes `machine::m_c`. `machine::store(dir, sharing)` then calls `m_c.store(dir)` without passing `sharing`, so `machine_config::store` runs `adjust_backing_stores(".", sharing_mode::config)`, which keeps the flags it is given. The result is that a load-time sharing override is saved as the snapshot's own configuration: the stored config.json says RAM, DTB, flash drives, processor shadow state, CMIO buffers, PMAs, uarch state and the hash tree are all shared, even though the original config shared nothing. Any later `SHARING_CONFIG` load of that snapshot therefore behaves like `SHARING_ALL`: it maps every file `MAP_SHARED`, and running the machine changes the snapshot on disk. The same goes for `get_initial_config()` of a SHARING_ALL-loaded machine. It reports `shared=true` and `create=false` with absolute filenames inside the loaded directory, so a machine created from that config writes into the original stored directory.
+
+**Origin**: pre-existing (origin/main has the same code).
+
+**Area**: stored machine lifecycle (`machine::store`, `machine_config::load`/`store`/`adjust_backing_stores`, `machine::get_initial_config`).
+
+**Category**: corrupted-stored-state.
+
+**Location**:
+- `src/machine-config.cpp:69-92`: `adjust_ar_backing_store_config` forces `shared=true` under `sharing_mode::all`.
+- `src/machine-config.cpp:94-113`: `adjust_ht_backing_store_config` does the same for the hash tree.
+- `src/machine-config.cpp:138-164`: `machine_config::load` applies the override to the config the machine keeps.
+- `src/machine-config.cpp:166-178`: `machine_config::store` defaults to `sharing_mode::config`, which keeps the flags.
+- `src/machine.cpp:399-415`: `machine::store` calls `m_c.store(dir)` without its `sharing` argument.
+- `src/machine.cpp:381`: `get_initial_config` returns the adjusted `m_c` as-is.
+
+**Evidence**: The test does five things:
+1. Creates a 32 MiB Linux machine with default, non-shared backing stores and stores it in `A`.
+2. Loads `A` with `SHARING_ALL`, runs 2M cycles and calls `store(S)`. This is the PRT `store_checkpoint` pattern.
+3. Checks `S/config.json`.
+4. Loads `S` with `SHARING_CONFIG` and runs to 4M cycles.
+5. Reloads `S` with the default load (no sharing) and compares the result with what was stored.
+
+Run with `eval $(make -s env); lua5.4 bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/test.lua`. Output (exit=1):
+```
+original ram.shared=	false	 hash_tree.shared=	false
+get_initial_config of SHARING_ALL-loaded: ram.shared=	true	 ram.data_filename=	/tmp/lua_EByO2K/A/0000000080000000-2000000.bin	 hash_tree.shared=	true
+A config ram:	"ram":{"backing_store":{...,"shared":false,"truncate":false},"length":33554432}
+S config ram:	"ram":{"backing_store":{...,"shared":true,"truncate":false},"length":33554432}
+A hash_tree:	"hash_tree":{...,"shared":false,...}
+S hash_tree:	"hash_tree":{...,"shared":true,...}
+stored: mcycle=	2000000	 hash=	c48c153c28292d520fdbe63fbcebdacca88601d1d5eb6f2df7ed59b2144699c0
+reload: mcycle=	4000000	 hash=	75cb1cac0ae1410a0801502e7a1c6e506cce68488cc023911f8dd3ee4f1a1f52
+BUG: S/config.json persists ram shared:true from the load-time SHARING_ALL override (original config has shared:false)
+BUG: SHARING_CONFIG load + run modified the stored snapshot S in place (mcycle 2000000 -> 4000000, root hash changed=true)
+```
+
+**Scenario**: The PRT node's `store_checkpoint` (doc/recipes/prt.lua:2563-2575) calls `machine:store(tmp)` on an epoch machine loaded with `SHARING_ALL`, then `sync_stored` and `rename_stored`. The resulting checkpoint or template has a config.json where everything is marked shared. Later, an operator runs `cartesi-machine --load=<checkpoint>,sharing:config`, or another validator stack (Rollups Node, Dave, an app tool) loads it with `CM_SHARING_CONFIG` and runs it. The checkpoint is then changed on disk without any warning. Its root hash no longer matches the one recorded in epoch.json or on chain, and later bootstraps from that checkpoint fail their hash assertion. The same thing happens with CLI snapshots made via `--load=dir,sharing:all ... --store=out`. A tool that clones a SHARING_ALL-loaded machine from `get_initial_config()` would write into the source directory.
+
+**Possible solution**: Keep the original, unadjusted config (or at least the original `shared`/`create`/`truncate` flags) alongside `m_c`, and use it in `machine::store` and `get_initial_config()`. Alternatively, have `machine::store` pass an explicit sharing mode to `m_c.store()` that resets the load-time override, so the persisted config records what the user configured and not the runtime mapping mode. This is unrelated to how data files are written: shared ranges are already modified on disk, so the data-copy logic in `machine::store` can stay as it is.
+
+**Severity**: medium. Both reviewers rated it medium. Storing a SHARING_ALL-loaded machine is the normal PRT and CLI path, and it silently corrupts stored state. However, no hash, proof or step log is wrong, PRT itself only loads with SHARING_ALL or no sharing, and the damage needs a later SHARING_CONFIG consumer (or a machine created from `get_initial_config()`) to run the snapshot.
+
+**Risks**: The bug turns snapshots that should be immutable into mutable ones for SHARING_CONFIG users, which leads to checkpoint/hash mismatches, failed bootstraps and hard-to-debug "my snapshot changed" reports. The fix changes what `get_initial_config()` returns for loaded machines and what `store()` writes:
+- Callers that relied on the adjusted config (absolute filenames, `create=false`) to find the loaded files may break.
+- If the original `shared` flags are restored while the data-copy logic still assumes shared ranges were left in place, `store` could write a snapshot whose files do not match its config.
+- Snapshots already on disk keep `shared:true` until they are re-stored.
+
+**Proof of concept**: `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/test.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/test.lua`. It needs `CARTESI_IMAGES_PATH` (default `/usr/share/cartesi-machine/images`) with `linux.bin` and `rootfs.ext2`. It exits 1 with `BUG:` lines while the bug is present and exits 0 once it is fixed.
+
+**ID**: `p1-02-store-persists-load-time-sharing-all-as-config-shared-`
+
+**Related**: [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image), [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs).
 
 ## Candidates that were not confirmed
 

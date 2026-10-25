@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-67 confirmed issues: 4 high, 16 medium, 47 low.
+69 confirmed issues: 4 high, 16 medium, 49 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -92,6 +92,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B63](#b63-cartesifilesystemlua-collides-with-the-v022-tests-package-breaking-upgrades) | low | introduced by branch | Packaging (Lua modules) | cartesi/filesystem.lua collides with the v0.22 tests package, breaking upgrades | `bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B65](#b65-frontier-stores-fail-for-native-windows-paths-because-hash-treelua-splits-paths-only-on-slashes) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for native Windows paths because hash-tree.lua splits paths only on slashes | `bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/` |
+| [B68](#b68-first-frontier_forest_store-of-an-in-memory-expansion-skips-the-per-level-directory-sync) | low | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | First frontier_forest_store of an in-memory expansion skips the per-level directory sync | `bugs/p2-06-forest-store-batch-expansion-unordered-dir-sync/` |
+| [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
 
 ## Issues
 
@@ -3906,6 +3908,129 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 **ID**: `p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo`
 
 **Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
+
+### B68. First frontier_forest_store of an in-memory expansion skips the per-level directory sync
+
+**Title**: `frontier_forest_store` writes an in-memory expansion's top file and its children with a single directory sync (unlike `store_expansion`), so a crash can leave a shared, hash-addressed parent file without a child, and other forests can then no longer expand it with its bundle
+
+**Problem**: The header comment of the frontier forest persistence code (`hash-tree.lua:487-494`) sets the rule: "a file becomes reachable only once the files below it are durable ... and so is the top file of an expansion". The rule matters because tree files are named only by hash and every forest that uses the directory shares them. `load_tree` is called lazily on any raw base value that a query (`descend_tree`) or `frontier_forest_expand_leaf` reaches. `store_expansion` (`606-613`) keeps the rule: it writes the children, syncs the directory, then writes the top file and syncs again.
+
+`frontier_forest_expand_leaf` calls `store_expansion` only when the forest already has a directory (`if forest.directory then ...`, line 895). A forest that has no directory, is expanded in memory (allowed and documented), and is then stored for the first time goes through `frontier_forest_store` (`967-990`) instead. There `store_tree` writes children before parents, and `write_file` fsyncs and renames each file, but `sync_trees` (the only `fs.sync_directory`) runs once, after the whole batch (line 981). So the expansion's top file X and its child files are renamed with no directory sync between them.
+
+If X's hash is already held as an opaque leaf by another forest A, committed earlier in the same directory, then X is reachable from A as soon as its file name exists. The frontier-file commit point protects only the forest being stored, not A. After a crash, a filesystem that does not keep rename order can keep X's entry and lose a child's. When A next reaches X, `load_tree` (`525-558`) does three things:
+- puts a raw-hash tree in place of the missing child;
+- checks only the parent hash, which still matches, so it accepts the partial X;
+- marks X durable, so A's later stores never rewrite the missing child.
+
+After that, a query through X returns nil ("the node is below an opaque hash"). `frontier_forest_expand_leaf(A, pos, X-bundle)` descends into the loaded X, reaches the lower-height raw child and fails with `leaf height mismatch` (line 892). That error looks like a malformed bundle. More generally, any first store of a tree whose hash another committed forest already holds as an opaque leaf has the same ordering gap, because `frontier_forest_store` does no per-height sync.
+
+**Origin**: introduced by this branch. The store code came in with commit fcf6819 ("feat: store frontier forests durably").
+
+**Area**: `src/cartesi/hash-tree.lua`, frontier forest persistence (`frontier_forest_store`, `frontier_forest_expand_leaf`, `load_tree`).
+
+**Category**: durability (crash consistency / write ordering).
+
+**Location**:
+- `src/cartesi/hash-tree.lua:967-990`: `frontier_forest_store` runs `store_tree` over every level, with a single `sync_trees` at line 981.
+- `src/cartesi/hash-tree.lua:577-595`: `store_tree` writes children then the parent, and each `write_file` fsyncs and renames with no directory sync.
+- `src/cartesi/hash-tree.lua:598-603`, `606-613`: `sync_trees`, and `store_expansion`, which has the ordered child-sync-parent-sync sequence that the store path lacks.
+- `src/cartesi/hash-tree.lua:525-558`: `load_tree` accepts a mixed tree whose child files are missing (replacing them with raw hashes) and marks it durable.
+- `src/cartesi/hash-tree.lua:886-895`: `frontier_forest_expand_leaf` skips `store_expansion` without a directory, and fails with `leaf height mismatch` (line 892) when descending into a partial loaded tree.
+- `src/cartesi/hash-tree.lua:487-494`: the header comment stating the durability rule that this path breaks.
+
+**Evidence**: The test wraps `fs.rename_file` and `fs.sync_directory` and records the order of the calls. Forest A (height 3) holds X (height 2) and Y as opaque leaves and is stored in directory D. Forest B holds the same leaves, expands X in memory with a mixed bundle of two height-1 fixed-point trees, and is then stored in D for the first time. In the control case, forest C, which already has a directory, does the same expansion and so goes through `store_expansion`. A real reordering crash cannot be forced on a filesystem that keeps rename order, so the test then deletes X's right child file to stand in for the lost directory entry, reloads A and uses it.
+```
+frontier_forest_store (first store of in-memory expansion): child rename #2, X rename #3, dir sync in between: false
+frontier_forest_expand_leaf on stored forest (store_expansion): child rename #2, X rename #4, dir sync in between: true
+get_node_hash(A, 2, 0) after simulated crash:	nil	the node is below an opaque hash
+expand_leaf(A, 0, X-bundle) after simulated crash:	false	.../src/cartesi/hash-tree.lua:892: leaf height mismatch
+BUG: frontier_forest_store renames expansion top file X (already referenced by committed forest A) in the same batch as its child files with no directory sync in between; store_expansion does sync. ...
+```
+Run: `eval $(make -s env); lua5.4 bugs/p2-06-forest-store-batch-expansion-unordered-dir-sync/test-store-expansion-dir-sync.lua` (exits 1, under 1 s).
+
+**Scenario**: An API user (a tool or app built on `cartesi.hash-tree`, not the PRT node) keeps several frontier forests in one shared tree directory. Forest A, already committed there, holds a bundle root X as an opaque leaf. The user builds forest B in memory, opens X with `frontier_forest_expand_leaf`, and then calls `frontier_forest_store(B, D, ...)` for the first time. Power is lost, or the OS crashes, after the per-file renames and before the single directory sync. The filesystem keeps `X.json` but drops a child's entry. After restart, querying A through X returns nil, and expanding A at X with the correct bundle raises `leaf height mismatch`. Nothing detects or repairs the partial X automatically.
+
+The Lua PRT node is not exposed: it stores uarch claims (`store_uarch_claim`) before opening bundles, so `open_bundle` -> `expand_leaf` takes the ordered `store_expansion` path. Rollups Node and Dave use the C API, not this Lua module. A plain process crash cannot cause the problem, since children are always renamed before parents.
+
+**Possible solution**: Make `frontier_forest_store` follow the module's own rule. Sync the directory before writing any parent file whose hash may already be referenced. Two simple ways:
+- store level by level, children first, with a `sync_directory` per tree height;
+- reuse the `store_expansion` ordering for subtrees that are not yet durable: write and sync the children, then write the parent.
+
+To repair damage left by older versions, `load_tree` could also refuse, or not mark as durable, a mixed or fixed-point tree whose referenced child files are missing where a stored child is expected. Or `frontier_forest_expand_leaf` could accept a matching bundle in place of a loaded tree whose descendants are missing, and write the missing files.
+
+**Severity**: low. Both reviewers and the prover agree. Triggering it takes three things together:
+- an API usage pattern (expand before the first store) that the PRT validator node does not use;
+- a power loss or OS crash inside a narrow window;
+- a filesystem that reorders renames within one directory, which ext4 and XFS do not do in practice.
+
+The result is a stuck query or expansion at one position, never a wrong hash or proof, because `load_tree` still checks the hash. It can be recovered by expanding A at the child level (`expand_leaf(A, 2, <height-1 forest>)`) or by storing the subtree again, since `store_tree` rewrites any file that does not exist. The candidate's claim that the position "can never be opened again" was corrected to this narrower impact.
+
+**Risks**:
+- Of the bug: forests that share a directory can be left with a hash-addressed file that is partial, accepted, and marked durable. Later queries return nil, and expansions with the correct bundle fail with a misleading "leaf height mismatch", so a caller may wrongly blame the bundle. The code also breaks its own documented durability contract, which weakens the guarantees other code may rely on.
+- Of the fix: extra `fsync` calls on the directory (one per height, or per expansion) slow down large first stores. Changing `load_tree` to reject or re-check partial trees could make a forest that loads today fail, or need repair, when it opens.
+
+**Proof of concept**: `bugs/p2-06-forest-store-batch-expansion-unordered-dir-sync/test-store-expansion-dir-sync.lua`. It needs only the `cartesi` Lua module and `cartesi.hash-tree`, with no machine images. It creates and removes a temporary `run.*` directory next to itself. Run from the repo root with `eval $(make -s env); lua5.4 bugs/p2-06-forest-store-batch-expansion-unordered-dir-sync/test-store-expansion-dir-sync.lua`. It prints a BUG line and exits 1 while the defect is present, and prints "OK: parent written after children are durable" and exits 0 once the store path syncs between the children and the parent.
+
+**ID**: `p2-06-forest-store-batch-expansion-unordered-dir-sync`
+
+**Related**: [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees), [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations).
+
+### B69. ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices
+
+**Title**: Unchecked ±1 in Lua/JSON ArrayIndex conversion silently wraps peer-supplied indices (signed overflow; UB only in builds without -fno-strict-overflow)
+
+- **Problem**: `cartesi.fromjson` and `cartesi.tojson` (in `clua-i-machine.cpp`) shift values that have the `"ArrayIndex"` schema between 0-based JSON and 1-based Lua. The schemas that use it include the AccessLog bracket `where` field and `ArrayArrayIndex` (for example `mcycle_hash_offsets`). The shift does `v += 1` (JSON to Lua) and `v -= 1` (Lua to JSON) on `int64_t` with no range check. In the `number_unsigned` branch, the code also does `static_cast<int64_t>(uint64)` first, which turns any value above INT64_MAX into a negative number. So for peer-supplied JSON:
+  - `where = 9223372036854775807` (INT64_MAX) overflows to `math.mininteger`;
+  - `where = 18446744073709551615` (UINT64_MAX) silently becomes `0`.
+
+  In the other direction, `math.mininteger` overflows to INT64_MAX. Each case is a signed integer overflow in C++. Nothing raises an error.
+- **Origin**: pre-existing. The branch's diff does not touch these lines.
+- **Area**: Lua JSON conversion (`cartesi.fromjson` / `cartesi.tojson`, the AccessLog / ArrayIndex / ArrayArrayIndex schemas). PRT nodes use it to decode step logs received from peers.
+- **Category**: memory-safety / undefined behaviour (signed overflow), plus missing input validation.
+- **Location**:
+  - `src/clua-i-machine.cpp:414-417`: Lua to JSON, `int64_t v = lua_tointeger(L, idx); ... v -= 1;` (the overflow is at line 416).
+  - `src/clua-i-machine.cpp:501-507`: JSON to Lua, the `number_integer` branch, `v += 1`.
+  - `src/clua-i-machine.cpp:509-515`: JSON to Lua, the `number_unsigned` branch, `static_cast<int64_t>(get<uint64_t>())` then `v += 1` (the overflow is at line 512). nlohmann parses non-negative literals as unsigned, so this is the path peer input takes.
+  - `src/Makefile:267-289`: default builds add `-fno-strict-overflow`; the `sanitize=yes` and `fuzz=yes` builds drop it and add `-fsanitize=address,undefined -fno-sanitize-recover=all`.
+- **Evidence**: With the stock build, the test feeds an AccessLog whose bracket `where` is INT64_MAX or UINT64_MAX to `cartesi.fromjson(..., "AccessLog")`. It then serializes a bracket with `where = math.mininteger` through `cartesi.tojson(..., nil, "AccessLog")`. Every conversion wraps silently:
+  ```
+  $ eval $(make -s env); timeout 30 lua5.4 bugs/p2-07-clua-arrayindex-signed-overflow/test.lua
+  fromjson where=INT64_MAX ->	-9223372036854775808
+  BUG: JSON->Lua ArrayIndex conversion overflowed: INT64_MAX became -9223372036854775808
+  fromjson where=UINT64_MAX ->	0
+  BUG: JSON->Lua ArrayIndex conversion wrapped: UINT64_MAX became 0
+  tojson where=math.mininteger ->	{"accesses":[],"brackets":[{"text":"x","type":"begin","where":9223372036854775807}],...}
+  BUG: Lua->JSON ArrayIndex conversion overflowed: math.mininteger became 9223372036854775807
+  (exit 1)
+  ```
+  The prover also rebuilt `clua-i-machine.o` with `-fsanitize=signed-integer-overflow -fno-sanitize-recover=all` and without `-fno-strict-overflow`, then relinked `cartesi.so`. With that build, the same test aborts the process:
+  ```
+  clua-i-machine.cpp:512:19: runtime error: signed integer overflow: 9223372036854775807 + 1 cannot be represented in type 'long int'
+  (tojson path) clua-i-machine.cpp:416:23: runtime error: signed integer overflow: -9223372036854775808 - 1 cannot be represented in type 'long long int'
+  ```
+  A UBSan build that keeps the project's `-fno-strict-overflow` reports nothing and gives the same silent-wrap output as the stock build.
+- **Scenario**: A malicious player in a PRT dispute (Dave, or a Rollups Node running the Lua PRT node) sends a `step_log` whose brackets contain `{"type":"begin","where":9223372036854775807,"text":"x"}`. The validator decodes it with `cartesi.fromjson(..., "AccessLog")`. The effects:
+  - In a release build, any Lua code that reads `brackets[i].where` gets `math.mininteger` (or `0` for UINT64_MAX) instead of an error.
+  - In a build made with `make sanitize=yes` or `fuzz=yes`, the validator process aborts on that message.
+
+  Verification itself is not affected. When the log reaches C++, `json-util.cpp:1509` rejects any `where > accesses.size()`. The wrap round-trips (INT64_MAX goes to mininteger and back to INT64_MAX), so the bad bracket is still rejected. Hashes, proofs and `verify_*` results stay correct. `mcycle_hash_offsets` (ArrayArrayIndex) comes from the node's own collect calls, not from peers.
+- **Possible solution**: Range-check before the shift and raise a Lua error on out-of-range values:
+  - JSON to Lua: reject unsigned values above `INT64_MAX - 1` and signed values equal to `INT64_MAX`. Optionally, since these are indices, reject negative values too.
+  - Lua to JSON: reject `v == INT64_MIN`, or more strictly, any `v < 1` for an ArrayIndex.
+
+  Alternatively, use `__builtin_add_overflow` / `__builtin_sub_overflow` and throw on overflow.
+- **Severity**: low. The prover and both reviewers agree. Shipped builds use `-fno-strict-overflow` (GCC's `-fwrapv`), so the overflow is defined wrapping and the optimizer cannot exploit it. The C++ side still rejects the wrapped indices, so no wrong hash or proof is accepted and no honest player can lose a dispute. What remains is silent corruption of out-of-range indices seen by Lua code, and a peer-triggerable abort only in the sanitize/fuzz debug builds.
+- **Risks**:
+  - Bug: Lua-side logic that trusts decoded `where` values (bounds, sorting, display) can misbehave on absurd peer input without any error. Nodes or CI fuzzers running sanitizer builds can be crashed remotely. A future build-flag change that drops `-fno-strict-overflow` would turn this into real UB in production.
+  - Fix: low risk. Valid indices are far below the limits. A stricter check (rejecting `v < 1` or negative indices) could break callers that pass 0 or negative placeholders on purpose, so start with the overflow-only check.
+- **Proof of concept**: `bugs/p2-07-clua-arrayindex-signed-overflow/test.lua` uses only the public `cartesi` Lua module and needs no machine image. It exits 1 when the bug reproduces. Run from the repo root:
+  `eval $(make -s env); timeout 30 lua5.4 bugs/p2-07-clua-arrayindex-signed-overflow/test.lua`
+
+  To see the abort, run the same test against a `cartesi.so` built with `-fsanitize=signed-integer-overflow -fno-sanitize-recover=all` and without `-fno-strict-overflow` (for example `make sanitize=yes`, which needs the ASan `LD_PRELOAD` that the Makefile sets up).
+
+**ID**: `p2-07-clua-arrayindex-signed-overflow`
+
+**Related**: [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays).
 
 ## Candidates that were not confirmed
 

@@ -160,3 +160,36 @@ dispute deadlines, as well as general API consumers.
   consumers.
 - **Risks/limits:** No concrete financial-loss or dispute-loss scenario was
   established. Effect on a validator depends on which ABI schemas it consumes.
+
+## 006 — Forest loading expands shared subtrees exponentially
+
+- **Problem:** A mixed node's children are loaded recursively without reusing an
+  already loaded tree with the same hash. Repeated references to the same subtree
+  become separate recursive object graphs. A compact, valid checkpoint can require
+  exponentially more reads and memory to reopen than its stored representation.
+- **Area/category:** Lua forest persistence/recovery; excessive work and memory
+  allocation. **Introduced** in this branch.
+- **Location:** `src/cartesi/hash-tree.lua:549–553` (`load_tree` recursively loads
+  both mixed children), entered from `frontier_forest_load` at line 1009.
+- **Evidence:** `env LUA_PATH='./src/?.lua;;' LUA_CPATH='./src/?.so;;'
+  LD_LIBRARY_PATH=./src lua5.4 tests/bugs/006-forest-shared-subtrees.lua`.
+  The bounded test uses only public construction and checkpoint APIs. At heights
+  4/7/10, the stored directories contain 6/9/12 files, but loading reads
+  16/128/1024 files and constructs 31/255/2047 distinct tree objects. Equivalent
+  forests built without intermediate checkpoints each reopen in two reads and
+  one tree object. Roots and leaf queries agree. Independently confirmed with
+  these controls after the orchestrator's initial reproduction.
+- **Scenario:** An application checkpoints a forest while assembling repeated
+  complete subtrees. Checkpointing flushes pending values and makes later carries
+  produce mixed nodes; after restart, recovery expands the shared content instead
+  of preserving its compact representation. At larger supported heights this can
+  exhaust memory or delay a validator beyond its proof deadline.
+- **Possible solution:** Memoize loaded trees by hash and height, or retain lazy
+  references to mixed children and resolve them during queries. Preserve shared
+  descendants when loading content-addressed data.
+- **Severity:** **High (P1)** for sufficiently tall affected trees used by
+  validators: recovery work and allocation grow exponentially with height.
+- **Risks/limits:** Requires repeated subtrees represented by mixed nodes; ordinary
+  fixed-point-only trees avoid the problem. The test deliberately stays at height
+  10 and demonstrates exact operation/object counts, not an actual out-of-memory
+  event or missed dispute. Unlike 002, all data is present and hashes remain correct.

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-52 confirmed issues: 4 high, 11 medium, 37 low.
+53 confirmed issues: 4 high, 12 medium, 37 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -40,6 +40,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B17](#b17-abi-decoder-rejects-canonical-empty-arrays-of-dynamic-types) | medium | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder rejects canonical empty arrays of dynamic types | `bugs/lua-09-evmu-decode-empty-dynamic-element-array/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B50](#b50-rename_stored-and-remove_stored-with-a-trailing-slash-succeed-then-fail-and-skip-the-parent-fsync) | medium | pre-existing | Stored machine API | rename_stored and remove_stored with a trailing slash succeed, then fail and skip the parent fsync | `bugs/w2b-03-rename-remove-stored-trailing-slash/` |
+| [B53](#b53-run-aborts-when-a-non-blocking-console-output-descriptor-is-briefly-full) | medium | pre-existing | Machine console (run) | run aborts when a non-blocking console output descriptor is briefly full | `bugs/w2b-05-console-eagain-fails-run/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -3049,3 +3050,62 @@ Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not r
 **Proof of concept**: `bugs/w2b-04-sharing-all-enospc-sigbus/test.lua` (driver: makes a private mount namespace and a 60 MiB tmpfs; needs root) and `bugs/w2b-04-sharing-all-enospc-sigbus/child.lua` (stores, reloads with `SHARING_ALL`, and writes pages). Run from the repo root: `eval $(make -s env); lua5.4 bugs/w2b-04-sharing-all-enospc-sigbus/test.lua`. Exit 1 means the bug reproduced (SIGBUS); exit 0 means it is fixed (`write_memory` raised an error, or every page was written); exit 2 means `unshare`/`mount` were unavailable.
 
 **ID**: `w2b-04-sharing-all-enospc-sigbus`
+
+### B53. run aborts when a non-blocking console output descriptor is briefly full
+
+**Title**: `machine:run` aborts with "console output flush failed: Resource temporarily unavailable" when the console output fd is non-blocking and briefly full (EAGAIN is not retried)
+
+**Problem**: When console output goes to stdout, stderr or a `to_fd` descriptor, `machine::run` flushes the guest's console output with one `write()` call. That call is retried only on `EINTR`. If the descriptor is `O_NONBLOCK` and its pipe is momentarily full, `write()` fails with `EAGAIN`/`EWOULDBLOCK`. `machine_console::flush_output` treats every error other than `EPIPE` as fatal and throws `machine_console_exception`. Nothing in `interpret_with_console` catches it, so the exception leaves `machine::run`, and from there `cm_run`, Lua `machine:run`, the JSON-RPC server's run handler and the CLI.
+
+`O_NONBLOCK` is stored on the shared open file description, so a parent that made its own stdout non-blocking (the usual case is Node.js/libuv) passes the flag to an emulator it spawns with inherited stdio. A transient condition (the host is slow to drain console output for a few seconds) then aborts an input-processing run partway through.
+
+The codebase already treats console I/O errors as non-fatal elsewhere: the `collect_*` paths catch `machine_console_exception` and clear the output. Plain `run()` does not.
+
+**Origin**: Pre-existing. `src/machine-console.cpp` and `src/os.cpp` are the same on `origin/main` and on this branch.
+
+**Area**: Machine console / run loop (`src/machine-console.cpp`, `src/os.cpp`, `src/machine.cpp`). Reached through the C API (`cm_run`), the Lua API, `cartesi-jsonrpc-machine` and the `cartesi-machine` CLI.
+
+**Category**: API contract / robustness. Transient host backpressure is reported as a fatal I/O error.
+
+**Location**:
+- `src/machine-console.cpp:298-306`: `flush_output` handles only `EPIPE` and throws `machine_console_exception{errno, "console output flush failed"}` for anything else, `EAGAIN` included.
+- `src/os.cpp:523-529`: `os::putchars` (HAVE_TTY path, `to_stdout`/`to_stderr`) makes one `write()`, retries only `EINTR`, and never polls.
+- `src/os.cpp:570-575`: `os::write_fd` (`to_fd` destination) has the same flaw.
+- `src/machine.cpp:2162-2183`: `interpret_with_console` calls `console.flush_output()` without a handler, so the exception leaves `machine::run`.
+- For contrast, the `collect_*` paths (`src/machine.cpp` ~2404-2418 and ~2536-2542) catch the exception and keep running.
+
+**Evidence**: `test_nonblock_stdout.py` creates a pipe and sets `O_NONBLOCK` on the write end, as a libuv parent would. It then spawns `cartesi-machine.lua --ram-length=64Mi -- "head -c 300000 /dev/zero | tr '\0' x; echo; echo GUEST-DONE"` with stdout on that pipe. The reader waits 4 s before draining, which simulates brief backpressure. The emulator dies after only 61440 of the 300000 bytes are delivered. Run with `eval $(make -s env); python3 -I bugs/w2b-05-console-eagain-fails-run/test_nonblock_stdout.py`; it exits 1:
+```
+exit code: 1 | bytes of guest 'x' received: 61440 | GUEST-DONE seen: False
+lua5.4: .../src/cartesi-machine.lua:4003: console output flush failed: Resource temporarily unavailable
+stack traceback:
+	[C]: in method 'run'
+	.../src/cartesi-machine.lua:4003: in method 'run'
+	.../src/cartesi-machine.lua:4376: in local 'run_to_stop'
+BUG: machine:run aborted with a console flush EAGAIN error on a non-blocking stdout (transient host backpressure killed the emulation run)
+```
+The control run uses the same pipe and the same 4 s delay but a blocking fd (`CONTROL_BLOCKING=1`). It completes with `Halted`, all 300000 bytes and exit 0. So the unhandled `EAGAIN` is the cause, not the workload or the pipe size.
+
+**Scenario**: A Node.js-based node, app harness or developer tool sets its stdio non-blocking (libuv does this) and spawns `cartesi-jsonrpc-machine` or `cartesi-machine` with inherited stdout/stderr. Or a caller configures console output `to_fd` on a non-blocking pipe or socket. A guest app prints a large burst of logs, more than the 64 KiB pipe capacity, while the log consumer is briefly slow. `run()` then throws, the CLI exits with an error, and a JSON-RPC client gets an RPC error in the middle of processing an input. A node that treats any `run` error as fatal stops processing that input.
+
+Some setups are probably not affected. Rollups Node (Go) and Dave (Rust) normally hand children blocking fds, and PRT hash collection goes through the `collect_*` functions, which already tolerate console errors.
+
+**Possible solution**: Treat `EAGAIN`/`EWOULDBLOCK` in `flush_output` as "nothing consumed" and do not throw. Then either:
+- wait for the fd to become writable with `poll(POLLOUT)` and retry, inside `os::putchars`/`os::write_fd` or in `flush_output`, or
+- return to the interpreter with the bytes still buffered and retry the flush on the next console-output break, so a full buffer applies backpressure to the guest.
+
+Optionally, match the `collect_*` behaviour and never let host console I/O errors abort `run()`. In that case, drop the output and record or log the error.
+
+**Severity**: Medium. Reviewers rated it low and medium. It is not high: no hash, proof, step log or stored state is corrupted, the machine stays at a consistent `mcycle` with the unflushed bytes still buffered (a retry of `run()` recovers), and buffered output or a blocking fd avoids it. It is not low: the trigger is a legitimate, reachable deployment (a non-blocking stdio inherited from a Node/libuv parent, or a non-blocking `to_fd`), the defect breaks the `run()` contract under transient backpressure, and typical callers, the CLI included, do not retry.
+
+**Risks**:
+- Of the bug: CLI or validator runs abort partway through under log bursts. Failures are intermittent and depend on load, so they are hard to diagnose. Callers that do not retry may mark an input as failed.
+- Of the fix: blocking in `poll` stalls emulation for as long as the consumer stalls. A fix that waits forever turns a crash into a hang, so a timeout or the "leave buffered and resume" approach may be preferable. Silently dropping output on `EAGAIN` would lose guest logs. Any change must not alter emulation semantics, cycle counts or hashes, which is the case because console output is host-side only.
+
+**Proof of concept**: `bugs/w2b-05-console-eagain-fails-run/test_nonblock_stdout.py`. Run from the repo root:
+```
+eval $(make -s env); python3 -I bugs/w2b-05-console-eagain-fails-run/test_nonblock_stdout.py
+```
+It exits 1 and prints `BUG:` while the defect is present, and exits 0 when it is fixed. It takes about 5 s and needs the default Linux/rootfs images under `CARTESI_IMAGES_PATH`. Control (expected to pass): `CONTROL_BLOCKING=1 python3 -I bugs/w2b-05-console-eagain-fails-run/test_nonblock_stdout.py`.
+
+**ID**: `w2b-05-console-eagain-fails-run`

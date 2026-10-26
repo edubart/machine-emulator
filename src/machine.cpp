@@ -451,12 +451,15 @@ void machine::store(const std::string &dir, sharing_mode sharing) const {
             }
             os::copy_file(c.data_filename, data_filename, ar.get_length());
             remover.add_file(data_filename);
-            if (!c.dht_filename.empty()) {
+            if (!c.dht_filename.empty() && !c.dpt_filename.empty()) {
                 os::copy_file(c.dht_filename, dht_filename);
                 remover.add_file(dht_filename);
-            }
-            if (!c.dpt_filename.empty()) {
                 os::copy_file(c.dpt_filename, dpt_filename);
+                remover.add_file(dpt_filename);
+            } else { // Blank trees mark all pages dirty, so they are rebuilt on load
+                os::truncate_file(dht_filename, ar.get_dense_hash_tree().get_storage_data().size(), true);
+                remover.add_file(dht_filename);
+                os::truncate_file(dpt_filename, ar.get_dirty_page_tree().get_storage_data().size(), true);
                 remover.add_file(dpt_filename);
             }
         }
@@ -700,6 +703,20 @@ void machine::replace_memory_range(const memory_range_config &config) {
         }
     }
     m_ars.replace(resolved);
+    // Record the new backing store, so store() handles the range according to its replacement
+    const auto update_backing_store = [&](machine_config &c) {
+        for (auto *mrs : {&c.flash_drive, &c.nvram}) {
+            for (auto &mr : *mrs) {
+                if (mr.start == resolved.start && mr.length == resolved.length) {
+                    mr.backing_store = resolved.backing_store;
+                }
+            }
+        }
+    };
+    update_backing_store(m_c);
+    if (m_stored_c) {
+        update_backing_store(*m_stored_c);
+    }
     // Cached host pointers must be rebuilt for the new mapping.
     init_hot_tlb_contents();
     m_ht.evict_clean_pages(m_ars.find(resolved.start, resolved.length));

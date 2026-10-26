@@ -389,6 +389,18 @@ describe("hash-tree.lua", function()
             end, "too many leaves")
         end)
 
+        it("pads 2^63 or more entries in one call in a tree taller than 64 levels", function()
+            for _, count in ipairs({ 1 << 63, -1 }) do
+                local frontier = hash_tree.frontier(70, "keccak256")
+                hash_tree.frontier_push_back(frontier, leaf(1), 65)
+                local split = hash_tree.frontier_copy(frontier)
+                hash_tree.frontier_pad_back(frontier, pad, count)
+                hash_tree.frontier_pad_back(split, pad, math.maxinteger)
+                hash_tree.frontier_pad_back(split, pad, count - math.maxinteger)
+                expect.equal(hash_tree.frontier_get_root_hash(frontier), hash_tree.frontier_get_root_hash(split))
+            end
+        end)
+
         it("pads with subtree roots at a given height", function()
             local pad_height = 2
             local pad_size = 1 << pad_height

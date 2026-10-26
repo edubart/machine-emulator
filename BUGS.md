@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-80 confirmed issues: 5 high, 16 medium, 59 low.
+79 confirmed issues: 5 high, 16 medium, 58 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -51,7 +51,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder bounds checks overflow and accept out-of-bounds offsets | `bugs/lua-10-evmu-offset-length-overflow-accepts-oob/` |
 | [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
-| [B22](#b22-frontier_pad_back-rejects-valid-counts-and-corrupts-very-tall-frontiers) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_pad_back rejects valid counts and corrupts very tall frontiers | `bugs/lua-14-pad-back-tall-tree-size-wrap/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
 | [B24](#b24-temporary-and-frontier-files-are-created-with-mode-0600-and-without-atomic-o_cloexec) | low | introduced by branch | Lua cartesi.filesystem and cartesi.hash-tree, CLI | Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC | `bugs/rpc-07-frontier-files-mode-0600/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
@@ -1137,52 +1136,6 @@ eval $(make -s env); lua5.4 bugs/lua-11-evmu-param-name-data-location-prefix-man
 It exits 1 and prints `BUG: ...` lines while the bug is present. It exits 0 and prints `OK: ...` once fixed.
 
 **ID**: `lua-11-evmu-param-name-data-location-prefix-mangled`
-
-### B22. frontier_pad_back rejects valid counts and corrupts very tall frontiers
-
-**Title**: frontier_pad_back rejects valid counts >= 2^63 and corrupts the frontier when the tree is more than 64 levels above the pad height
-
-**Problem:** `frontier_pad_back` treats `count` as an unsigned 64-bit integer. `frontier_padding_fits` uses logical shifts and scans up to `max(height, 63)`, and phase 1 compares with `math.ult`. Phase 1 also computes `local size = 1 << (level - first_level)`. In Lua a shift of 64 or more gives 0, so once the cursor is 64 or more levels above `first_level`, `math.ult(count, 0)` is false and the loop does not stop. At the next occupied level it folds `pad_hashes[level]` in, subtracts 0 from `count`, and leaves the result on the same level. The next pass sees that level occupied and folds again, so the carry runs to the top, where `assert(level < top, "too many leaves")` fires. `frontier_padding_fits` had already accepted the count, and the call has already rewritten the low levels of the frontier in place. This breaks the documented rule that a failing call changes nothing. Any remaining count >= 2^63 triggers it once the cursor reaches offset 64 and some level at offset 64 or above is occupied. That includes exactly 2^63 when the offset-63 level is empty. The call always fails with an assert. No case was found where it returns a wrong root hash.
-
-**Origin:** pre-existing. `origin/main` has the same phase-1 code.
-
-**Area:** Lua hash-tree frontier (`cartesi.hash-tree` module, exported as `frontier_pad_back`).
-
-**Category:** correctness / error-path state corruption.
-
-**Location:**
-- `src/cartesi/hash-tree.lua:274`: `local size = 1 << (level - first_level)`, which is 0 for offsets of 64 or more
-- `src/cartesi/hash-tree.lua:275`: `if math.ult(count, size) then break end`, which never breaks when `size == 0`
-- `src/cartesi/hash-tree.lua:279`: `assert(level < top, "too many leaves")`, the assert that fires after the frontier has been mutated
-- `src/cartesi/hash-tree.lua:144` (`frontier_padding_fits`) and `:262`: the fits check that accepts the count
-
-**Evidence:** The test builds `frontier(66)` holding one height-65 subtree and pads it with `count = -1` (2^64-1 unsigned; 2^65 + 2^64 - 1 < 2^66, so it fits). It then builds `frontier(70)` holding one height-65 subtree and pads it with `1 << 63`. Each case is compared with the same padding done as two smaller calls, which succeed.
-```
-$ eval $(make -s env); lua5.4 bugs/lua-14-pad-back-tall-tree-size-wrap/test-pad-back-tall-tree.lua
-single-call pad_back(2^64-1):	false	.../src/cartesi/hash-tree.lua:279: too many leaves
-BUG: frontier_pad_back rejected a fitting count 2^64-1 in a height-66 tree: ...:279: too many leaves
-BUG: the failing frontier_pad_back call mutated the frontier
-height-70 pad_back(2^63):	false	.../src/cartesi/hash-tree.lua:279: too many leaves
-BUG: height-70 frontier_pad_back rejected fitting count 2^63: ...:279: too many leaves
-BUG: the failing call mutated the height-70 frontier
-exit=1
-```
-With the fix below applied to a copy of `hash-tree.lua`, both cases succeed and match the split-call roots (`OK`, exit 0).
-
-**Scenario:** A validator other than the shipped node uses the public `cartesi.hash-tree` API to build a tall frontier, for example over the PRT computation tree, which is 24+48+20 = 92 levels. It pads in one call with a large unsigned-wrapped count (>= 2^63, a negative Lua integer). It gets a spurious "too many leaves" error. If it catches the error with `pcall` and keeps the frontier, it continues from a partly rewritten frontier, and later roots or proofs built from that frontier are wrong. Shipped callers are not affected. The PRT node uses `frontier_forest_pad_back`, which rejects negative counts. The `cartesi-machine` CLI calls `frontier_pad_back` (`src/cartesi-machine.lua` around lines 4036, 4104, 4159, 4198) only with small per-input, per-bundle or per-period counts. Output trees are 63 levels or shorter, where this path cannot run. Padding to the root uses `count = nil`, which takes a separate path that works.
-
-**Possible solution:** In phase 1, break out of the loop when `level - first_level >= 64`. A count below 2^64 can never need a pad subtree of 2^64 or more entries. Phase 2 already handles `size == 0` correctly, because `count & 0 == 0`. A more general option is to validate everything first, or to work on a copy and commit only on success, so that no failing path leaves the frontier changed.
-
-**Severity:** low. Both reviewers and the prover agree. Triggering it takes a frontier more than 64 levels above the pad height and a single pad count of 2^63 or more passed as a wrapped negative integer. No shipped caller does this. The failure is always loud and never yields a wrong or nondeterministic hash. The only lasting harm is a frontier mutated by a rejected call.
-
-**Risks:** Bug: a caller that recovers from the error and keeps using the frontier works from corrupted state, which could produce wrong roots. Fix: very low. The early break only affects offsets of 64 or more, where `size` was already meaningless, and phase 2 places the remaining bits as before. Results for counts below 2^63 or for frontiers of height 64 or less do not change.
-
-**Proof of concept:** `bugs/lua-14-pad-back-tall-tree-size-wrap/test-pad-back-tall-tree.lua`. It exits 1 while the bug is present and prints `OK` once fixed. Run from the repo root:
-`eval $(make -s env); lua5.4 bugs/lua-14-pad-back-tall-tree-size-wrap/test-pad-back-tall-tree.lua`
-
-**ID**: `lua-14-pad-back-tall-tree-size-wrap`
-
-**Related**: B21 (fixed).
 
 ### B23. JSON-RPC protocol version not bumped for the new clear_hash_tree API
 

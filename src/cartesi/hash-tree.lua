@@ -272,7 +272,8 @@ local function frontier_pad_back(frontier, hash, count, pad_height)
     while level <= top do
         if count == 0 then break end
         local size = 1 << (level - first_level)
-        if math.ult(count, size) then break end
+        -- size wraps to 0 from 2^64 entries on, more than any 64-bit count needs
+        if size == 0 or math.ult(count, size) then break end
         if frontier[level] then
             local right = pad_hashes[level]
             while frontier[level] do

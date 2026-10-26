@@ -106,7 +106,7 @@ local loadfails, silent_wrong = 0, 0
 for _, nquery in ipairs { NPAGES, 300 } do
 set_query(nquery)
 print(string.format("=== scenario: after sync_stored, get_root_hash + get_proof on %d pages, then SIGKILL/host crash", nquery))
-sh(string.format("timeout 120 lua5.4 %q child %d; true", self_path, nquery))
+sh(string.format("PHTC_TORN_DIR=%q timeout 120 lua5.4 %q child %d; true", D, self_path, nquery))
 for _, s in ipairs { "S", "R", "U" } do
     assert(io.open(D .. "/" .. s .. "/hash_tree.phtc"), "child did not produce snapshot " .. s)
 end

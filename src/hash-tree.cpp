@@ -936,10 +936,11 @@ hash_tree::pristine_hashes hash_tree::get_pristine_hashes(hash_function_type has
     return hashes;
 }
 
-static int get_concurrency([[maybe_unused]] int value) {
+static int get_concurrency([[maybe_unused]] uint64_t value) {
 #ifdef HAVE_OPENMP
-    const int concurrency = value != 0 ? value : omp_get_max_threads();
-    return std::min(concurrency, omp_get_max_threads());
+    const auto max_concurrency = static_cast<uint64_t>(omp_get_max_threads());
+    const uint64_t concurrency = value != 0 ? value : max_concurrency;
+    return static_cast<int>(std::min(concurrency, max_concurrency));
 #else
     return 1;
 #endif
@@ -953,7 +954,7 @@ hash_tree::hash_tree(const hash_tree_config &config, uint64_t concurrency, const
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     m_sparse_nodes{reinterpret_cast<node_type *>(m_mapped_memory.get_ptr()), init_sparse_nodes.size()},
     m_pristine_hashes{get_pristine_hashes(config.hash_function)},
-    m_concurrency{get_concurrency(static_cast<int>(concurrency))},
+    m_concurrency{get_concurrency(concurrency)},
     m_hash_function{config.hash_function} {
     if (init_sparse_nodes.size() != m_sparse_nodes.size()) {
         throw std::runtime_error{"inconsistent amount of sparse hash tree nodes"};

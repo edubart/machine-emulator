@@ -210,6 +210,16 @@ for _, variant in ipairs(variants) do
             end)
         end)
 
+        describe("concurrency runtime config", function()
+            it("should clamp out-of-range update_hash_tree values", function()
+                for _, update_hash_tree in ipairs({ -1, 0xffffffff, 0x100000001 }) do
+                    local runtime = { concurrency = { update_hash_tree = update_hash_tree } }
+                    local source <close> = variant.create({ ram = { length = 0x1000 } }, runtime)
+                    expect.equal(source:get_root_hash(), machine:get_root_hash())
+                end
+            end)
+        end)
+
         describe("mark_pages_dirty backing-store config", function()
             it("should default to false and preserve an explicit true", function()
                 expect.equal(machine:get_initial_config().ram.backing_store.mark_pages_dirty, false)

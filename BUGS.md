@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-74 confirmed issues: 4 high, 15 medium, 55 low.
+73 confirmed issues: 4 high, 15 medium, 54 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -75,7 +75,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B54](#b54-a-transient-accept-error-closes-the-json-rpc-servers-listening-socket-for-good) | low | pre-existing | JSON-RPC remote machine server | A transient accept error closes the JSON-RPC server's listening socket for good | `bugs/w2b-06-jsonrpc-accept-error-kills-server/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
-| [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw) | low | pre-existing | Runtime config, hash tree | Out-of-range concurrency.update_hash_tree makes every hash-tree update throw | `bugs/w2b-08-concurrency-update-hash-tree-int-truncation/` |
 | [B57](#b57-readwrite_virtual_memory-silently-do-nothing-for-ranges-that-reach-264) | low | pre-existing | C API (virtual memory access) | read/write_virtual_memory silently do nothing for ranges that reach 2^64 | `bugs/w2b-09-virtual-memory-range-wraparound/` |
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
@@ -2474,61 +2473,6 @@ The test exits 1 and prints a `BUG:` line while the defect is present, and exits
 
 **Related**: [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail).
 
-### B56. Out-of-range concurrency.update_hash_tree makes every hash-tree update throw
-
-**Title**: concurrency.update_hash_tree values that truncate to a negative int (e.g. -1, 0xFFFFFFFF) make every hash-tree update throw "vector::reserve"
-
-**Problem:** The hash tree narrows the uint64 runtime setting `concurrency.update_hash_tree` to an `int` with `static_cast<int>`. Any value whose low 32 bits read as a small negative int, such as `-1` (given through Lua or JSON) or `4294967295` (UINT32_MAX), becomes `-1`. `get_concurrency` replaces only `0` with `omp_get_max_threads()` and then takes `std::min` with that thread count, so the negative value is kept. `update_dense_trees` then computes `std::min(m_concurrency << 10, 16384)`, which is `-1024`. Stored in a `size_t`, that is about 2^64, so `batch.reserve` throws `std::length_error("vector::reserve")`. The machine constructor accepts the config, and no interface validates the value. The failure only appears later, on the first operation that updates the hash tree: `get_root_hash`, `get_proof`, `collect_*` logs, `verify_*`, and so on. From then on, every one of those calls fails.
-
-**Origin:** pre-existing. origin/main has the same code, a few lines off.
-
-**Area:** hash tree (`src/hash-tree.cpp`) / runtime config (`concurrency.update_hash_tree`)
-
-**Category:** crash (an exception is thrown; there is no memory corruption) / missing input validation
-
-**Location:**
-- `src/hash-tree.cpp:956`: `m_concurrency{get_concurrency(static_cast<int>(concurrency))}` narrows uint64 to int.
-- `src/hash-tree.cpp:939-946`: `get_concurrency` keeps negative values.
-- `src/hash-tree.cpp:468-470`: `std::min(m_concurrency << 10, 16384)` turns into a huge `size_t`, and `batch.reserve(batch_size)` throws.
-- `src/machine.cpp:303`: the runtime value is passed to the hash tree without any check.
-- `src/machine.cpp:1556, 1614, 1627, 2361, 2675`: callers of `update_hash_tree()` that fail as a result.
-- `src/cartesi-machine.lua:2113`: the CLI `--concurrency=update_hash_tree:<number>` only checks that the value is a number.
-
-**Evidence:** The test builds a 1 MiB-RAM machine for each value and calls `get_root_hash` and `get_proof`. The values -1 and 4294967295 are accepted at construction, and then every hash call fails:
-```
-$ eval $(make -s env); timeout 60 lua5.4 bugs/w2b-08-concurrency-update-hash-tree-int-truncation/test.lua
-update_hash_tree=1: get_root_hash OK
-update_hash_tree=0: get_root_hash OK
-update_hash_tree=1000000: get_root_hash OK
-BUG: update_hash_tree=-1 accepted by constructor but get_root_hash fails: vector::reserve
-BUG: update_hash_tree=4294967295 accepted by constructor but get_root_hash fails: vector::reserve
-update_hash_tree=2147483648: get_root_hash OK
-exit=1
-```
-A reviewer reproduced the same failure through the C API. `cm_create_new` with the runtime config `{"concurrency":{"update_hash_tree":4294967295}}` succeeds, and then `cm_get_root_hash` returns -3 with "vector::reserve". The JSON parser also accepts `-1` for this uint64 field.
-
-Note: 0x80000000 (INT_MIN) does not fail. In practice `INT_MIN << 10` gives 0, `reserve(0)` succeeds, and the code runs single-threaded. The build uses `-std=c++20`, where left-shifting a negative value is defined, so the "signed-shift UB" in the original claim does not apply. The failure that matters is the `reserve` exception.
-
-**Scenario:** An operator of a PRT validator, Rollups Node or Dave node, or a CLI user, sets `concurrency.update_hash_tree` to an "unlimited" value such as `-1` or `UINT32_MAX`, or passes `--concurrency=update_hash_tree:4294967295`. The machine is created and runs without complaint. Then the first root hash, proof, step log or state comparison fails with the unhelpful message "vector::reserve", and the node can never compute a hash. The config is set by the operator, so neither an attacker nor guest code can trigger this.
-
-**Possible solution:** Validate and clamp the value where it enters, and do the arithmetic in `size_t`. In `get_concurrency`, take a `uint64_t`. Treat `0` as auto (`omp_get_max_threads()`) and clamp any other value to `[1, omp_get_max_threads()]` before converting to `int`; alternatively, reject values above `INT_MAX` with a clear `std::invalid_argument` in the machine constructor or the runtime-config parser. Compute the batch size as `std::min<size_t>(static_cast<size_t>(m_concurrency) << 10, 16384)`.
-
-**Severity:** low. Both reviewers and the prover agree. It needs an out-of-range value that the operator chose. It fails loudly and deterministically on the first hash call. It never produces wrong or nondeterministic hashes or proofs, corrupts no state, and is easy to work around by using `0` (auto).
-
-**Risks:** Of the bug: a node configured with an "unlimited" sentinel cannot compute any hash or proof, and the delayed failure with an unclear message makes it harder to diagnose. Of the fix: very low. Clamping changes no hashes, because concurrency affects only scheduling and not results. If the fix rejects bad values instead of clamping them, configs that "work" today with odd values may start failing at machine creation. For example, 0x80000000 currently runs single-threaded by accident.
-
-**Proof of concept:** `bugs/w2b-08-concurrency-update-hash-tree-int-truncation/test.lua`. To run it from the repo root after building:
-```
-eval $(make -s env); timeout 60 lua5.4 bugs/w2b-08-concurrency-update-hash-tree-int-truncation/test.lua
-```
-It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the value is validated or clamped. Rejecting the value in the constructor also counts as a pass.
-
-**ID**: `w2b-08-concurrency-update-hash-tree-int-truncation`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `w2a-04-concurrency-update-hash-tree-int-truncation`: run with `eval $(make -s env); lua5.4 bugs/w2a-04-concurrency-update-hash-tree-int-truncation/test.lua`.
-
 ### B57. read/write_virtual_memory silently do nothing for ranges that reach 2^64
 
 **Title**: `read/write_virtual_memory` report success and do nothing when `vaddr + length` reaches or passes 2^64 (Lua read then returns uninitialized heap bytes)
@@ -3964,7 +3908,7 @@ Exit code 1 means the bug reproduced. Exit code 0 means the setting took effect,
 
 **ID**: `u3-02-set-runtime-config-ignores-hash-tree-concurrency`
 
-**Related**: [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw).
+**Related**: B56 (fixed).
 
 ### B87. Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention
 

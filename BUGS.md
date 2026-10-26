@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-73 confirmed issues: 4 high, 15 medium, 54 low.
+72 confirmed issues: 4 high, 14 medium, 54 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -34,7 +34,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
 | [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail) | medium | pre-existing | JSON-RPC client (spawn_server) | Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail | `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/` |
-| [B13](#b13-lazily-loaded-forest-used-as-a-value-loses-its-unloaded-subtrees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Lazily loaded forest used as a value loses its unloaded subtrees | `bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/` |
 | [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Forest tree files keyed only by hash collide across heights and representations | `bugs/lua-04-content-addressing-ignores-height-and-representation/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
@@ -561,64 +560,6 @@ exit=1
 **Proof of concept**: `bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. It needs `curl` and `cartesi-jsonrpc-machine` in `PATH`. It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the bug is fixed.
 
 **ID**: `rpc-03-jsonrpc-invalid-id-still-executes`
-
-### B13. Lazily loaded forest used as a value loses its unloaded subtrees
-
-**Title**: A lazily loaded forest used as a value (push_back/pad_back/expand_leaf) loses its unloaded subtrees in the destination, and storing the destination leaves dangling tree files
-
-**Problem:** `frontier_forest_load` returns trees whose fixed-point values stay raw hashes until a query reaches them. Those hashes resolve only through `load_tree(forest, hash, height)`, and `load_tree` looks only in `forest.directory` of the forest passed to it. Suppose that loaded forest is passed as a value to `frontier_forest_push_back`/`frontier_forest_pad_back`, or as the subtree of `frontier_forest_expand_leaf`. `normalize_forest_value` hands the destination the source's root tree, and the source directory is lost. The destination's later queries call `load_tree` with the destination forest, which has no directory or a different one. So `get_node_hash`/`get_siblings` return `nil, "the node is below an opaque hash"` for positions the source forest answers. Storing the destination into its own directory makes it worse. `store_tree` writes the file of the inner root, but `store_children` only recurses into values that are already trees, so the files behind the raw-hash values are never copied. The new directory ends up holding a tree file whose child files exist only in the source directory, and those leaves stay unreachable after a reload. No error is raised at any point.
-
-**Origin:** introduced by this branch. Durable store and lazy load arrived with commit fcf6819 ("feat: store frontier forests durably in hash-tree"); `main` has no `load_tree` or `frontier_forest_load`.
-
-**Area:** Lua library `cartesi.hash-tree` (frontier forests: durable store/load and composition of forests as values).
-
-**Category:** correctness (data availability / persistence integrity).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:525-527`: `load_tree` resolves only against `forest.directory` of the querying forest
-- `src/cartesi/hash-tree.lua:690-701`: `normalize_forest_value` returns `value[value.height + 1]` and drops the source forest's directory
-- `src/cartesi/hash-tree.lua:642-649`: `descend_tree` calls `load_tree` on the destination forest and returns "opaque"
-- `src/cartesi/hash-tree.lua:866-904`: `frontier_forest_expand_leaf` takes the same path (`load_tree` at line 890)
-- `src/cartesi/hash-tree.lua:563-572`: `store_children` skips raw-hash values, so files from a foreign directory are never copied
-- `src/cartesi/hash-tree.lua:577-596`: `store_tree` writes a parent file that references the missing files
-
-**Evidence:** The test builds `inner` (height 3), which is a height-1 forest `{a, b}` padded 4 times. It stores `inner` in directory A and loads it back, then uses the loaded forest as a value. The controls pass: the loaded forest queried directly, and the same composition done with an in-memory `inner`. All four compositions of the loaded forest fail. Root hashes stay correct.
-```
-$ eval $(make -s env); lua5.4 bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/test_loaded_forest_as_value.lua
-ok:   loaded inner answers leaf 1 itself
-ok:   outer with in-memory inner, leaf 1
-BUG: pad_back(loaded inner) into in-memory outer: leaf 1: expected 0xb5553d...5510, got nil (the node is below an opaque hash)
-ok:   root hash still matches
-BUG: outer stored in B and reloaded: leaf 9: expected 0xb5553d...5510, got nil (the node is below an opaque hash)
-BUG: push_back(loaded inner) into outer with directory C: leaf 3: expected 0xb5553d...5510, got nil (the node is below an opaque hash)
-ok:   leaf 0 opaque before expansion
-BUG: expand_leaf(loaded inner): leaf 1: expected 0xb5553d...5510, got nil (the node is below an opaque hash)
-4 failure(s)
-```
-After the store, directory B holds the inner root's file `0x0c96...json`, a fixed-point tree whose value is `0x805b...`. It does not hold `0x805b...json`, which exists only in A.
-
-**Scenario:** A validator built on the shipped Lua library persists bundle or claim forests and, after a restart, reloads them with `frontier_forest_load`. It then composes one into another forest: it pads it into an in-memory or differently stored outer forest, or passes it to `frontier_forest_expand_leaf` to reveal a leaf. Commitments still match, so nothing looks wrong. But when a dispute step needs siblings or a node hash at those positions, `get_siblings`/`get_node_hash` return nil/opaque. The validator then cannot produce the proof and can miss the dispute deadline. Its persisted state also carries dangling references, so restarting does not fix it. The experimental node in `doc/recipes/prt.lua` does not hit this today: it keeps all forests in one shared directory and composes only raw hashes or freshly built in-memory forests.
-
-**Possible solution:** Pick one:
-- Bind each lazily loaded tree to the directory it came from, for example by storing the source directory, or a loader closure, on the tree or on its raw-value container. `load_tree` and `descend_tree` would then resolve against that directory rather than the destination's.
-- Have `normalize_forest_value` (and `expand_leaf`) reject, or fully materialize, a forest value whose `directory` differs from the destination's.
-
-In either case, `store_tree`/`store_children` should copy (or hard-link) the files behind raw values that are reachable from a foreign directory. Failing that, they should refuse the store instead of writing files that reference missing children.
-
-**Severity:** medium. Hashes and proofs are never wrong (root hashes are preserved). The failure is clean and avoidable, because it occurs only when a reloaded forest is composed into a forest with no directory or a different one. The reference node does not do this. Both reviewers rated it medium. A validator relying on this pattern could still fail to produce dispute proofs and persist incomplete state with no error, so it is more than low.
-
-**Risks:** The bug's risk is lost availability of proof data. A validator cannot answer a step for positions it believes it holds, and a store reports success while leaving dangling references, so the problem shows up only later, during a dispute. On the fix side:
-- Tying trees to their source directory keeps a reference to that directory alive and makes lifetime and removal (`remove_stored`) harder to reason about.
-- Materializing a forest eagerly can be expensive for large forests.
-- Copying files across directories changes store cost and needs the same crash-safe ordering (children first, then sync) that the current store uses.
-- Rejecting such values is the simplest option, but it breaks callers that currently work by accident because they share one directory.
-
-**Proof of concept:** `bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/test_loaded_forest_as_value.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `all ok` once it is fixed. It writes into a unique scratch directory under the first argument, `$WORKDIR` or `$TMPDIR` (default `/tmp`). Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/test_loaded_forest_as_value.lua
-```
-
-**ID**: `lua-03-loaded-forest-as-value-loses-lazy-subtrees`
 
 ### B14. Forest tree files keyed only by hash collide across heights and representations
 

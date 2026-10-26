@@ -1295,6 +1295,19 @@ describe("hash-tree.lua", function()
                 end, "stored in another directory")
             end)
 
+            it("keeps the stored trees of a loaded forest used as a value elsewhere", function()
+                local _ <close>, directory = new_scope_directory()
+                local frontier_path = directory .. "/frontier.json"
+                hash_tree.frontier_forest_store(fixtures.forests(), directory, frontier_path)
+                local forest = hash_tree.frontier_forest(H4, "keccak256")
+                hash_tree.frontier_forest_push_back(forest, hash_tree.frontier_forest_load(directory, frontier_path))
+                expect_same_queries(fixtures.forests(), forest)
+                local _ <close>, other_directory = new_scope_directory()
+                hash_tree.frontier_forest_store(forest, other_directory, other_directory .. "/frontier.json")
+                local reopened = hash_tree.frontier_forest_load(other_directory, other_directory .. "/frontier.json")
+                expect_same_queries(fixtures.forests(), reopened)
+            end)
+
             it("rewrites the files an interrupted store left missing", function()
                 local _ <close>, directory = new_scope_directory()
                 local frontier_path = directory .. "/frontier.json"

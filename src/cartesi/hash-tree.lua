@@ -559,6 +559,24 @@ local function load_tree(forest, hash, height)
     return tree
 end
 
+-- Loads every stored tree below a tree of the forest, so the tree no longer needs the forest's
+-- directory. No tree is stored at height 0, so leaf hashes are not looked up.
+local function load_stored_trees(forest, tree)
+    if tree.kind == "mixed" then
+        load_stored_trees(forest, tree.left)
+        load_stored_trees(forest, tree.right)
+        return
+    end
+    local values = tree[1]
+    for i, value in ipairs(values) do
+        if not is_tree(value) and tree.base_height > 0 then
+            value = load_tree(forest, value, tree.base_height) or value
+            values[i] = value
+        end
+        if is_tree(value) then load_stored_trees(forest, value) end
+    end
+end
+
 local store_tree
 
 -- Stores the trees directly below a tree, as store_tree does.
@@ -691,6 +709,8 @@ end
 
 -- Returns one raw hash or a completed forest's root tree after validating it against
 -- the destination forest. Forests therefore never occur inside fixed-point or mixed trees.
+-- The trees of a forest stored in another directory are loaded first, since the destination
+-- cannot reach that directory.
 local function normalize_forest_value(forest, value, value_height)
     local declared_height = normalize_hash_height(value_height)
     if type(value) == "string" then
@@ -701,6 +721,7 @@ local function normalize_forest_value(forest, value, value_height)
     assert(value.hash_function == forest.hash_function, "value hash function mismatch")
     local root = assert(value[value.height + 1], "a forest value is not full")
     assert(value_height == nil or value_height == value.height, "value height mismatch")
+    if value.directory and value.directory ~= forest.directory then load_stored_trees(value, root) end
     return root, value.height
 end
 

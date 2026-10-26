@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-70 confirmed issues: 4 high, 14 medium, 52 low.
+69 confirmed issues: 4 high, 13 medium, 52 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -34,7 +34,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
 | [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail) | medium | pre-existing | JSON-RPC client (spawn_server) | Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail | `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/` |
-| [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Forest tree files keyed only by hash collide across heights and representations | `bugs/lua-04-content-addressing-ignores-height-and-representation/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
@@ -558,79 +557,6 @@ exit=1
 **Proof of concept**: `bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. It needs `curl` and `cartesi-jsonrpc-machine` in `PATH`. It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the bug is fixed.
 
 **ID**: `rpc-03-jsonrpc-invalid-id-still-executes`
-
-### B14. Forest tree files keyed only by hash collide across heights and representations
-
-**Title**: Frontier-forest tree files are keyed only by hash: the same hash at another height makes `frontier_forest_load` raise, and a coarser tree stored first permanently hides a finer tree's leaves
-
-**Problem:** `frontier_forest_store` writes each tree to `<directory>/<hash>.json`, and the file name holds nothing but the tree hash. Three things combine:
-- `get_tree_path` names the file by `tree.hash` only.
-- `store_tree` writes the file only when no file with that name exists, so the first tree stored under a hash owns the file.
-- `load_tree` asserts `stored.height == height`, so a file for the same hash at another height raises an error. It does not treat the hash as opaque.
-
-Raw values carry a height the caller declares (`append`, `pad_back` and `push_back` take a `value_height`). So one 32-byte hash can stand for different subtrees. The two hashes need not collide: the subtrees are equal as hash trees but described differently.
-- **Different height.** Take the pristine chain `z0 = H(zero word)`, `z[i+1] = H(z[i], z[i])`. Four leaves `z1` form a height-2 node with hash `z3`. Eight leaves `z0` form a height-3 node with the same hash `z3`.
-- **Same height, different representation.** Two opaque height-1 values `R = H(a,b)` (fixed_point, base 1) and the four leaves `{a,b,a,b}` (base 0) give the same height-2 hash.
-
-Consequences:
-- (a) Whichever tree is stored second under a hash makes later loads raise `stored tree height mismatch`. A mixed tree loads its children eagerly, and frontier levels load at open time, so a single collision aborts the whole `frontier_forest_load`. If the collision is reached lazily through `descend_tree`, `get_node_hash` and `get_siblings` raise instead of returning `nil, "the node is below an opaque hash"`. That defeats a caller's open-the-bundle fallback.
-- (b) If the coarse representation is stored first, the finer tree's store skips the file. After reload, the fine forest's leaves are opaque. `get_node_hash` and `get_siblings` return `nil` for nodes they answered before the store.
-
-A shared directory is not needed. A single forest stored alone into an empty directory shows both failures. The documented contract fails: a stored forest is meant to reopen and keep its trees, and the directory is meant to be shared ("successive snapshots of a growing forest share them").
-
-**Origin:** Introduced by this branch. `src/cartesi/hash-tree.lua` was added in commit fcf6819 ("store frontier forests durably") and does not exist on `main`. It ships as the `cartesi.hash-tree` Lua module.
-
-**Area:** Lua library `cartesi.hash-tree`, frontier forest persistence (`frontier_forest_store`, `frontier_forest_load`, lazy loads in `descend_tree`).
-
-**Category:** Correctness / persistence (load failure, silent loss of stored data).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:503`: `get_tree_path` names files by hash only.
-- `src/cartesi/hash-tree.lua:529`: `load_tree` asserts `stored.height == height`.
-- `src/cartesi/hash-tree.lua:548-551`: mixed trees load their children eagerly, so one mismatch aborts the whole load.
-- `src/cartesi/hash-tree.lua:581`: `store_tree` skips a file that already exists.
-- `src/cartesi/hash-tree.lua:645`: lazy `load_tree` in `descend_tree`, reached from `get_node_hash` and `get_siblings`.
-- `src/cartesi/hash-tree.lua:1010`: `frontier_forest_load` loads every frontier level.
-- Shared-directory use: `doc/recipes/prt.lua:2511`, `2523`, `2535` (store) and `2786`, `2799`, `2804` (load). The epoch builder, the mcycle forest and every uarch claim forest all use `<epoch>/forests`.
-
-**Evidence:** The PoC uses only the public `cartesi.hash-tree` API. Every case asserts that the in-memory forest answers correctly before the store.
-- (a) and (a'): two forests share one directory. They hold the same hash `z3` at heights 2 and 3. The forest stored second fails to reload, whichever order is used.
-- (b): coarse `pad_back(R,2,1)` is stored first, then fine `append{a,b,a,b}`. The reloaded fine forest has lost its leaves.
-- (c): a single height-5 forest stored alone holds `z3` at (0,2) and at (8,3). It cannot be reloaded.
-- (d): a single height-3 forest stored alone holds `pad_back(R,2,1)` and then `{a,b,a,b}`. It loses leaf 4 after reload.
-```
-$ eval $(make -s env); lua5.4 bugs/lua-04-content-addressing-ignores-height-and-representation/test_tree_files_keyed_by_hash_only.lua
-BUG (a): reloading forest Y raises because forest X stored the same hash at another height: .../src/cartesi/hash-tree.lua:529: stored tree height mismatch
-BUG (a'): reloading forest X raises because forest Y stored the same hash at another height: .../src/cartesi/hash-tree.lua:529: stored tree height mismatch
-BUG (b): reloaded fine forest lost its leaves: get_node_hash(0,0) -> nil (the node is below an opaque hash); get_siblings(1,0) -> nil (the node is below an opaque hash)
-BUG (c): a single forest stored alone cannot be reloaded: .../src/cartesi/hash-tree.lua:529: stored tree height mismatch
-BUG (d): single forest stored alone lost leaf 4 after reload: the node is below an opaque hash
-5 check(s) failed: tree files are keyed only by hash
-exit=1
-```
-
-**Scenario:**
-- **Affected users.** A validator or tool built on `cartesi.hash-tree` keeps forests on disk across restarts, in one directory or in a directory shared between forests, as the PRT recipe does. Its leaves mix declared heights or granularities. Examples are leaves that are roots of memory regions of different sizes (pristine or repeated content gives equal hashes at different heights), or forests with different bundle heights over the same values.
-- **(a) Crash on startup.** After a restart, `frontier_forest_load` raises, so the node cannot reopen its stored state and must rebuild it by re-running the machine.
-- **(b) Lost answers.** The reloaded forest silently becomes opaque below the shared hash. The node can no longer answer node-hash or sibling queries it answered before, and so cannot produce those proofs without recomputation. Under a tournament deadline, this can cost an honest player the dispute.
-- **PRT recipe.** Neither the prover nor the reviewers found a trigger in the recipe's own forests. Those forests put state hashes at height 0 and bundle roots at one bundle height per forest. State hashes include `mcycle`, so values repeat only in the halted region, which is represented the same way everywhere. A cross-height match there would need a Keccak collision. An honest node stores only forests it computed itself, so an adversary cannot inject colliding trees.
-- **Not affected.** The CLI does not use these functions. Wrong hashes are never accepted: `load_tree` verifies the hash, so failures are loud (an error) or show up as opacity, never as a wrong proof.
-
-**Possible solution:**
-- Make the file name identify the representation, not just the hash. For example, `<hex>-h<height>.json`, and ideally also the kind and base height, or a digest of the stored contents. Then `load_tree(hash, height)` looks up only a file of the right height.
-- Also make `load_tree` treat a height or representation mismatch as "no file" (return `nil`, so the hash stays opaque) instead of raising. This keeps the opaque-hash fallback working.
-- To keep the finest representation, `store_tree` could overwrite an existing file when its representation is coarser (higher `base_height`, or a fixed-point file where the new tree is mixed). Writing under a representation-specific name also does this.
-- A simpler mitigation for callers is one directory per forest. That fixes only the cross-forest cases (a, a', b), not the single-forest cases (c, d).
-
-**Severity:** Medium. One reviewer rated it low: there is no PRT trigger, and it never yields wrong proofs. The other rated it medium, after showing it fires inside a single forest stored alone. Medium is the reconciled rating. A shipped persistence API can produce a store that cannot be loaded, or that silently loses leaf-level data, on legitimate input. It is not high, because the PRT recipe's forests do not reach it and an adversary cannot force it.
-
-**Risks:**
-- **Of the bug.** A validator restart can fail outright, or come back unable to answer queries and proofs that worked before. Recovery means re-running the machine, which costs time during disputes and fails if the snapshot is gone. Stores already written in the hash-only layout keep the ambiguity.
-- **Of the fix.** Changing the file name changes the on-disk format. Existing stores written with hash-only names would become unreadable unless `load_tree` falls back to the old name, checking the height. Overwriting files in place must stay crash-safe (temporary file and rename, as `write_file` already does). It must also not break the store's commit-point guarantee, because another frontier file may reference the old file. Representation-specific names avoid in-place rewrites. Including the height in the name grows the directory only when the same hash is used at several heights.
-
-**Proof of concept:** `bugs/lua-04-content-addressing-ignores-height-and-representation/test_tree_files_keyed_by_hash_only.lua`. It works under `$WORKDIR` (or `$TMPDIR`, `/tmp`, or a directory given as the first argument) and removes its files at the end. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-04-content-addressing-ignores-height-and-representation/test_tree_files_keyed_by_hash_only.lua`. It exits 1 and prints `BUG` lines while the bug is present. It prints `PASS` once fixed.
-
-**ID**: `lua-04-content-addressing-ignores-height-and-representation`
 
 ### B15. frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof
 
@@ -2983,7 +2909,7 @@ The result is a stuck query or expansion at one position, never a wrong hash or 
 
 **ID**: `p2-06-forest-store-batch-expansion-unordered-dir-sync`
 
-**Related**: B12 (fixed), [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations).
+**Related**: B12 (fixed), B14 (fixed).
 
 ### B69. ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices
 

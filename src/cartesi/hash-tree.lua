@@ -486,7 +486,8 @@ local function new_mixed_tree(hash_function, left, right)
 end
 -- docs:end new_mixed_tree
 
--- A forest with a directory keeps each fixed-point or mixed tree in a file named by its hash.
+-- A forest with a directory keeps each fixed-point or mixed tree in a file named by its hash and
+-- height.
 -- A file holds what cannot be recomputed. A fixed-point tree stores its base values and a mixed
 -- tree its children, all as hashes, so a loaded tree reproduces its hash only when every stored
 -- value is intact. A fixed-point tree over a single raw hash has that hash, so it has no file and
@@ -502,7 +503,9 @@ local STORED_SCHEMAS = {
     StoredFrontier = { levels = "StoredLevels" },
 }
 
-local function get_tree_path(directory, hash) return directory .. "/" .. cartesi.tohex(hash) .. ".json" end
+local function get_tree_path(directory, hash, height)
+    return directory .. "/" .. cartesi.tohex(hash) .. "-" .. height .. ".json"
+end
 
 local function get_parent_directory(path) return path:match("^(.*)/[^/]*$") or "." end
 
@@ -525,7 +528,7 @@ end
 -- no directory or the directory has no file for the hash. A file whose contents do not
 -- reproduce the hash and height is an error.
 local function load_tree(forest, hash, height)
-    local path = forest.directory and get_tree_path(forest.directory, hash)
+    local path = forest.directory and get_tree_path(forest.directory, hash, height)
     if not (path and fs.exists(path)) then return nil end
     local stored = cartesi.fromjson(fs.read_file(path), "StoredTree", STORED_SCHEMAS)
     assert(stored.height == height, "stored tree height mismatch")
@@ -591,16 +594,49 @@ local function store_children(forest, tree, written)
     end
 end
 
+-- Stores the subtrees of a tree at a height below it, as far as the tree describes them.
+local function store_subtrees(forest, tree, height, written)
+    if tree.height == height then
+        store_tree(forest, tree, written)
+    elseif tree.kind == "mixed" then
+        store_subtrees(forest, tree.left, height, written)
+        store_subtrees(forest, tree.right, height, written)
+    elseif tree.base_height > height then
+        for _, value in ipairs(tree[1]) do
+            if not is_tree(value) then value = load_tree(forest, value, tree.base_height) end
+            if value then store_subtrees(forest, value, height, written) end
+        end
+    else
+        local log2_count = height - tree.base_height
+        local count = math.min(#tree[1] + (1 << log2_count), 1 << (tree.height - tree.base_height))
+        for first = 1, count, 1 << log2_count do
+            store_tree(
+                forest,
+                new_fixed_point_tree(forest.hash_function, tree.base_height, log2_count, tree[1], first),
+                written
+            )
+        end
+    end
+end
+
 -- Stores a tree and the trees below it that the forest has not recorded as durable, children
 -- first, appending each to written. A file left by an interrupted store may lack the files of its
 -- children, so finding a file does not end the walk. A single-value tree has no file, since its
--- parent records the hash of its value, but an expansion of that value is stored.
+-- parent records the hash of its value, but an expansion of that value is stored. A file another
+-- tree with the same hash and height left may describe it down to another height, where loads
+-- then continue, so the subtrees at that height are stored too.
 store_tree = function(forest, tree, written)
     if forest.durable[tree] then return end
     store_children(forest, tree, written)
     if tree.kind == "fixed_point" and tree.base_height == tree.height then return end
-    local path = get_tree_path(forest.directory, tree.hash)
-    if not fs.exists(path) then
+    local path = get_tree_path(forest.directory, tree.hash, tree.height)
+    if fs.exists(path) then
+        local stored = cartesi.fromjson(fs.read_file(path), "StoredTree", STORED_SCHEMAS)
+        local stored_base_height = stored.kind == "mixed" and tree.height - 1 or stored.base_height
+        if stored_base_height ~= (tree.kind == "mixed" and tree.height - 1 or tree.base_height) then
+            store_subtrees(forest, tree, stored_base_height, written)
+        end
+    else
         local stored
         if tree.kind == "mixed" then
             stored = { kind = "mixed", height = tree.height, left = tree.left.hash, right = tree.right.hash }

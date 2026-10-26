@@ -1141,8 +1141,8 @@ describe("hash-tree.lua", function()
         end)
 
         describe("frontier_forest_store", function()
-            local function tree_path(directory, hash)
-                return directory .. "/" .. cartesi.tohex(hash) .. ".json"
+            local function tree_path(directory, hash, height)
+                return directory .. "/" .. cartesi.tohex(hash) .. "-" .. height .. ".json"
             end
 
             -- Every node and sibling query, including opaque results, must agree between two full forests.
@@ -1257,7 +1257,7 @@ describe("hash-tree.lua", function()
                 for name, contents in pairs(before) do
                     expect.equal(fs.read_file(directory .. "/" .. name), contents)
                 end
-                expect.truthy(io.open(tree_path(directory, hash_tree.frontier_forest_get_root_hash(bundle))))
+                expect.truthy(io.open(tree_path(directory, hash_tree.frontier_forest_get_root_hash(bundle), 2)))
                 -- The unchanged frontier reopens the forest with the stored expansion.
                 local reopened = hash_tree.frontier_forest_load(directory, frontier_path)
                 expect_same_queries(forest, reopened)
@@ -1314,7 +1314,7 @@ describe("hash-tree.lua", function()
                 hash_tree.frontier_forest_store(fixtures.forests(), directory, frontier_path)
                 -- A crash can make a parent's file durable without a child's. Storing the same
                 -- forest again, as after a restart, must restore the child despite the parent's file.
-                local bundle_path = tree_path(directory, hash_tree.frontier_forest_get_root_hash(new_bundle(1)))
+                local bundle_path = tree_path(directory, hash_tree.frontier_forest_get_root_hash(new_bundle(1)), 2)
                 assert(os.remove(bundle_path))
                 local forest = fixtures.forests()
                 hash_tree.frontier_forest_store(forest, directory, frontier_path)
@@ -1322,12 +1322,35 @@ describe("hash-tree.lua", function()
                 expect_same_queries(forest, hash_tree.frontier_forest_load(directory, frontier_path))
             end)
 
+            it("keeps trees that share a hash at another height or base height", function()
+                local _ <close>, directory = new_scope_directory()
+                -- Four leaves H(x, x) and eight leaves x give the same hash at heights 2 and 3.
+                local x = leaves[1]
+                local forest = hash_tree.frontier_forest(H4, "keccak256")
+                hash_tree.frontier_forest_pad_back(forest, cartesi.keccak256(x, x), 4)
+                hash_tree.frontier_forest_append(forest, leaves, 5, 9)
+                hash_tree.frontier_forest_pad_back(forest, x, 8)
+                hash_tree.frontier_forest_store(forest, directory, directory .. "/heights.json")
+                expect_same_queries(forest, hash_tree.frontier_forest_load(directory, directory .. "/heights.json"))
+                -- Two opaque values H(a, b) at height 1 and the leaves a, b, a, b give the same hash at height 2.
+                local a, b = leaves[1], leaves[2]
+                local reference = hash_tree.frontier_forest(H4, "keccak256")
+                hash_tree.frontier_forest_append(reference, { a, b, a, b, a, b, a, b })
+                hash_tree.frontier_forest_append(reference, leaves, 9)
+                forest = hash_tree.frontier_forest(H4, "keccak256")
+                hash_tree.frontier_forest_pad_back(forest, cartesi.keccak256(a, b), 2, 1)
+                hash_tree.frontier_forest_append(forest, { a, b, a, b })
+                hash_tree.frontier_forest_append(forest, leaves, 9)
+                hash_tree.frontier_forest_store(forest, directory, directory .. "/bases.json")
+                expect_same_queries(reference, hash_tree.frontier_forest_load(directory, directory .. "/bases.json"))
+            end)
+
             it("rejects tampered, misplaced, and mismatched stored trees", function()
                 local _ <close>, directory = new_scope_directory()
                 local frontier_path = directory .. "/frontier.json"
                 local forest = fixtures.forests()
                 hash_tree.frontier_forest_store(forest, directory, frontier_path)
-                local bundle_path = tree_path(directory, hash_tree.frontier_forest_get_root_hash(new_bundle(1)))
+                local bundle_path = tree_path(directory, hash_tree.frontier_forest_get_root_hash(new_bundle(1)), 2)
                 local original = fs.read_file(bundle_path)
                 local function expect_query_fails(message)
                     local loaded = hash_tree.frontier_forest_load(directory, frontier_path)
@@ -1341,7 +1364,7 @@ describe("hash-tree.lua", function()
                 )
                 expect_query_fails("stored tree hash mismatch")
                 fs.write_file(
-                    fs.read_file(tree_path(directory, hash_tree.frontier_forest_get_root_hash(new_bundle(5)))),
+                    fs.read_file(tree_path(directory, hash_tree.frontier_forest_get_root_hash(new_bundle(5)), 2)),
                     bundle_path
                 )
                 expect_query_fails("stored tree hash mismatch")
@@ -1353,9 +1376,9 @@ describe("hash-tree.lua", function()
                 local other = hash_tree.frontier_forest(H4, "keccak256")
                 hash_tree.frontier_forest_pad_back(other, hash_tree.frontier_forest_get_root_hash(new_bundle(1)), 8, 1)
                 hash_tree.frontier_forest_store(other, directory, directory .. "/other.json")
-                expect.fail(function()
-                    hash_tree.frontier_forest_get_node_hash(other, 0, 0)
-                end, "stored tree height mismatch")
+                local node_hash, err = hash_tree.frontier_forest_get_node_hash(other, 0, 0)
+                expect.equal(node_hash, nil)
+                expect.equal(err, "the node is below an opaque hash")
                 local frontier = fs.read_file(frontier_path)
                 fs.write_file((frontier:gsub('"leaf_count":16', '"leaf_count":15')), frontier_path)
                 expect.fail(function()

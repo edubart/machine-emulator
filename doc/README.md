@@ -9183,7 +9183,7 @@ replaces. No ancestor hash changes, so the forest’s root is unaffected.
 When the opaque hash is the repeated last value of a fixed-point tree,
 every repetition reads the same entry, so all of them share the
 expansion. A forest stored with `frontier_forest_store` keeps its trees
-in a directory, one file per tree named by its hash, and
+in a directory, one file per tree named by its hash and height, and
 `frontier_forest_load` reopens it. Queries and expansions then load the
 stored tree in place of a raw hash when they reach one, and an expansion
 also stores its new trees there.

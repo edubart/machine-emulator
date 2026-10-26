@@ -11,7 +11,7 @@ local cartesi = require("cartesi")
 
 local self_path = arg[0]
 local W = self_path:match("^(.*)/[^/]*$") or "."
-local D = W .. "/run"
+local D = os.getenv("PHTC_TORN_DIR") or assert(io.popen("mktemp -d"):read("l"))
 local PHTC_SIZE = 256
 local RAM_LEN = 4 << 20
 local NPAGES = RAM_LEN // 4096

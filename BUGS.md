@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-84 confirmed issues: 6 high, 17 medium, 61 low.
+83 confirmed issues: 6 high, 16 medium, 61 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -42,7 +42,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
-| [B66](#b66-verifying-through-a-json-rpc-machine-object-crashes-on-short-sibling-lists-and-accepts-logs-the-local-verifier-rejects) | medium | pre-existing | JSON-RPC client (verify_*), access-log JSON | Verifying through a JSON-RPC machine object crashes on short sibling lists and accepts logs the local verifier rejects | `bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
 | [B87](#b87-hash-tree-updates-start-a-full-openmp-team-for-tiny-batches-slowing-collection-100-500x-under-cpu-contention) | medium | pre-existing | Hash tree (parallel page hashing) | Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention | `bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/` |
@@ -3412,65 +3411,6 @@ eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backsla
 **ID**: `w2a-07-hash-tree-lua-parent-dir-ignores-backslash`
 
 **Related**: [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root), [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows).
-
-### B66. Verifying through a JSON-RPC machine object crashes on short sibling lists and accepts logs the local verifier rejects
-
-**Title**: Verifying through a JSON-RPC machine object re-serializes an unchecked access log: the client segfaults on an empty `sibling_hashes` (out-of-bounds read on a short one), and logs the local verifier rejects are accepted
-
-**Problem**: `cm_verify_step_uarch`, `cm_verify_reset_uarch` and `cm_verify_send_cmio_response` first parse the caller's JSON log into a C++ `access_log` with `from_json`. `from_json(access)` accepts a `sibling_hashes` array of any length. The count is checked against the proof depth (`64 - max(log2_size, 5)`) only later, in `access::make_proof`, during a local replay. When `m` is a JSON-RPC machine, `jsonrpc_machine::do_verify_*` skips the local replay. It sends the parsed log to the server through `to_json(access)`, and that function has two defects:
-- It runs `for (int i = 0; i < depth; i++) s.push_back(encode_base64(sibling_hashes[i]))` and never compares `depth` with `sibling_hashes.size()`. A short vector is read out of bounds. An empty vector has a null data pointer, so the client segfaults every time.
-- It drops data. Siblings beyond `depth` are cut off, and `written` / `written_hash` are emitted only for `write` accesses. So the server verifies a cleaned-up log and accepts logs that the local or static verifier rejects. The verdict on the same log depends on whether the verifier object is local or remote.
-
-**Origin**: pre-existing. `origin/main` has the same `to_json(access)` loop and the same `jsonrpc_machine::do_verify_*` forwarding. This branch does not touch them.
-
-**Area**: JSON-RPC client verification of access logs: `verify_step_uarch`, `verify_reset_uarch` and `verify_send_cmio_response` called on a remote machine object (C API with a `jsonrpc_machine`, Lua `remote:verify_*`). The bug is in access-log JSON (de)serialization in `json-util.cpp`.
-
-**Category**: crash (client-side null or out-of-bounds read on untrusted input) / input validation (local vs. remote verifier inconsistency).
-
-**Location**:
-- `src/json-util.cpp:2278-2290`: the `sibling_hashes` loop in `to_json(const access &)` indexes `sibling_hashes[i]` up to `depth` with no bounds check (line 2287).
-- `src/json-util.cpp:2269-2278`: `written_hash` / `written` are serialized only when `type == write`, so they are dropped silently from a `read` access.
-- `src/json-util.cpp:1403-1408`: `from_json(access)` accepts a `sibling_hashes` vector of any length.
-- `src/jsonrpc-machine.cpp:1033-1058`: `do_verify_step_uarch`, `do_verify_reset_uarch` and `do_verify_send_cmio_response` re-serialize the parsed `access_log` into the request.
-- `src/cm.cpp:915-960` (`cm_verify_step_uarch`, `cm_verify_reset_uarch`) and `src/cm.cpp:1381` (`cm_verify_send_cmio_response`): parse the log, then dispatch to `m` when `m != nullptr`.
-- For comparison, the local checks that the remote path skips: `src/access-log.hpp:188` ("access sibling hash count is inconsistent with proof size") and `src/uarch-replay-state-access.hpp:158` ("unexpected written data in ... read access").
-
-**Evidence**: The test builds a 1 MiB RAM-only machine, runs `log_step_uarch`, spawns a JSON-RPC server, and verifies modified copies of the log two ways: locally (`cartesi.machine:verify_step_uarch`) and through the remote object. The two crash cases run in child processes.
-```
-honest log: local and remote accept
-extra sibling: local	false	access sibling hash count is inconsistent with proof size	| remote	true	== after
-BUG: extra sibling hash: local verifier rejects, remote verifier accepts
-written on read access: local	false	unexpected written data in 1st access read access to uarch.cycle	| remote	true	== after
-BUG: written data on read access: local verifier rejects, remote verifier accepts
-missing siblings (empty): child exit=139
-Segmentation fault
-BUG: remote verify_step_uarch with empty sibling_hashes crashed the client process (exit 139, SIGSEGV)
-missing siblings (few): child exit=0
-child remote result:	false	siblings and read hash do not match root hash before 1st access to uarch.cycle
-```
-Run: `eval $(make -s env); lua5.4 bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/test-remote-verify-log.lua` (exits 1, under 1 s). With 40 siblings removed, this build does not crash. The loop reads heap memory past the vector and sends it to the server, which then rejects the log with a misleading error. Whether that read crashes depends on heap layout.
-
-**Scenario**: A validator, dispute tool or app verifies a log it did not produce through a remote machine object, for example Lua `remote:verify_step_uarch(root, log)` or C `cm_verify_step_uarch(jsonrpc_m, ...)`. The counterparty or a corrupted store supplies the honest log with `accesses[1].sibling_hashes = []`. The verifying process segfaults inside `to_json` instead of getting an error, and the node or tool dies. With extra siblings, or `written` data on a read access, the remote verifier returns the honest after-hash where the local or static verifier raises an error. Tooling that compares the two, or relies on the remote verifier to reject malformed logs before passing them on (for example, before submitting them on-chain), gets inconsistent results. The PRT node recipes (`doc/recipes/prt.lua`, `prt-ethereum.lua`, `vg.lua`) are not affected. They call the static `cartesi.machine:verify_*`, which takes the local path and rejects these logs cleanly.
-
-**Possible solution**:
-- In `to_json(const access &)`, throw (or serialize the vector as-is) when `sibling_hashes.size() != depth`. Never index past `size()`.
-- Serialize `written` / `written_hash` whenever they are present, whatever the access type, so the server sees exactly what the caller sent.
-- Better still, check access-log shape in `from_json(access)`: the sibling count must equal `64 - max(log2_size, 5)`, read and written sizes must match `log2_size`, and a read access must have no written fields. Then the local and remote paths reject the same logs at parse time.
-- Alternatively, have `jsonrpc_machine::do_verify_*` forward the caller's original JSON text instead of a round-tripped `access_log`.
-
-Add regression tests: an empty or short `sibling_hashes`, an extra sibling, and `written` on a read access, each through a remote machine object, must raise an error the same way the local verifier does.
-
-**Severity**: medium. Both reviewers rated it medium, down from the suspected high. The crash is a deterministic client segfault (a null or out-of-bounds read, not a write) on untrusted input passed to a legitimate public API. But the main validator path, the static or local verifier used by the PRT node, is not affected. The strictness mismatch only accepts logs that encode the honest transition and returns the honest after-hash, so no wrong state transition, hash or proof is ever accepted.
-
-**Risks**:
-- Of the bug: a process that verifies untrusted logs through a JSON-RPC machine can be crashed remotely by one malformed field. A short sibling list leaks client heap bytes to the server in the request. The verdict on the same log depends on whether the verifier is local or remote, which can mislead tooling that uses a remote verifier as a gate.
-- Of the fix: a stricter `from_json` could reject logs that some callers produce today with redundant fields, such as written data on read accesses or extra siblings. Those logs are already rejected by the local verifier, so the change mainly affects the remote path. Changing what `to_json` emits for read accesses changes the JSON that `log_*` APIs return only if such logs can be produced, which the emulator itself never does.
-
-**Proof of concept**: `bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/test-remote-verify-log.lua`. It needs `cartesi`, `cartesi.jsonrpc` and `cartesi-jsonrpc-machine` on PATH; no machine images are needed. Run from the repo root with `eval $(make -s env); lua5.4 bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/test-remote-verify-log.lua`. It exits 1 and prints BUG lines while the defect is present, and prints "OK: no defect" and exits 0 once fixed.
-
-**ID**: `p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-`
-
-**Related**: [B44](#b44-json-parsers-truncate-64-bit-log2-sizes-in-access-logs-and-proofs-without-range-checks).
 
 ### B67. Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable
 

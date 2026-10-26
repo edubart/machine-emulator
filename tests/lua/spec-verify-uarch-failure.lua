@@ -728,5 +728,45 @@ describe("access proof sibling count", function()
     end
 end)
 
+describe("verify_step_uarch through a remote machine", function()
+    local jsonrpc = require("cartesi.jsonrpc")
+    local corruptions = {
+        {
+            "no siblings",
+            "access sibling hash count is inconsistent with proof size",
+            function(log)
+                log.accesses[1].sibling_hashes = {}
+            end,
+        },
+        {
+            "extra siblings",
+            "access sibling hash count is inconsistent with proof size",
+            function(log)
+                change_sibling_count(log, 1)
+            end,
+        },
+        {
+            "written data in read accesses",
+            "unexpected written hash in 1st access read access to uarch.cycle",
+            function(log)
+                log.accesses[1].written_hash = bad_hash
+            end,
+        },
+    }
+    for _, corruption in ipairs(corruptions) do
+        local name, expected_error, corrupt = table.unpack(corruption)
+        it("should reject " .. name .. " like the local verifier", function()
+            local machine <close> = build_default_machine()
+            local remote <close> = jsonrpc.spawn_server():set_cleanup_call(jsonrpc.SHUTDOWN)
+            local initial_hash = machine:get_root_hash()
+            local log = machine:log_step_uarch()
+            corrupt(log)
+            expect.fail(function()
+                remote:verify_step_uarch(initial_hash, log)
+            end, expected_error)
+        end)
+    end
+end)
+
 lester.report()
 lester.exit()

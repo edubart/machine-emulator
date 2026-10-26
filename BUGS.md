@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-75 confirmed issues: 4 high, 16 medium, 55 low.
+74 confirmed issues: 4 high, 15 medium, 55 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -34,7 +34,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
 | [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail) | medium | pre-existing | JSON-RPC client (spawn_server) | Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail | `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/` |
-| [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | frontier_forest_store drops expansions under single-value fixed-point trees | `bugs/lua-02-store-skips-expanded-single-value-tree/` |
 | [B13](#b13-lazily-loaded-forest-used-as-a-value-loses-its-unloaded-subtrees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Lazily loaded forest used as a value loses its unloaded subtrees | `bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/` |
 | [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Forest tree files keyed only by hash collide across heights and representations | `bugs/lua-04-content-addressing-ignores-height-and-representation/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
@@ -563,80 +562,6 @@ exit=1
 **Proof of concept**: `bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. It needs `curl` and `cartesi-jsonrpc-machine` in `PATH`. It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the bug is fixed.
 
 **ID**: `rpc-03-jsonrpc-invalid-id-still-executes`
-
-### B12. frontier_forest_store drops expansions under single-value fixed-point trees
-
-**Title**: `frontier_forest_store` and `store_expansion` silently drop expansions placed under single-value fixed-point trees, so a reloaded forest is opaque where it answered before
-
-**Problem:** In `store_tree`, any `fixed_point` tree with `base_height == height` returns at once, before `store_children` is called. The code assumes such a single-value wrapper only holds a raw hash. That assumption is wrong:
-- `forest_flush` creates these wrappers whenever it flushes a raw value alone. This happens on a height change, a pad or value change, or an aligned single-entry chunk, such as the odd value in a 4 + 1 flush.
-- `frontier_forest_expand_leaf` walks into fixed-point trees, including these wrappers. When it reaches the opaque value, it sets `values[index] = replacement`.
-
-Suppose the forest had no directory when the expansion ran, so `store_expansion` was skipped. The next `frontier_forest_store` never reaches the replacement. The parent's file records only the raw hash (`get_value_hash`), and no file is written for the replacement. After `frontier_forest_load`, `load_tree(hash)` finds nothing, and the subtree is opaque again.
-
-`store_expansion` has the same blind spot. It calls `store_children` and `store_tree` on the replacement root, so an expanded single-value wrapper nested inside a replacement forest is skipped too.
-
-The in-memory forest keeps answering correctly, so the persisted state silently differs from memory. This breaks the documented contract that a stored forest "keeps its trees" and that "an expansion also stores its new trees there".
-
-**Origin:** Introduced by this branch. `src/cartesi/hash-tree.lua` does not exist on `main`.
-
-**Area:** Lua library `cartesi.hash-tree`, frontier forest persistence (`frontier_forest_store`, `frontier_forest_load`, `frontier_forest_expand_leaf`).
-
-**Category:** Correctness / persistence (silent data loss).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:578` (`store_tree` early return for `fixed_point` with `base_height == height`)
-- `src/cartesi/hash-tree.lua:720-755` (`forest_flush` wraps a lone raw value in a single-value fixed-point tree)
-- `src/cartesi/hash-tree.lua:886-896` (`frontier_forest_expand_leaf` replaces `values[index]` inside such a wrapper, and calls `store_expansion` only when `forest.directory` is set)
-- `src/cartesi/hash-tree.lua:606-613` (`store_expansion`, which inherits the blind spot for nested expansions)
-- Real caller: `doc/recipes/prt.lua:1748` (`open_bundle` calls `frontier_forest_expand_leaf` on claim trees), `doc/recipes/prt.lua:2535` and `2804` (`frontier_forest_store`/`frontier_forest_load` of claim trees)
-
-**Evidence:** The test uses only the public `cartesi.hash-tree` API: `push_back`, `pad_back`, `append`, `expand_leaf`, `store`, `load`, `get_node_hash` and `get_siblings`.
-- Control: a 2-value tree survives store and load, which shows the test setup is valid.
-- Case A: a bundle root flushed alone is expanded in memory, then stored and loaded.
-- Case B: the expansion is nested inside a replacement forest and goes through `store_expansion`.
-- Case C: a claim-tree-like layout (per-input bundles plus pad bundles, flushed as 4 + 1) has its lone pad bundle opened, then stored and loaded.
-
-Cases A, B and C all lose the expansion:
-```
-$ eval $(make -s env); lua5.4 bugs/lua-02-store-skips-expanded-single-value-tree/test_store_single_value_expansion.lua
-control (2-value tree) after reload ok:	true
-  reload error: the node is below an opaque hash
-BUG: A: expand_leaf then store (no directory at expand time): node answerable before store is opaque after frontier_forest_load
-  get_siblings after reload: the node is below an opaque hash
-BUG: A: get_siblings after reload: node answerable before store is opaque after frontier_forest_load
-BUG: B: nested expansion inside replacement (store_expansion): node answerable before store is opaque after frontier_forest_load
-BUG: C: claim-like layout, pad bundle opened then stored: node answerable before store is opaque after frontier_forest_load
-BUG: 4 check(s) failed: store_tree drops expansions under single-value fixed-point trees
-exit=1
-```
-With the fix below applied to a copy of `hash-tree.lua`, all cases pass and the test prints `OK: expansions survive store/load` (exit 0).
-
-**Scenario:** A validator node keeps claim trees as frontier forests. During a dispute it opens a bundle with `frontier_forest_expand_leaf`, as the PRT recipe's `open_bundle` does, and snapshots the tree with `frontier_forest_store`. If that bundle's root was flushed alone (for example, the odd pad bundle after a per-input block), the expansion is not persisted. After a restart, `frontier_forest_load` returns a tree where the bundle is opaque again. `get_node_hash` and `get_siblings` return `nil, "the node is below an opaque hash"` for nodes that answered before the restart. The node must re-run the machine to re-collect the bundle. If the machine snapshot is gone, or there is not enough time before a tournament deadline, it cannot produce the proof. Whether a given claim hits this depends on its layout: aligned per-input blocks often avoid lone wrappers. Hashes, roots and proofs are never wrong.
-
-**Possible solution:** In `store_tree`, recurse into a single-value wrapper but write no file for it, because the parent already records the raw hash and `load_tree(hash)` then finds the expansion's own file:
-```lua
-if forest.durable[tree] then return end
-if tree.kind == "fixed_point" and tree.base_height == tree.height then
-    store_children(forest, tree, written)
-    return
-end
-```
-This also fixes `store_expansion`, since it goes through `store_tree`/`store_children`. Verified with the PoC.
-
-**Severity:** Medium. Both reviewers rated it medium. The bug silently loses persisted proof data, contrary to the documented store/load contract, and the PRT recipe's claim-tree usage can reach it. It never yields wrong hashes or proofs, and it never crashes or hangs. Callers get a recoverable `nil` result and can recompute by re-running the machine, so an honest player loses a dispute only when that recomputation is impossible or too slow.
-
-**Risks:**
-- Of the bug: after a restart, a validator that relies on stored forests to answer proofs without the machine cannot produce siblings or node hashes. This costs availability and time during disputes. Re-expanding after a reload works, because the parent holds a raw hash.
-- Of the fix: low. Single-value wrappers still write no file and are not added to `written`, so the stored format does not change. Wrappers are never marked durable, so every store walks into them again. The walk is cheap, because durable children return at once. Existing stores that already lost expansions are not repaired; callers must expand again.
-
-**Proof of concept:** `bugs/lua-02-store-skips-expanded-single-value-tree/test_store_single_value_expansion.lua`. It works under `$WORKDIR` (or `$TMPDIR`, or `/tmp`, or a directory given as the first argument) and removes its files at the end. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-02-store-skips-expanded-single-value-tree/test_store_single_value_expansion.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: expansions survive store/load` once fixed.
-
-**ID**: `lua-02-store-skips-expanded-single-value-tree`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `rpc-06-forest-store-drops-expansion-in-raw-fixed-point`: run with `eval $(make -s env); lua5.4 bugs/rpc-06-forest-store-drops-expansion-in-raw-fixed-point/test_store_drops_expansion.lua`.
 
 ### B13. Lazily loaded forest used as a value loses its unloaded subtrees
 
@@ -1453,7 +1378,7 @@ Exit status 1 means the bug reproduced; 0 means it is fixed. The I/O error is si
 
 **ID**: `lua-20-failed-expansion-store-never-retried`
 
-**Related**: B06 (fixed), [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees).
+**Related**: B06 (fixed), B12 (fixed).
 
 ### B32. Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes
 
@@ -3229,7 +3154,7 @@ The result is a stuck query or expansion at one position, never a wrong hash or 
 
 **ID**: `p2-06-forest-store-batch-expansion-unordered-dir-sync`
 
-**Related**: [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees), [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations).
+**Related**: B12 (fixed), [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations).
 
 ### B69. ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices
 

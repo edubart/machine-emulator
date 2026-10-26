@@ -1214,9 +1214,20 @@ describe("hash-tree.lua", function()
                     hash_tree.frontier_forest_expand_leaf(forest, 12, new_bundle(13))
                     return forest
                 end,
+                -- The third bundle root is flushed alone, into a single-value tree.
+                lone = function()
+                    local forest = hash_tree.frontier_forest(H4, "keccak256")
+                    for i = 1, 3 do
+                        local root = hash_tree.frontier_forest_get_root_hash(new_bundle(4 * i - 3))
+                        hash_tree.frontier_forest_push_back(forest, root, 2)
+                    end
+                    hash_tree.frontier_forest_append(forest, leaves, 13)
+                    hash_tree.frontier_forest_expand_leaf(forest, 8, new_bundle(9))
+                    return forest
+                end,
             }
 
-            for _, name in ipairs({ "leaves", "repetition", "forests", "opaque", "expanded" }) do
+            for _, name in ipairs({ "leaves", "repetition", "forests", "opaque", "expanded", "lone" }) do
                 it("answers every query the same after a round trip of " .. name, function()
                     local _ <close>, directory = new_scope_directory()
                     local forest = fixtures[name]()

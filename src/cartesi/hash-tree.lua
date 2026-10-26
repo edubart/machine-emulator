@@ -575,10 +575,12 @@ end
 
 -- Stores a tree and the trees below it that the forest has not recorded as durable, children
 -- first, appending each to written. A file left by an interrupted store may lack the files of its
--- children, so finding a file does not end the walk.
+-- children, so finding a file does not end the walk. A single-value tree has no file, since its
+-- parent records the hash of its value, but an expansion of that value is stored.
 store_tree = function(forest, tree, written)
-    if forest.durable[tree] or (tree.kind == "fixed_point" and tree.base_height == tree.height) then return end
+    if forest.durable[tree] then return end
     store_children(forest, tree, written)
+    if tree.kind == "fixed_point" and tree.base_height == tree.height then return end
     local path = get_tree_path(forest.directory, tree.hash)
     if not fs.exists(path) then
         local stored

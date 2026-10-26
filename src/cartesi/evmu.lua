@@ -44,11 +44,9 @@ local function tobe(value) return bint.tobe(value):sub(bint_extra / 8 + 1) end
 -- Rounds up to multiple or 32
 local function ceil32(n) return 32 * ((n + 31) // 32) end
 
--- Converts bint to Lua unsigned integer detecting overflows
-local function check_lua_uint(value, what)
-    if not bint.eq(value >> 63, 0) then
-        errorf("%s %s too large for Lua integer", what, bint.tobase(value, 16, true))
-    end
+-- Converts bint to Lua unsigned integer, rejecting values larger than the calldata size
+local function check_lua_uint(value, what, calldata)
+    if not bint.ule(value, #calldata) then errorf("%s %s exceeds calldata size", what, bint.tobase(value, 16, true)) end
     return bint.touinteger(value)
 end
 
@@ -690,7 +688,7 @@ end
 -- reads a string value from 'calldata' at 'offset'
 local function decode_string(calldata, offset, prefer)
     local length, new_offset = decode_uint(calldata, offset)
-    local len = check_lua_uint(length, "string length")
+    local len = check_lua_uint(length, "string length", calldata)
     local padded_len = ceil32(len)
     if new_offset + padded_len > #calldata then errorf("insufficient calldata for string of length %d", len) end
     local str_data = calldata:sub(new_offset + 1, new_offset + len)
@@ -713,7 +711,7 @@ local function decode_bytes(calldata, offset, size, prefer)
     if not size then
         -- Dynamic bytes (same as string but return as hex by default)
         local length, new_offset = decode_uint(calldata, offset)
-        local len = check_lua_uint(length, "bytes length")
+        local len = check_lua_uint(length, "bytes length", calldata)
         local padded_len = ceil32(len)
         if new_offset + padded_len > #calldata then errorf("insufficient calldata for bytes of length %d", len) end
         local bytes_data = calldata:sub(new_offset + 1, new_offset + len)
@@ -733,7 +731,7 @@ local function decode_array(calldata, offset, parsed_type_spec, prefer)
         -- Dynamic array - read length first
         local size_val
         size_val, new_offset = decode_uint(calldata, new_offset)
-        size = check_lua_uint(size_val, "array size")
+        size = check_lua_uint(size_val, "array size", calldata)
         array_data_start = new_offset -- Array data starts after the length field
     end
     local result = {}
@@ -744,7 +742,7 @@ local function decode_array(calldata, offset, parsed_type_spec, prefer)
         for i = 1, size do
             local offset_val = decode_uint(calldata, new_offset + (i - 1) * 32)
             -- Offsets are relative to the start of the array data section
-            local element_offset = array_data_start + check_lua_uint(offset_val, "array offset")
+            local element_offset = array_data_start + check_lua_uint(offset_val, "array offset", calldata)
             result[i], last_offset = decode_value(calldata, element_offset, element_type, prefer)
         end
         return result, last_offset
@@ -772,7 +770,7 @@ local function decode_tuple(calldata, offset, parsed_type_spec, prefer)
             local offset_val
             offset_val, static_offset = decode_uint(calldata, static_offset)
             -- Offsets are relative to the start of the tuple
-            local dynamic_offset = tuple_start + check_lua_uint(offset_val, "tuple offset")
+            local dynamic_offset = tuple_start + check_lua_uint(offset_val, "tuple offset", calldata)
             result[i], new_offset = decode_value(calldata, dynamic_offset, comp_type, prefer)
         else
             result[i], static_offset = decode_value(calldata, static_offset, comp_type, prefer)

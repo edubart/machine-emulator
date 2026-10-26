@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-79 confirmed issues: 5 high, 16 medium, 58 low.
+78 confirmed issues: 5 high, 16 medium, 57 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -49,7 +49,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
 | [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
-| [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder bounds checks overflow and accept out-of-bounds offsets | `bugs/lua-10-evmu-offset-length-overflow-accepts-oob/` |
 | [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
 | [B24](#b24-temporary-and-frontier-files-are-created-with-mode-0600-and-without-atomic-o_cloexec) | low | introduced by branch | Lua cartesi.filesystem and cartesi.hash-tree, CLI | Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC | `bugs/rpc-07-frontier-files-mode-0600/` |
@@ -999,75 +998,6 @@ Exit status 1 with `BUG:` lines means the bug reproduces. Exit status 0 with "al
 
 **Related**: B20 (fixed).
 
-### B18. ABI decoder bounds checks overflow and accept out-of-bounds offsets
-
-**Title**: evmu ABI decoder: integer overflow in offset/length bounds checks lets out-of-bounds dynamic offsets and lengths decode silently as empty or zero values (`decode_abi`, `decode_calldata`)
-
-**Problem:** `check_lua_uint` only rejects values of 2^63 or more. Offsets and lengths up to `0x7fffffffffffffff` therefore become Lua integers, and the decoder adds them with no overflow check:
-- `tuple_start + offset` in `decode_tuple`
-- `array_data_start + offset` in `decode_array`
-- `offset + 32` in `read_word`
-- `n + 31` in `ceil32`
-- `new_offset + padded_len` in `decode_string` and `decode_bytes`
-
-Lua integer arithmetic wraps, so a sum can become negative. The guard `x > #calldata` is then false and decoding carries on: `calldata:sub(...)` with a start past the end, or a negative end, returns `""`, and `bint.frombe(word_padding .. "")` gives 0. A length of 0 then decodes as an empty value, with a negative "next offset".
-
-The only end-of-data check (`offset == #data` in `decode_abi` and `decode_calldata`) never sees the corrupted component. `decode_tuple` overwrites `new_offset` with each dynamic component's end, so the check only covers the last dynamic component. An earlier `bytes`/`string`/array component with an out-of-bounds offset or length is accepted silently and comes back as `"0x"` or `""`. Solidity's `abi.decode` reverts on all of these inputs. The overflow is the whole defect: offsets that are too large but do not wrap are correctly rejected with "insufficient calldata".
-
-**Origin:** Pre-existing. The decoder logic predates this branch and is reachable through `decode_calldata`. This branch adds a new public entry point, `decode_abi`, that uses the same decoder, and the PRT recipes call it on chain return data.
-
-**Area:** Lua library `cartesi.evmu` (ABI decoder: `decode_abi`, `decode_calldata`, `decode_calldata_hex`).
-
-**Category:** Correctness: input validation, integer overflow in bounds checks.
-
-**Location:**
-- `src/cartesi/evmu.lua:45`: `ceil32` (`(n + 31) // 32` wraps)
-- `src/cartesi/evmu.lua:48-53`: `check_lua_uint` (limit 2^63, not `#calldata`)
-- `src/cartesi/evmu.lua:643`: `read_word` bounds check `offset + 32 > #calldata`
-- `src/cartesi/evmu.lua:693-699`: `decode_string`
-- `src/cartesi/evmu.lua:716-721`: `decode_bytes` (dynamic)
-- `src/cartesi/evmu.lua:747`: `decode_array` element offset
-- `src/cartesi/evmu.lua:775-776`: `decode_tuple` dynamic offset and the `new_offset` overwrite
-- `src/cartesi/evmu.lua:831, 846`: end checks in `decode_calldata` and `decode_abi`, which only see the last component's end
-
-**Evidence:** The test builds five malformed encodings and passes them to the public `evmu.decode_abi` / `evmu.decode_calldata`. It first checks that a valid encoding round-trips. All five malformed encodings decode without error:
-```
-BUG: (bytes,bytes) offset 0x7ffffffffffffff0: decode accepted malformed data, returned {0x, 0xcd}
-BUG: (bytes,bytes) length 0x7fffffffffffffff: decode accepted malformed data, returned {0x, 0xcd}
-BUG: (string,string) offset 0x7ffffffffffffff0: decode accepted malformed data, returned {, x}
-BUG: decode_calldata f(bytes[],bytes) element offset overflow: decode accepted malformed data, returned {table: 0x..., 0xcd}
-BUG: (address,uint256,bytes,bytes) payload offset overflow: decode accepted malformed data, returned {0x1111111111111111111111111111111111111111, 5, 0x, 0x}
-BUG: 5 malformed encodings decoded without error (Solidity abi.decode reverts)
-exit=1
-```
-Run: `eval $(make -s env); lua5.4 bugs/lua-10-evmu-offset-length-overflow-accepts-oob/test_abi_offset_overflow.lua`
-
-**Scenario:** An off-chain Lua tool, indexer or alternative validator uses `evmu.decode_calldata` to interpret machine outputs, as `vgu.lua`, `cartesi-rollup-data.lua` and the rolling-calculator recipes do with `Notice`/`Voucher`. It may also use `decode_abi` on chain data, as `prt-bridge.lua` and `prt-deploy.lua` do. An application, buggy or malicious, emits a `Voucher(address,uint256,bytes)`-style output whose payload offset or length is near 2^63. The Lua decoder accepts it and reports an empty payload (or an empty string, or a zero-length array element). On chain, `abi.decode` on the same bytes reverts. So off-chain interpretation differs from on-chain behaviour: a tool may show or act on a "valid, empty" voucher or notice that can never be executed, or skip validation logic that assumes malformed data raises.
-
-None of this touches machine state hashes, Merkle proofs, step logs or PRT commitments. In the PRT flow the decoded chain data is produced by Solidity contracts and is always well-formed.
-
-**Possible solution:** Bounds-check every offset and length against `#calldata` before any arithmetic, for example in a helper `check_offset(value, base, calldata)` that rejects `value > #calldata - base`. Cap `check_lua_uint` results used as offsets or lengths at `#calldata` instead of 2^63. In `ceil32`, check the length against `#calldata` before rounding. In `read_word`, test `offset < 0 or offset > #calldata - 32`. Optionally, make `decode_tuple` track the maximum end over all dynamic components (or check that each one lies inside the data), so the end-of-data check is meaningful for every component and not just the last.
-
-**Severity:** Low. It is a real correctness defect in a shipped Lua library: it silently accepts out-of-bounds ABI data where Solidity reverts. However:
-- It needs deliberately crafted offsets or lengths near 2^63.
-- It cannot change hashes, proofs or step logs, so it cannot make an honest PRT player lose a dispute.
-- It causes no crash or hang.
-- The PRT callers decode contract-produced data.
-
-The prover suggested medium/low and both reviewers rated it low. Low-medium is at most justified for third-party indexers that rely on `evmu` to validate untrusted application outputs.
-
-**Risks:**
-- Of the bug: off-chain consumers misread malformed outputs or inputs as valid with empty or zero fields, so off-chain views (indexers, explorers, tooling that decides whether to submit a voucher) diverge from on-chain execution.
-- Of the fix: stricter checks may start rejecting encodings that were previously, and wrongly, accepted. That is the desired behaviour, but callers that do not wrap decode in `pcall` would now raise. Tracking the maximum dynamic end must not reject valid encodings whose dynamic tails are out of order or overlap (Solidity accepts those), so the fix should check per-component bounds rather than demand a contiguous layout.
-
-**Proof of concept:** `bugs/lua-10-evmu-offset-length-overflow-accepts-oob/test_abi_offset_overflow.lua`. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/lua-10-evmu-offset-length-overflow-accepts-oob/test_abi_offset_overflow.lua
-```
-It exits 1 and prints `BUG:` lines while the defect is present, and exits 0 with `PASS` once every malformed encoding is rejected.
-
-**ID**: `lua-10-evmu-offset-length-overflow-accepts-oob`
-
 ### B19. ABI type parser mangles parameter names starting with memory, storage or calldata
 
 **Title**: evmu type parser splits parameter names that start with `memory`/`storage`/`calldata`, so named encode/decode uses the wrong field
@@ -2011,7 +1941,7 @@ The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is 
 
 **ID**: `lua-28-evmu-lenient-dirty-bits-padding`
 
-**Related**: [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets).
+**Related**: B18 (fixed).
 
 ### B39. collect_uarch_cycle_* aborts the process when the uarch is halted but not reset
 

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-13 confirmed issues: 2 high, 4 medium, 7 low.
+12 confirmed issues: 2 high, 3 medium, 7 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -30,7 +30,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
-| [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
@@ -720,75 +719,7 @@ BUG: torn .phtc loads with correct root hash and verify_hash_tree()==true but yi
 
 **ID**: `u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr`
 
-**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), B32 (fixed), [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash).
-
-### B92. Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash
-
-**Title**: A hash-tree query after sync_stored rewrites the shared .dht/.dpt with no write ordering, so a host crash can leave a synced SHARING_ALL directory with a wrong root hash
-
-**Problem**: With `SHARING_ALL`, the dense hash trees (`.dht`), dirty-page trees (`.dpt`), sparse tree (`hash_tree.sht`) and page cache (`hash_tree.phtc`) are `MAP_SHARED` mappings of the stored files. `machine::sync_stored` only fsyncs those files. It does not bring the hash tree up to date first, and since it is static it ignores the machine instance. The next `get_root_hash`/`get_proof` (any caller of `update_hash_tree`) then does three things to the just-synced directory:
-- it re-marks write-TLB pages dirty;
-- it writes new page and inner-node hashes into the `.dht` mapping;
-- it clears the dirty marks in the `.dpt` mapping, which is a separate file.
-
-Nothing orders or msyncs these writes; the only `msync` in the tree is an `MS_ASYNC`. A clean bit in the `.dpt` vouches that the `.dht` hash is current, and load trusts it. If the kernel writes back the new `.dpt` before the new `.dht` and the host then crashes, the directory reloads with stale hashes. The root hash is wrong (neither the committed root nor any real state) and `verify_hash_tree()` is false. A query that looks read-only quietly undoes the durability that `sync_stored` just provided, even though the guest state has not changed since the sync.
-
-**Origin**: pre-existing (not introduced by this branch).
-
-**Area**: hash tree persistence / `sync_stored` durability (SHARING_ALL stored machines).
-
-**Category**: durability.
-
-**Location**:
-- `src/machine.cpp:622-631`: `machine::sync_stored` only fsyncs files and directories; no `update_hash_tree()` first, and the instance is ignored.
-- `src/machine.cpp:1549-1560`: `update_hash_tree` (`mark_write_tlb_dirty_pages`, then `m_ht.update`) and `get_root_hash`.
-- `src/hash-tree.cpp:730-742`: `hash_tree::update` calls `get_dirty_page_tree().clean()` on changed ranges after the dense-tree writes.
-- `src/hash-tree.cpp:340-353`: `mark_clean_page_and_up` on pages whose hash did not change.
-- `src/hash-tree.cpp:841-843`: page hashes copied into the shared `.dht` (`node_hash_view`).
-- `src/os-mapped-memory.cpp:573`: the only `msync`, `MS_ASYNC`, with no ordering between files.
-
-**Evidence**: The test cannot cut power, so it simulates the crash at file granularity. It runs a tiny RV64 program that writes 1500 pages, more than the TLB holds, so evicted pages get marked dirty in the RAM `.dpt` during the run. It runs to halt and calls `sync_stored`, then copies the directory as S (what is durable). It calls `get_root_hash` (R) and copies the directory as U (the dirty page cache). Then it reloads every per-file mix of S and U. Kernel writeback has no ordering across inodes, so each mix is a possible on-disk state after a host crash.
-
-Result: `get_root_hash` rewrote 5 files. Every mix that takes the RAM `.dpt` from U and the RAM `.dht` from S (8 of 32) reloads with the wrong root and fails `verify_hash_tree`. The other 24 mixes reload with R. A real crash can also tear pages within a file, which allows more bad states, not fewer.
-```
-R (root hash of the committed state) = e38fc881fa67ff19f4f7cad06e79c6eb2bb3f39f7f5942189d9e1f2b4887d876
-files rewritten by get_root_hash after sync_stored: 0000000000000000-8000.dht 0000000080000000-800000.dht 0000000080000000-800000.dpt hash_tree.phtc hash_tree.sht
-BAD from U={0000000080000000-800000.dpt}: aabe5ce6e0687871af0b397bde082914154bcfb56ea0fc519e05a60672859113 verify_hash_tree=false
-...
-BUG: 8 of 32 possible post-crash file mixes of a synced SHARING_ALL directory reload with a wrong root hash; ...
-(stderr) page 0x80100000 (in RAM) is not marked dirty but is dirty / cached page root hash mismatch
-exit=1
-```
-In the control `hashfirst.lua`, `get_root_hash` runs before `sync_stored`. The post-sync `get_root_hash` then changes only `hash_tree.phtc`, every mix reloads with R, and the script exits 0. Run: `eval $(make -s env); lua5.4 bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/test.lua 2>/dev/null`. The bug does not show when every written page is still in the TLB at sync time, because TLB pages are re-marked dirty on load.
-
-**Scenario**: A PRT validator, Rollups Node or Dave node keeps its epoch machine loaded with `SHARING_ALL` and commits each input by calling `sync_stored` and then querying the hash. In `doc/recipes/prt.lua`, `stored_machine_pair:commit()` only calls `sync_stored`, and later `commit_epoch_state` calls `pair.machine:get_root_hash()` and records that root in `state.json`. `recover_epoch_machine` assumes the machine "was synced at that boundary and is unchanged since". Suppose the host loses power or panics within the dirty-writeback window (about 30 s), after the `.dpt` pages reached disk but before the `.dht` pages did. On restart, the epoch directory loads with a root that matches neither R nor `machine.revert`. Recovery then asserts "the epoch machine does not match its state", and the node crash-loops until an operator rebuilds the epoch from an earlier snapshot or the template, which can cost an honest player its dispute deadlines. The CLI's `--revert-mode=stored` commit and any app that runs sync-then-hash on the C API (`cm_sync_stored` followed by `cm_get_root_hash`) follow the same pattern. Killing only the process is safe, because the page cache stays coherent.
-
-**Possible solution**:
-1. Make sync instance-aware: `machine::sync_stored` / `cm_sync_stored(m, dir)` with a non-null machine calls `update_hash_tree()` before fsyncing. A query right after a sync then has nothing left to persist, as the control shows.
-2. More generally, order the writes in `hash_tree::update`: `msync(MS_SYNC)`/`fdatasync` the `.dht` (and `.sht`) before clearing `.dpt` bits in shared mappings. Alternatively, do not trust `.dpt` clean bits on load unless a durable "consistent" marker written after the hashes says so.
-3. Until then, document the hazard and have callers (prt.lua `commit`, the CLI) call `get_root_hash` before `sync_stored`.
-
-**Severity**: medium. The three reviewers said high, medium and low. The bug is real: stored state becomes corrupt on the standard validator commit path, and recovery fails without an operator. But it needs a host-level crash inside a short writeback window, and only after runs that evict written pages from the TLB. The damage is also detected (`verify_hash_tree` fails and the reload root mismatches the recorded root), not silent. The `.bin` data stays intact, so a rehash or replay can recover it, and no wrong hash or proof can be accepted on-chain.
-
-**Risks**:
-- Bug: a node cannot reopen its committed epoch after a power loss or kernel panic and needs manual recovery, which risks missed dispute deadlines. A tool that skips the `verify_hash_tree`/root checks would read a wrong root hash from the directory.
-- Fix: updating the hash tree inside `sync_stored` makes sync slower (one hash update per commit, which callers usually do anyway). It also changes the static API's semantics, so the C API needs to pass the machine through. Adding `MS_SYNC`/fsync ordering inside `hash_tree::update` would add I/O latency to every `get_root_hash`/`get_proof` on SHARING_ALL machines, so it should be limited to the shared, file-backed case. Distrusting `.dpt` on load would force a full rehash on every load, which is costly for large machines.
-
-**Proof of concept**:
-- `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/test.lua`: the reproducer. It exits 1 and prints `BUG: 8 of 32 ...` while the bug is present.
-- `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/hashfirst.lua`: the control (hash before sync). It exits 0.
-
-Run from the repo root:
-```
-eval $(make -s env)
-lua5.4 bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/test.lua 2>/dev/null
-lua5.4 bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/hashfirst.lua 2>/dev/null
-```
-The scripts work in `$TMPDIR/cm-bug-u1-02-{test,hashfirst}` (default `/tmp`), or in the directory given as the first argument. They need about 300 MB free.
-
-**ID**: `u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c`
-
-**Related**: [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
+**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), B32 (fixed), B92 (fixed).
 
 ## Candidates that were not confirmed
 

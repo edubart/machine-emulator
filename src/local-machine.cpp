@@ -96,6 +96,10 @@ void local_machine::do_remove_stored(const std::string &dir) const {
 }
 
 void local_machine::do_sync_stored(const std::string &dir) const {
+    // Update the hash tree first, so later queries do not change the synced dense and sparse trees
+    if (m_machine != nullptr && m_machine->has_shared_backing_store()) {
+        static_cast<void>(m_machine->get_root_hash());
+    }
     machine::sync_stored(dir);
 }
 

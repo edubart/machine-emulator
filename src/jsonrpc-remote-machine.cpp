@@ -1190,9 +1190,12 @@ static json jsonrpc_machine_remove_stored_handler(const json &j, const std::shar
 /// \param session HTTP session
 /// \returns JSON response object
 static json jsonrpc_machine_sync_stored_handler(const json &j, const std::shared_ptr<http_session> &session) {
-    static_cast<void>(session);
     static const char *const param_name[] = {"dir"};
     auto args = parse_args<std::string>(j, param_name);
+    // Update the hash tree first, so later queries do not change the synced dense and sparse trees
+    if (session->handler->machine && session->handler->machine->has_shared_backing_store()) {
+        static_cast<void>(session->handler->machine->get_root_hash());
+    }
     cartesi::machine::sync_stored(std::get<0>(args));
     return jsonrpc_response_ok(j);
 }

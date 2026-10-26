@@ -609,6 +609,7 @@ CM_API cm_error cm_remove_stored(const cm_machine *m, const char *dir);
 /// \returns 0 for success, non zero code for error.
 /// \details The expected usage is to sync after the machine using the stored files has been closed.
 /// On success, all previous changes to the stored machine files are durable on disk.
+/// If \p m holds a machine with shared backing stores, its hash tree is updated before syncing.
 /// \warning Syncing while a machine is still using the stored files commits to disk only
 /// the changes that were meant to persist on disk (changes to shared backing stores), and
 /// only on systems with a unified page cache (Linux, macOS). Elsewhere, only data already

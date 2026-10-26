@@ -467,6 +467,22 @@ describe("backing stores", function()
         end
     end)
 
+    it("should not change synced hash trees when querying the root hash", function()
+        local stored_dirname = filesystem.temp_pathname()
+        local _ <close> = tests_util.scope_exit(function()
+            cartesi.machine:remove_stored(stored_dirname)
+        end)
+        local machine <close> = cartesi.machine({ ram = { length = 0x10000 } }, {}, stored_dirname)
+        machine:write_memory(0x80000000, string.rep("A", 0x10000))
+        machine:sync_stored(stored_dirname)
+        local filename_prefix = stored_dirname .. "/0000000080000000-10000"
+        local synced_dht = filesystem.read_file(filename_prefix .. ".dht")
+        local synced_dpt = filesystem.read_file(filename_prefix .. ".dpt")
+        machine:get_root_hash()
+        expect.equal(filesystem.read_file(filename_prefix .. ".dht"), synced_dht)
+        expect.equal(filesystem.read_file(filename_prefix .. ".dpt"), synced_dpt)
+    end)
+
     it("should fail to sync a stored machine with invalid arguments", function()
         expect.fail(function()
             cartesi.machine:sync_stored()

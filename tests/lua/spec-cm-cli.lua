@@ -1195,6 +1195,20 @@ describe("cartesi-machine CLI", function()
         end
     end)
 
+    it("--dump-memory-ranges does not pass the directory name to a shell", function()
+        local dump_dir = filesystem.temp_pathname() .. "'s dump"
+        local _ <close> = tests_util.scope_exit(function()
+            if filesystem.exists(dump_dir) then
+                for _, name in ipairs(filesystem.list_directory(dump_dir)) do
+                    filesystem.remove_file(dump_dir .. "/" .. name)
+                end
+                filesystem.remove_directory(dump_dir)
+            end
+        end)
+        run_ok({ "--dump-memory-ranges=" .. dump_dir, "--max-mcycle=0", "--no-init-splash", "--quiet" })
+        expect.truthy(filesystem.exists(dump_dir .. "/0000000080000000--0000000008000000.bin"))
+    end)
+
     -- -------------------------------------------------------------------------
     -- Proof dump options
     --

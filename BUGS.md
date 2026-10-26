@@ -21,61 +21,16 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-5 confirmed issues: 1 high, 4 low.
+4 confirmed issues: 1 high, 3 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
-| [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 
 ## Issues
-
-### B27. --dump-memory-ranges runs mkdir through the shell with an unquoted path
-
-**Title**: `--dump-memory-ranges` passes the directory name unquoted to a shell `mkdir` (word splitting crashes the CLI, shell metacharacters run commands)
-
-**Problem:** `dump_memory_ranges` in the `cartesi-machine` CLI creates the output directory with `os.execute("mkdir " .. dir)`. Here `dir` is the user-supplied value of `--dump-memory-ranges=<dir>`, and it is passed to `/bin/sh` without quoting. A name that contains spaces is split into several words: `mkdir` creates several unrelated directories and reports success. The next `fs.write_file("<dir>/<start>--<length>.bin")` then fails, and the CLI aborts with a Lua traceback before it dumps anything. Shell metacharacters in the name (`;`, `$(...)`, backticks, `&&`) are executed as commands. Separately, an existing directory makes `mkdir` fail, and the `assertf` aborts the run.
-
-**Origin:** Pre-existing. `origin/main` has the same `os.execute` line, at `src/cartesi-machine.lua:3596`. This branch touched the function only to replace `util.write_file` with `fs.write_file`.
-
-**Area:** `cartesi-machine` CLI (`--dump-memory-ranges`).
-
-**Category:** Correctness / shell command injection (local input).
-
-**Location:**
-- `src/cartesi-machine.lua:3599-3601` (`dump_memory_ranges`, `assertf(os.execute("mkdir " .. dir), ...)`)
-- `src/cartesi-machine.lua:3606` (`fs.write_file` that then fails)
-- `src/cartesi/filesystem.lua:28` (`filesystem.create_directory`, a safe alternative that is already available; `fs` is required at `src/cartesi-machine.lua:2677`)
-
-**Evidence:** The test runs the real CLI twice (`--ram-length=32Mi --max-mcycle=0`), first with `--dump-memory-ranges=<tmp>/dm x` and then with `--dump-memory-ranges=<tmp>/d2;touch <tmp>/INJECTED`:
-```
-$ eval $(make -s env); lua5.4 bugs/rpc-10-dump-memory-ranges-shell-mkdir/test_dump_memory_ranges_mkdir.lua
-BUG: --dump-memory-ranges='/tmp/tmp.zrloBehyMk/run/dm x' exit_ok=nil dumped=false stray_dirs(dm/x)=true
-  lua5.4: /home/user/machine-emulator/src/cartesi/filesystem.lua:92: /tmp/tmp.zrloBehyMk/run/dm x/0000000000000000--0000000000008000.bin: No such file or directory
-  stack traceback:
-BUG: shell command injected through --dump-memory-ranges: file INJECTED was created by 'touch'
-exit=1
-```
-After the run, the work directory contains the stray directories `dm`, `x` and `d2`, plus the injected file `INJECTED`.
-
-**Scenario:** A developer or a CI script dumps memory ranges for debugging into a path with a space in it, such as a macOS-style `~/My Dumps` or a generated name. The run crashes after the machine has finished, leaves stray directories behind and produces no dump. A wrapper script or tool that builds the directory name from untrusted data, such as an application name, an input ID or a tournament label, and forwards it to `cartesi-machine` gives that data arbitrary shell command execution as the invoking user. Emulator C/Lua APIs, validator nodes, hashes and proofs are not affected.
-
-**Possible solution:** Replace the shell call with the library function, e.g. `fs.create_directory(dir)` (`cartesi.filesystem.create_directory`). Optionally tolerate an already existing directory, or report a clear error for it. Do not build shell strings from user input. If a shell is unavoidable, single-quote `dir` and escape embedded single quotes.
-
-**Severity:** Low. Both reviewers agreed: only a CLI debugging option is affected, and the input comes from the local user (injection matters only if a wrapper forwards untrusted names). Validators, emulator APIs, hashes, proofs and guest applications are not affected.
-
-**Risks:** Bug: failed dumps and stray directories. Also local command execution if a script passes untrusted directory names through. Fix: minimal. `create_directory` fails on an existing directory just as `mkdir` does today, so behavior for valid names is unchanged. If the fix also makes existing directories acceptable, files with the same names would be overwritten.
-
-**Proof of concept:** `bugs/rpc-10-dump-memory-ranges-shell-mkdir/test_dump_memory_ranges_mkdir.lua`. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/rpc-10-dump-memory-ranges-shell-mkdir/test_dump_memory_ranges_mkdir.lua
-```
-It uses a fresh `mktemp -d` work directory, or the directory given as the first argument. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK` once it is fixed.
-
-**ID**: `rpc-10-dump-memory-ranges-shell-mkdir`
 
 ### B52. A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages
 

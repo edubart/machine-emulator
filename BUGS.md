@@ -5393,13 +5393,17 @@ vote means at least one reviewer would have confirmed it.
 | A user schema dictionary overrides machine type names nested inside machine types | rejected 2 to 0 | Reproduced. Rejected as the documented lookup order (user dictionary first). |
 | Base64 and Hex schema fields accept non-string values | rejected 2 to 0 | Reproduced. Rejected because the schema only describes conversions and was never meant to validate. |
 | `fs.exists` reports dangling symlinks as absent and raises on `ENOTDIR` | rejected 2 to 1 | Following symlinks is the usual meaning of "exists"; raising on other errors was judged acceptable. |
+| The default console sends unbounded guest output to the validator's stdout, which can block `run` or fill the disk | rejected 2 to 0 | Reproduced. Rejected as an operational default rather than a defect: no hash or proof is affected, and validators can set `output_destination=to_null`. |
+| The built-in uarch reset image depends on the toolchain used to build the emulator, and nothing checks it | rejected 2 to 0 | Reproduced with a modified image. Rejected as a build-reproducibility concern: official builds pin the toolchain, a different image is in effect a different machine specification, and the node already checks loaded root hashes against the on-chain template. |
+| JSON-RPC `spawn_server` and connections check only the protocol version, so a server from a different build (another uarch image) is accepted | rejected 2 to 0 (two panels) | Reproduced with a relinked server. Rejected as a deployment-hardening request: the handshake promises protocol compatibility only, and callers can compare `get_uarch_pristine_hash`. Mixing builds needs a misconfigured install. |
+| `cm_receive_cmio_request` zeroes the returned length when the buffer is too small | rejected 2 to 0 | Reproduced. Rejected because `cm.h` documents the two-step pattern (query with NULL first) and the in-tree callers follow it. |
 
 `verify_hash_tree` not checking inner nodes was first rejected 2 to 1 (`ht-05`), then confirmed by another panel, and it
 is listed as B30 with a reviewer note.
 
 ## Method and environment
 
-Thirteen review workflows ran in three rounds. Each hunter agent worked one area or angle and proposed candidates. A triage
+Twenty-one review workflows ran in four rounds. Each hunter agent worked one area or angle and proposed candidates. A triage
 agent merged duplicates. A prover agent wrote and ran a test for each candidate. Two independent reviewers, plus a
 tie-breaker when they split, tried to refute each claim. A recorder agent wrote the entry. Issues found by more than one
 group are listed once, with the other reproductions linked.
@@ -5415,6 +5419,20 @@ for an epoch with several inputs: remote machines, snapshots with `fork_server`,
 rollback of rejected inputs, storing and restarting. It compared every state hash, commitment and proof against a local
 machine, a restarted machine and a straight reference run, and found no divergence. Mutation fuzzing of opponent-supplied
 step, reset and cmio logs found no log that the static verifiers used by the node accept wrongly.
+
+The third round looked only for bugs that could be high or critical (IDs starting with `c1` and `c2`). Three fuzzers
+compared the native interpreter with the uarch, which runs the same `interpret.cpp`: integer, memory and CSR
+instructions, floating point and the uint128 helpers, and MMU, TLB, interrupts, traps and devices. Dozens of generated
+programs ran for tens of thousands of mcycles each, comparing native root hashes, uarch-to-halt-and-reset root hashes,
+collected uarch leaves and verified step logs. They found no divergence with the built-in uarch image; the findings of
+this round (B85, B90 and a second trigger for B39) all need a custom uarch RAM image in the template. An independent
+rebuild of the commitment layout from the specification matched every `collect_*` result, and proofs checked against a
+brute-force Merkle tree at range boundaries found nothing new.
+
+The fourth round started from the node's assumptions about the emulator, cataloged in `PRT-ASSUMPTIONS.md` (57
+assumptions in 8 groups), with one hunter per group (IDs starting with `u1`, `u2` and `u3`). Its main findings concern
+crash recovery after a host crash (B91, B92), hash-tree performance under CPU contention (B87) and `clone_file` (B08,
+B89).
 
 The tests ran on Ubuntu 24.04 (x86-64, ext4) against a local build of this branch. The uarch was built with GCC 13
 rather than the official GCC 14 toolchain, so uarch-dependent hashes differ from upstream golden values. No test

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-89 confirmed issues: 5 high, 20 medium, 64 low.
+90 confirmed issues: 5 high, 20 medium, 65 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -114,6 +114,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
 | [B86](#b86-set_runtime_config-reports-a-new-hash-tree-concurrency-that-is-never-applied) | low | pre-existing | Runtime config, hash tree | set_runtime_config reports a new hash-tree concurrency that is never applied | `bugs/u3-02-set-runtime-config-ignores-hash-tree-concurrency/` |
 | [B88](#b88-read-only-memory-ranges-longer-than-their-page-aligned-image-are-always-rejected) | low | pre-existing | Machine config (memory ranges) | Read-only memory ranges longer than their page-aligned image are always rejected | `bugs/u3-06-readonly-backing-gap-always-throws/` |
+| [B90](#b90-uarch-write_tlb-with-slot_index-of-256-or-more-fails-to-record-but-verifies-on-replay) | low | pre-existing | uarch (shadow TLB ECALL), step verification | uarch WRITE_TLB with slot_index of 256 or more fails to record but verifies on replay | `bugs/u2-04-uarch-write-tlb-slot-index-record-throws-replay-accept/` |
 
 ## Issues
 
@@ -4910,7 +4911,7 @@ It generates its uarch RAM images and snapshots in a fresh temporary directory (
 
 **ID**: `c1-01-uarch-write-tlb-set-index-oob-host-write`
 
-**Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
+**Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image), [B90](#b90-uarch-write_tlb-with-slot_index-of-256-or-more-fails-to-record-but-verifies-on-replay).
 
 ### B86. set_runtime_config reports a new hash-tree concurrency that is never applied
 
@@ -5136,6 +5137,71 @@ It exits with status 1 and prints `BUG:` lines while the defect is present, and 
 **ID**: `u2-02-clone-file-hardlinks-symlink-itself`
 
 **Related**: [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain).
+
+### B90. uarch WRITE_TLB with slot_index of 256 or more fails to record but verifies on replay
+
+**Title**: uarch WRITE_TLB with slot_index >= 256: log_step_uarch/run_uarch throw "TLB slot index out of bounds", but verify_step_uarch accepts a log that writes the next set's slot
+
+**Problem**: The uarch ECALL handler for `UARCH_ECALL_FN_WRITE_TLB` passes `a0` (set_index) and `a1` (slot_index) to `writeTlbECALL` without checking their range. What happens next depends on the state access:
+- **Execution, record and collect paths throw.** `run_uarch`, `log_step_uarch` and `collect_uarch_cycle_root_hashes` all call `machine::write_unverified_tlb`. That function throws `std::out_of_range("TLB slot index out of bounds")` when `slot_index >= TLB_SET_SIZE` (256).
+- **Replay path accepts.** `verify_step_uarch`, which the Solidity step mirrors, does no range check. It computes `shadow_tlb_get_abs_addr(set_index, slot_index)` and accepts a logged write at that address. For set 0, slot 256 the address is `0x1000 + 256*32 = 0x3000`, which is slot 0 of the TLB_READ set. For set 2 with a large slot, the address falls past the end of the shadow TLB range. That case was not tested.
+
+So the verifiers define a state transition that the emulator's own run, log and collect functions refuse to compute. Most other uarch faults, such as `ebreak` or an unsupported ecall, fail in both record and replay. This one fails only in record.
+
+**Origin**: pre-existing. `origin/main` has the same code in both paths.
+
+**Area**: uarch step execution and logging versus replay: `run_uarch`, `log_step_uarch` and `collect_uarch_cycle_root_hashes` against `verify_step_uarch` and the Solidity step.
+
+**Category**: correctness (record/replay disagreement in the fraud-proof state transition).
+
+**Location**:
+- `src/uarch-step.cpp:883-891`: the WRITE_TLB ECALL reads a0..a4 and calls `writeTlbECALL` with no range check.
+- `src/machine.hpp:721-725`: `write_unverified_tlb` throws when `slot_index >= TLB_SET_SIZE`.
+- `src/uarch-record-state-access.hpp:254-266`: record `do_write_tlb` calls `write_unverified_tlb`.
+- `src/uarch-state-access.hpp:107` and `src/collect-uarch-cycle-hashes-state-access.hpp:111`: same call in the run and collect paths.
+- `src/uarch-replay-state-access.hpp:373-378`: replay `do_write_tlb` has no range check before `check_write_access`.
+- `src/shadow-tlb.hpp:106-108`: `shadow_tlb_get_abs_addr` does unchecked address arithmetic.
+
+**Evidence**: The test writes one `ecall` into uarch RAM with `write_memory`. It then sets `uarch_pc`, `a7=WRITE_TLB`, `a0=0`, `a1=256` and `a2..a4` with `write_reg`. On this state, `log_step_uarch` and `run_uarch(1)` both throw, and the machine state does not change.
+
+The test then builds a log for the same step against the machine's real state:
+- The access structure comes from an honest log of the `(set=1, slot=0)` ecall, which writes the same address, 0x3000.
+- Read data and sibling hashes come from `get_proof`.
+- The intermediate states for the pc and cycle writes are produced on the real machine.
+
+`cartesi.machine:verify_step_uarch` accepts this log. The root hash it returns equals the machine's real root hash after the slot write at 0x3000.
+```
+log_step_uarch(set=0, slot=256):	false	TLB slot index out of bounds
+run_uarch(1)                    :	false	TLB slot index out of bounds
+verify_step_uarch(hand-built log):	true	accepted
+BUG: WRITE_TLB with slot_index=256: log_step_uarch/run_uarch throw ('TLB slot index out of bounds') but verify_step_uarch accepts a log writing tlb slot at 0x3000 (TLB_READ slot 0); record and replay (Solidity-equivalent) disagree
+```
+Run: `eval $(make -s env); lua5.4 bugs/u2-04-uarch-write-tlb-slot-index-record-throws-replay-accept/test_write_tlb_slot_index.lua`. Exit code 1 means the bug is present.
+
+**Scenario**: A PRT/Dave template has non-pristine uarch state, such as a custom `uarch.ram` backing store or a stored machine with tampered uarch RAM or registers. Its uarch code reaches WRITE_TLB with `a1 >= 256`. The template hash covers the uarch RAM and is committed on chain. At that uarch cycle the honest node runs into these failures:
+- `collect_uarch_cycle_root_hashes` and `run_uarch` throw, so the node cannot build its commitment.
+- `log_step_uarch` throws, so the node cannot produce the step proof.
+
+The on-chain step, like `verify_step_uarch`, accepts the transition. A dishonest player who commits the leaf the verifier computes can win the leaf match, and the honest player loses or times out. Apps and guest code cannot trigger this, for three reasons:
+- Uarch RAM is not a big-machine PMA (`pmas=false`), so guest code cannot write it.
+- `reset_uarch` restores the pristine image after every mcycle.
+- The pristine uarch interpreter never issues WRITE_TLB with `slot >= 256`.
+
+**Possible solution**: Make record and replay agree on one definition, and keep the Solidity step in sync. The preferred fix is to reject `slot_index >= TLB_SET_SIZE` and `set_index >= TLB_NUM_SETS` in the shared step code, in `writeTlbECALL` / `uarch-step.cpp`, so every state access, Solidity included, throws or reverts the same way. A less clean alternative is to add the same checks to replay `do_write_tlb`. Either way, add a regression test that runs both `log_step_uarch` and `verify_step_uarch` on out-of-range indices.
+
+**Severity**: low. Both reviewers agree. The disagreement is real and affects consensus, but triggering it needs non-pristine uarch RAM or register state baked into the agreed template, and guest apps cannot reach that state. The honest node also fails loudly with an exception rather than computing a wrong hash.
+
+**Risks**:
+- **Bug**: a malformed template that validators accepted lets a dishonest player win a dispute, because the honest node cannot produce a commitment or proof at that cycle. Replay writes land in the adjacent set or in shadow TLB padding, or, for `set=2`, beyond the shadow TLB range, which may reach other state.
+- **Fix**: changing the step's semantics needs a coordinated change to the Solidity step contract and a new step-version/hash compatibility check. Emulator and contract versions that do not match could disagree on these edge cases. The pristine uarch never hits these cases, so normal execution is unaffected.
+
+**Proof of concept**: `bugs/u2-04-uarch-write-tlb-slot-index-record-throws-replay-accept/test_write_tlb_slot_index.lua`. It needs no machine images or extra files. Run from the repo root: `eval $(make -s env); lua5.4 bugs/u2-04-uarch-write-tlb-slot-index-record-throws-replay-accept/test_write_tlb_slot_index.lua`. Exit code 1 with a `BUG:` line means the bug is present. Exit code 0 means it is fixed, either because the verifier rejects the step or because the logger handles it.
+
+**ID**: `u2-04-uarch-write-tlb-slot-index-record-throws-replay-accept`
+
+**Reviewer note**: An earlier panel (`c1-02-uarch-record-replay-asymmetry-tlb-slot-and-protected-w`) reproduced the same record and replay asymmetry, also for writes to protected or read-only shadow words, and rejected it 2 to 1 because it needs a uarch RAM image other than the built-in one. This panel confirmed it. Both agree it needs a custom uarch image in the template.
+
+**Related**: [B85](#b85-uarch-write_tlb-never-range-checks-set_index-so-a-crafted-template-writes-host-memory-out-of-bounds).
 
 ## Candidates that were not confirmed
 

@@ -436,6 +436,18 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(replace_memory_range_pma_overlapping_test, incomp
     BOOST_CHECK_EQUAL(origin, result);
 }
 
+BOOST_FIXTURE_TEST_CASE_NOLINT(replace_memory_range_uarch_state_overlapping_test, incomplete_machine_fixture) {
+    _machine_config["flash_drive"] = nlohmann::json{{{"label", "flash0"}, {"start", 0x500000}, {"length", 0x1000}}};
+    const auto dumped_config = _machine_config.dump();
+
+    cm_error error_code = test_create_new(dumped_config.c_str(), nullptr, nullptr, &_machine);
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_INVALID_ARGUMENT);
+
+    std::string result = cm_get_last_error_message();
+    std::string origin("address range of flash drive 0 overlaps with reserved uarch state address range");
+    BOOST_CHECK_EQUAL(origin, result);
+}
+
 class machine_flash_simple_fixture : public incomplete_machine_fixture {
 public:
     machine_flash_simple_fixture() {

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-19 confirmed issues: 2 high, 5 medium, 12 low.
+18 confirmed issues: 2 high, 4 medium, 12 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -30,7 +30,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
-| [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
@@ -742,54 +741,6 @@ Exit 1 with `BUG: ... SIGBUS` means the bug reproduced. Exit 0 means fixed (no c
 **ID**: `w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc`
 
 **Related**: [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).
-
-### B67. Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable
-
-**Title**: Config validation allows memory ranges inside the 2^22 uarch-state hash node (0x401000-0x5fffff), so log_reset_uarch fails and collect_uarch_cycle_root_hashes commits to a reset root that cannot be proven
-
-**Problem**: The uarch reset is proven as a single write of the whole 2^22-byte hash-tree node at `UARCH_STATE_START_ADDRESS` (0x400000-0x7fffff). Replay (`do_reset_uarch` in `uarch-replay-state-access.hpp`), and the on-chain verifier modeled on it, set that node's hash to the constant `machine::get_uarch_pristine_hash()`. That constant assumes the node holds only the uarch shadow (0x400000-0x400fff) and the uarch RAM (0x600000-0x7fffff), with the gap 0x401000-0x5fffff all zero. Config validation does not enforce this. `machine_address_ranges::check` only checks that a range is addressable and does not overlap another range, so a flash drive (or other memory range) with an explicit `start` in the gap is accepted. On the record side, `m_m.reset_uarch()` resets only the uarch shadow and uarch RAM and leaves the gap alone. The code admits the guard is missing: `//??D I'd like to add an static_assert or some other guard mechanism to guarantee that uarch.ram and uarch.shadow are alone in the entire span of their common hash tree parent node`. Once a range in the gap holds non-zero data:
-- `log_reset_uarch` always throws `written hash for uarch.state does not match expected hash in 1st access`;
-- `reset_uarch` and `collect_uarch_cycle_root_hashes` (and so `collect_uarch_cycle_bundle`) produce a post-reset root that still contains the drive data, while the on-chain reset wipes the whole node to the pristine hash.
-
-The emulator's commitment then differs from the state transition the verifier enforces, and no reset proof can be produced.
-
-**Origin**: pre-existing. `origin/main` has the same overlap-only check and the same `??D` comment.
-
-**Area**: machine config validation / uarch reset (`log_reset_uarch`, `verify_reset_uarch`, `reset_uarch`, `collect_uarch_cycle_root_hashes`, `collect_uarch_cycle_bundle`).
-
-**Category**: correctness (unprovable commitment / divergence from on-chain semantics).
-
-**Location**:
-- `src/machine-address-ranges.cpp:382-400`: `machine_address_ranges::check` checks only addressability and overlap; nothing reserves 0x401000-0x5fffff.
-- `src/uarch-replay-state-access.hpp:368-371`: `do_reset_uarch` checks a write of the whole node `(UARCH_STATE_START_ADDRESS, UARCH_STATE_LOG2_SIZE)` against `get_uarch_pristine_hash()`.
-- `src/uarch-record-state-access.hpp:277-292`: `do_reset_uarch` logs a write of the same node, but `reset_uarch()` touches only the shadow and uarch RAM (`??D` comment at 278-280).
-- `src/uarch-defines.h:24-27`: `UARCH_STATE_START_ADDRESS_DEF` = 0x400000, `UARCH_STATE_LOG2_SIZE_DEF` = 22. `src/address-range-defines.h:30-32`: shadow at 0x400000 (length 0x1000), uarch RAM at 0x600000.
-
-**Evidence**: The test builds machines with a 4 KiB flash drive at 0x401000, 0x500000 and 0x5ff000. All three configs are accepted. It writes `"app data"` to the drive, runs the uarch to halt and calls `log_reset_uarch`, which fails every time. In each case the last leaf of `collect_uarch_cycle_root_hashes(1, 0, ...)` equals the root after `reset_uarch()`, which still includes the drive data. A control run with the same placement but an all-zero drive proves and verifies the reset without error, which is why the bug goes unnoticed.
-```
-BUG: flash drive at 0x401000 (inside uarch-state node 0x400000..0x800000) accepted; log_reset_uarch fails: written hash for uarch.state does not match expected hash in 1st access
-  collect_uarch_cycle_root_hashes last leaf == reset_uarch root (unprovable root committed)
-BUG: flash drive at 0x500000 (...) accepted; log_reset_uarch fails: written hash for uarch.state does not match expected hash in 1st access
-  collect_uarch_cycle_root_hashes last leaf == reset_uarch root (unprovable root committed)
-BUG: flash drive at 0x5ff000 (...) accepted; log_reset_uarch fails: written hash for uarch.state does not match expected hash in 1st access
-  collect_uarch_cycle_root_hashes last leaf == reset_uarch root (unprovable root committed)
-control: all-zero drive at 0x500000, log_reset_uarch + verify_reset_uarch ok
-```
-Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/test-memory-range-in-uarch-state-node.lua` (exit 1).
-
-**Scenario**: A dapp author builds a template with an explicit drive start in the gap, for example `--flash-drive=start:0x500000,length:4096,...` or `flash_drive = {{start = 0x500000, ...}}`. The config is accepted, and `doc/README.md` describes flash drive placement as "configurable with constraints" without listing this gap as reserved. The drive holds non-zero data, either from its image or written by the guest at runtime. An honest PRT validator (Dave, the Rollups Node, or the Lua PRT node) computes its commitment with `collect_uarch_cycle_root_hashes`. Its reset leaves keep the drive data. When the dispute reaches a uarch-reset step, `log_reset_uarch` throws, so the honest player cannot produce the reset proof. Even with a proof, its leaf differs from the on-chain reset result. The honest player loses to an opponent whose roots follow the verifier's wipe-the-node semantics. The template is fixed in advance, so a dispute adversary cannot trigger this unless the template already has such a range. Default flash-drive placement never uses the gap.
-
-**Possible solution**: In config validation (`machine_address_ranges::check` or where the machine registers its ranges), reject any address range other than the uarch shadow and the uarch RAM that intersects `[UARCH_STATE_START_ADDRESS, UARCH_STATE_START_ADDRESS + 2^UARCH_STATE_LOG2_SIZE)`, with a clear error. Replace the `??D` comment with that check, plus a `static_assert` that the shadow and uarch RAM both lie inside the node. Document 0x400000-0x7fffff as reserved in the physical memory map.
-
-**Severity**: medium. Both reviewers rated it medium (one said possibly high). When triggered, the impact is critical: the reset proof cannot be produced and the commitment diverges from on-chain semantics, so an honest player loses the dispute. But it needs a rare, author-chosen config: a non-default explicit `start` in the 2 MiB gap, with a range that holds non-zero data.
-
-**Risks**: Bug: affected templates fail silently. Nothing goes wrong until the gap range holds non-zero data and a dispute reaches a reset step, and by then the template is fixed on chain. Fix: low risk. Rejecting ranges in the gap could break an existing template or snapshot that already uses that placement. Such machines cannot produce valid reset proofs today anyway, so failing at load time is better than losing a dispute later. Loading a stored snapshot with such a range would also fail after the fix; the error message should explain why.
-
-**Proof of concept**: `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/test-memory-range-in-uarch-state-node.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/test-memory-range-in-uarch-state-node.lua`. It exits 1 and prints `BUG:` lines while the bug is present. Once the gap is reserved, it prints `rejected by config validation ... (fixed)` for each start, then the control line and `OK`, and exits 0.
-
-**ID**: `p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo`
-
-**Related**: B35 (fixed).
 
 ### B75. tojson writes unsigned 64-bit values of 2^63 or more as negative integers
 

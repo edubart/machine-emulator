@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-89 confirmed issues: 6 high, 20 medium, 63 low.
+88 confirmed issues: 6 high, 20 medium, 62 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -56,7 +56,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder bounds checks overflow and accept out-of-bounds offsets | `bugs/lua-10-evmu-offset-length-overflow-accepts-oob/` |
 | [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
-| [B21](#b21-frontier_next_proofs-is-wrong-on-trees-of-height-64-or-more) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_next_proofs is wrong on trees of height 64 or more | `bugs/lua-13-next-proofs-signed-compare-ge64/` |
 | [B22](#b22-frontier_pad_back-rejects-valid-counts-and-corrupts-very-tall-frontiers) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_pad_back rejects valid counts and corrupts very tall frontiers | `bugs/lua-14-pad-back-tall-tree-size-wrap/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
 | [B24](#b24-temporary-and-frontier-files-are-created-with-mode-0600-and-without-atomic-o_cloexec) | low | introduced by branch | Lua cartesi.filesystem and cartesi.hash-tree, CLI | Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC | `bugs/rpc-07-frontier-files-mode-0600/` |
@@ -1211,71 +1210,6 @@ It exits 1 and prints `BUG: ...` lines while the bug is present. It exits 0 and 
 
 **ID**: `lua-11-evmu-param-name-data-location-prefix-mangled`
 
-### B21. frontier_next_proofs is wrong on trees of height 64 or more
-
-**Title**: `frontier_next_proofs` returns wrong roots and proofs on trees of height >= 64 when the new leaves cross leaf index 2^63
-
-**Problem:** `frontier_node` decides whether a node index belongs to the frontier, the active region or the pristine region. It does this with signed comparisons, `index < lo` and `index > hi`. `frontier_next_proofs` passes it global node indices: `(leaf_count + i - 1) >> bit`, `node ~ 1`, `2*p` and `2*p + 1`.
-
-On a tree of height 64 or more, those indices can reach 2^63 and above. Lua then reads them as negative integers. Once the active range crosses the sign boundary (`lo` positive, `hi` or the index negative), the node is put in the wrong region. The function returns the frontier entry or the pristine hash where it should return the active node. Every resulting sibling and root is silently wrong.
-
-The rest of the module treats indices as unsigned:
-- right shifts are logical;
-- `frontier_pad_back` uses `math.ult`;
-- `frontier_get_leaf_count` accepts bit 63;
-- `frontier_padding_fits` is documented as supporting "trees taller than a Lua integer".
-
-**Origin:** pre-existing. The same `frontier_node` code is on `origin/main` (line 97).
-
-**Area:** Lua hash-tree frontier library (`cartesi.hash-tree`), which ships as part of the emulator's Lua API.
-
-**Category:** correctness (silent wrong result, integer signedness).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:96-106` (`frontier_node`: `if index < lo` / `elseif index > hi`)
-- `src/cartesi/hash-tree.lua:332` (sibling lookup in `frontier_next_proofs`)
-- `src/cartesi/hash-tree.lua:336-340` (parent loop in `frontier_next_proofs`)
-
-**Evidence:** The test builds a height-64 frontier whose levels 1..63 are filled, so the leaf count is 2^63-1. It then calls `frontier_next_proofs` with 3 leaf hashes. Each proof is compared with the root from `frontier_push_back` + `frontier_get_root_hash`, and each is checked with `verify_slice` and `roll_hash_up_tree`. A control case also runs: height 64 with leaf count 1023, where nothing crosses 2^63. The control passes, while all 3 proofs of the crossing case are wrong:
-```
-$ eval $(make -s env); lua5.4 bugs/lua-13-next-proofs-signed-compare-ge64/test_next_proofs_ge64.lua
-control (leaf count 1023, height 64): OK
-proof 1 target_address=0x7fffffffffffffff root_matches_push_back=false verify_slice=false rolled_matches_push_back=false
-proof 2 target_address=0x8000000000000000 root_matches_push_back=false verify_slice=false rolled_matches_push_back=false
-proof 3 target_address=0x8000000000000001 root_matches_push_back=false verify_slice=false rolled_matches_push_back=false
-BUG: frontier_next_proofs produced 3/3 wrong proofs for height-64 tree when range crosses 2^63
-```
-(exit 1). The prover patched the two comparisons to `math.ult(index, lo)` / `math.ult(hi, index)`. With that change the same test prints all `true` and `OK`, and exits 0.
-
-**Scenario:** A tool or validator uses the exported generic frontier API on a tree of height >= 64, for example:
-- a custom accumulator;
-- a frontier rebuilt from a stored proof using the `frontier(last_proof)` constructor with `target_address` near 2^63;
-- a frontier built with `frontier_push_back` on large subtrees.
-
-It then asks `frontier_next_proofs` for proofs of leaves whose range crosses index 2^63. It gets proofs that fail verification, with roots that differ from `frontier_get_root_hash`, and no error is raised.
-
-The PRT/CMIO outputs tree used by `cartesi-machine.lua`, `prt.lua`, the Rollups Node and Dave has height 63. Its leaf indices stay below 2^63, so the honest PRT path is not affected. `frontier_forest` also rejects heights >= 63.
-
-**Possible solution:** Make the region test unsigned in `frontier_node`:
-```lua
-if math.ult(index, lo) then return frontier_entry
-elseif math.ult(hi, index) then return pristine_entry
-else return active[index - lo + 1] end
-```
-`active[index - lo + 1]` is already correct under two's-complement wrap-around. The `for p = parents_base, (base + #active - 1) >> 1` loop also runs correctly, because both bounds come from logical shifts and so are below 2^63. If supporting heights above 64 is not intended, `frontier_next_proofs` should instead assert `log2_max_leaves < 64`, or `leaf_count + next_output_count - 1` must not wrap.
-
-**Severity:** low. All reviewers agree. The API silently returns a wrong result, but only for trees of height >= 64 holding about 2^63 leaves. No CLI, PRT, Rollups or Dave path can reach that, because the outputs tree has height 63. Getting there in practice also needs a hand-built or reconstructed frontier.
-
-**Risks:**
-- Of the bug: a third-party tool using the generic frontier API on a tall tree gets unverifiable proofs or a wrong root without any error. If such a root were committed, it would not match an independently computed root.
-- Of the fix: minimal. For indices below 2^63, `math.ult` behaves exactly like the signed comparison, so results for the height-63 outputs tree and for every existing caller stay the same.
-
-**Proof of concept:** `bugs/lua-13-next-proofs-signed-compare-ge64/test_next_proofs_ge64.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-13-next-proofs-signed-compare-ge64/test_next_proofs_ge64.lua`. It needs no machine images. It exits 1 and prints `BUG:` while the bug is present, and prints `OK` (exit 0) once fixed.
-
-**ID**: `lua-13-next-proofs-signed-compare-ge64`
-
-**Related**: [B22](#b22-frontier_pad_back-rejects-valid-counts-and-corrupts-very-tall-frontiers).
-
 ### B22. frontier_pad_back rejects valid counts and corrupts very tall frontiers
 
 **Title**: frontier_pad_back rejects valid counts >= 2^63 and corrupts the frontier when the tree is more than 64 levels above the pad height
@@ -1320,7 +1254,7 @@ With the fix below applied to a copy of `hash-tree.lua`, both cases succeed and 
 
 **ID**: `lua-14-pad-back-tall-tree-size-wrap`
 
-**Related**: [B21](#b21-frontier_next_proofs-is-wrong-on-trees-of-height-64-or-more).
+**Related**: B21 (fixed).
 
 ### B23. JSON-RPC protocol version not bumped for the new clear_hash_tree API
 

@@ -95,9 +95,9 @@ local pristine_leaf = string.rep("\0", cartesi.HASH_SIZE)
 -- docs:begin frontier_node
 local function frontier_node(frontier_entry, base, active, pristine_entry, index)
     local lo, hi = base, base + #active - 1
-    if index < lo then
+    if math.ult(index, lo) then
         return frontier_entry -- fell left: a complete left subtree from the frontier
-    elseif index > hi then
+    elseif math.ult(hi, index) then
         return pristine_entry -- fell right: an all-pristine subtree
     else
         return active[index - lo + 1] -- inside the active region

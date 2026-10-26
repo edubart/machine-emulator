@@ -188,6 +188,20 @@ describe("hash-tree.lua", function()
                 hash_tree.frontier_next_proofs(frontier, { leaf(2) })
             end, "frontier leaf count exceeds 64 bits")
         end)
+
+        it("produces proofs for leaves that cross index 2^63", function()
+            local frontier = hash_tree.frontier(64, "keccak256")
+            for level = 1, 63 do -- leaf count 2^63 - 1
+                frontier[level] = leaf(level)
+            end
+            local leaves = make_leaves(2)
+            local proofs = hash_tree.frontier_next_proofs(frontier, leaves)
+            hash_tree.frontier_append(frontier, leaves)
+            for i = 1, 2 do
+                expect.equal(proofs[i].root_hash, hash_tree.frontier_get_root_hash(frontier))
+                hash_tree.verify_slice(proofs[i])
+            end
+        end)
     end)
 
     describe("frontier_store", function()

@@ -1416,6 +1416,19 @@ describe("hash-tree.lua", function()
                 expect_same_queries(forest, hash_tree.frontier_forest_load(directory, frontier_path))
             end)
 
+            it("removes the temporary files that interrupted stores left", function()
+                local _ <close>, directory = new_scope_directory()
+                local frontier_path = directory .. "/frontier.json"
+                -- A crash before the rename leaves a temporary file, which another file may resemble.
+                fs.write_file("", tree_path(directory, leaves[1], 2) .. ".tmp.Ab12Cd")
+                fs.write_file("", frontier_path .. ".tmp.Ef34Gh")
+                fs.write_file("", directory .. "/other.json.tmp.Ij56Kl")
+                hash_tree.frontier_forest_store(fixtures.forests(), directory, frontier_path)
+                for _, name in ipairs(fs.list_directory(directory)) do
+                    expect.truthy(not name:find(".tmp.", 1, true) or name == "other.json.tmp.Ij56Kl")
+                end
+            end)
+
             it("keeps trees that share a hash at another height or base height", function()
                 local _ <close>, directory = new_scope_directory()
                 -- Four leaves H(x, x) and eight leaves x give the same hash at heights 2 and 3.

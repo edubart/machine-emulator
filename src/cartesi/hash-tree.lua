@@ -528,6 +528,15 @@ local function write_file(contents, path)
     temporary:rename(path)
 end
 
+-- Removes the temporary files that write_file left in a directory when a crash interrupted it, for
+-- the names that match a pattern. A concurrent writer would lose its temporary file, so the
+-- directory must have a single writer.
+local function remove_temporary_files(directory, pattern)
+    for _, name in ipairs(fs.list_directory(directory)) do
+        if name:match("^" .. pattern .. "%.tmp%.%w%w%w%w%w%w$") then fs.remove_file(directory .. "/" .. name) end
+    end
+end
+
 local function is_raw_hash(value) return type(value) == "string" and #value == cartesi.HASH_SIZE end
 
 local function new_raw_hash_tree(hash_function, hash, height)
@@ -1010,8 +1019,9 @@ end
 
 -- Stores a frontier in a file as the JSON array of its levels, each a base64 hash or false, so
 -- frontier_load can reopen it. The file is written through a temporary file, and its directory is
--- synced after the rename.
+-- synced after the rename. Temporary files that interrupted stores left for it are removed.
 local function frontier_store(f, path)
+    remove_temporary_files(get_parent_directory(path), (path:match("[^/]*$"):gsub("%W", "%%%0")))
     write_file(cartesi.tojson(table.move(f, 1, #f, 1, {}), 2, "Base64Array") .. "\n", path)
     fs.sync_directory(get_parent_directory(path))
 end
@@ -1042,9 +1052,12 @@ end
 -- keeps the directory, and later expansions are stored there as well. A forest that was loaded
 -- or stored keeps its directory, since trees it has not loaded exist only there. The frontier file
 -- is written and synced only after every tree it reaches is durable, so it is the store's commit
--- point: a crash leaves the previous frontier file intact.
+-- point: a crash leaves the previous frontier file intact. Temporary files that interrupted stores
+-- left for the trees and the frontier file are removed first.
 local function frontier_forest_store(forest, directory, frontier_path)
     assert(forest.directory == nil or forest.directory == directory, "the forest is stored in another directory")
+    remove_temporary_files(directory, "0x%x+%-%d+%.json")
+    remove_temporary_files(get_parent_directory(frontier_path), (frontier_path:match("[^/]*$"):gsub("%W", "%%%0")))
     forest.directory = directory
     forest.durable = forest.durable or setmetatable({}, { __mode = "k" })
     forest_flush(forest)

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-61 confirmed issues: 4 high, 12 medium, 45 low.
+60 confirmed issues: 4 high, 12 medium, 44 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -52,7 +52,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
-| [B36](#b36-temporary-files-from-killed-stores-are-never-cleaned-up) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Temporary files from killed stores are never cleaned up | `bugs/lua-25-leftover-temp-files/` |
 | [B37](#b37-filesystemtemp_pathname-returns-a-deleted-tmp-name-that-another-user-can-claim) | low | introduced by branch | Lua cartesi.filesystem | filesystem.temp_pathname returns a deleted /tmp name that another user can claim | `bugs/lua-27-temp-pathname-toctou/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 | [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
@@ -1206,56 +1205,6 @@ Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image c
 **ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
 
 **Related**: B39 (fixed).
-
-### B36. Temporary files from killed stores are never cleaned up
-
-**Title**: Temporary files from stores killed mid-write are never cleaned up and pile up in forest/frontier directories
-
-**Problem:** `write_file` in `cartesi.hash-tree` writes each tree or frontier file as `<name>.tmp.XXXXXX` in the target directory (`fs.new_temporary_file`). It then syncs the file and renames it into place. The temporary file is removed on failure only by the temporary object's `close`, which runs from `__close`/`__gc` (`cartesi.filesystem`). Neither runs when the process is SIGKILLed or OOM-killed, or when the machine loses power. No store or load path ever removes stale temporary files: `store_tree` and `load_tree` only test or open `<hash>.json` by its exact name, and `hash-tree.lua` never lists the directory. Every crash that lands between creating the temporary file and renaming it therefore leaves an orphaned file behind for good.
-
-**Origin:** Introduced by this branch (`hash-tree.lua` and `filesystem.lua` are new).
-
-**Area:** Lua library `cartesi.hash-tree` (`frontier_forest_store`, `frontier_store`), with `cartesi.filesystem` temporary files.
-
-**Category:** Resource leak (disk).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:509-514` (`write_file`: creates `<name>.tmp.` in the target directory)
-- `src/cartesi/filesystem.lua:52-68` (cleanup only through `close`, `__close` and `__gc`)
-- `src/cartesi/hash-tree.lua:525-527, 577-592` (`load_tree`/`store_tree` only check `<hash>.json` with `fs.exists`)
-- `src/cartesi/hash-tree.lua:935-938` (`frontier_store`), `967-1018` (`frontier_forest_store`/`frontier_forest_load`): no cleanup
-
-**Evidence:** `child.lua` builds a 1024-leaf keccak256 forest. It wraps `fs.sync_file` so that the process SIGKILLs itself after the temporary file is written and synced, but before the rename. It then calls `frontier_forest_store`. `test.lua` runs this 5 times with different leaves. It then runs one healthy store and `frontier_forest_load` in the same directory, and counts the `*.tmp.*` entries.
-```
-$ eval $(make -s env); lua5.4 bugs/lua-25-leftover-temp-files/test.lua
-crash 1: ok=nil how=exit code=137 tmp files now=1
-...
-crash 5: ok=nil how=exit code=137 tmp files now=5
-after healthy store+load: 5 leftover .tmp. files (353585 bytes)
-  0x45f40119...df47f.json.tmp.9SwUWg
-  ...
-BUG: 5 orphaned temporary files from 5 interrupted stores remain after a later store/load; nothing cleans them
-```
-
-**Scenario:** A validator node (an experimental PRT node, or any Rollups Node or Dave component using these Lua APIs) persists its commitment forests with `frontier_forest_store`. It gets OOM-killed, restarted by its supervisor, or loses power from time to time while storing. Each such crash leaves one tree-sized file, roughly 70 KB per 1024 base hashes, in the forests directory or in the frontier's parent directory. Over a long run on a node that crashes often, these files take up more and more disk space. That moves the node closer to disk-full (ENOSPC) conditions, which feed the separate truncated-write issue in `write_file`.
-
-**Possible solution:** Clean up stale temporary files when a directory is used. For example, in `frontier_forest_load`/`frontier_forest_store` (or in a dedicated `cleanup` helper), remove entries matching `*.json.tmp.*` from the forests directory and from the frontier's parent directory. Only do this when the caller owns the directory, so that a live writer's file is never removed. Another option is to create temporary files in a dedicated subdirectory (on the same filesystem, so rename stays atomic) that is wiped at startup. Document that a forests directory has a single writer.
-
-**Severity:** Low. Both reviewers and the prover agree. Hashes, proofs, stored-state correctness and dispute outcomes are not affected, because loads never read `*.tmp.*` files and the rename commit keeps every committed name consistent. Nothing crashes or hangs. The leak is at most one tree-sized file per crash that lands mid-write, so it matters only for nodes that crash repeatedly over a long time.
-
-**Risks:**
-- Of the bug: slow, unbounded disk growth on unstable nodes, which adds to the chance of ENOSPC and the failures that follow it (failed or truncated stores, a node that stops).
-- Of the fix: removing temporary files without regard to other processes could delete a file that a concurrent writer is about to rename, making that store fail. So cleanup has to assume or enforce a single owner per directory. A glob that is too broad could also delete user files that share the directory. Match only the exact `<64-hex>.json.tmp.XXXXXX` and `<frontier-name>.tmp.XXXXXX` patterns.
-
-**Proof of concept:** `bugs/lua-25-leftover-temp-files/test.lua` (driver) and `bugs/lua-25-leftover-temp-files/child.lua` (store that is killed mid-write). Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/lua-25-leftover-temp-files/test.lua
-```
-It exits with 1 and prints `BUG: ...` while the leak is present, and prints `OK: no leftover temporary files` once it is fixed.
-
-**ID**: `lua-25-leftover-temp-files`
-
-**Related**: B06 (fixed).
 
 ### B37. filesystem.temp_pathname returns a deleted /tmp name that another user can claim
 

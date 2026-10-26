@@ -1562,6 +1562,22 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(read_write_virtual_memory_massive_test, ordinary_
     BOOST_CHECK_EQUAL_COLLECTIONS(write_data.begin(), write_data.end(), read_data.begin(), read_data.end());
 }
 
+BOOST_FIXTURE_TEST_CASE_NOLINT(read_write_virtual_memory_top_page_test, ordinary_machine_fixture) {
+    // range ending exactly at 2^64 is unmapped physical memory in bare mode, so it reads as zeros
+    std::array<uint8_t, 4096> data{};
+    data.fill(0xaa);
+    cm_error error_code = cm_read_virtual_memory(_machine, UINT64_C(0xfffffffffffff000), data.data(), data.size());
+    BOOST_REQUIRE_EQUAL(error_code, CM_ERROR_OK);
+    BOOST_CHECK(std::ranges::all_of(data, [](uint8_t b) { return b == 0; }));
+    error_code = cm_write_virtual_memory(_machine, UINT64_C(0xfffffffffffff000), data.data(), data.size());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_INVALID_ARGUMENT);
+    // range crossing 2^64 is rejected
+    error_code = cm_read_virtual_memory(_machine, UINT64_C(0xfffffffffffff001), data.data(), data.size());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_INVALID_ARGUMENT);
+    error_code = cm_write_virtual_memory(_machine, UINT64_C(0xfffffffffffff001), data.data(), data.size());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_INVALID_ARGUMENT);
+}
+
 // NOLINTNEXTLINE
 #define CHECK_READER_FAILS_ON_nullptr_MACHINE(T, reader_f)                                                             \
     BOOST_FIXTURE_TEST_CASE_NOLINT(read_##reader_f##_null_machine_test, ordinary_machine_fixture) {                    \

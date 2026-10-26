@@ -1834,11 +1834,15 @@ void machine::read_virtual_memory(uint64_t vaddr_start, unsigned char *data, uin
     if (data == nullptr) {
         throw std::invalid_argument{"invalid data buffer"};
     }
+    if (vaddr_start + (length - 1) < vaddr_start) {
+        throw std::invalid_argument{"virtual address range wraps around"};
+    }
+    // vaddr_limit and vaddr_page_limit wrap to 0 when the range ends exactly at 2^64
     const uint64_t vaddr_limit = vaddr_start + length;
     const uint64_t vaddr_page_start = vaddr_start & ~(AR_PAGE_SIZE - 1);                      // align page backward
     const uint64_t vaddr_page_limit = (vaddr_limit + AR_PAGE_SIZE - 1) & ~(AR_PAGE_SIZE - 1); // align page forward
     // copy page by page, because we need to perform address translation again for each page
-    for (uint64_t vaddr_page = vaddr_page_start; vaddr_page < vaddr_page_limit; vaddr_page += AR_PAGE_SIZE) {
+    for (uint64_t vaddr_page = vaddr_page_start; vaddr_page != vaddr_page_limit; vaddr_page += AR_PAGE_SIZE) {
         uint64_t paddr_page = 0;
         if (!cartesi::translate_virtual_address<state_access, false>(a, &paddr_page, vaddr_page, PTE_XWR_R_SHIFT)) {
             throw std::domain_error{"page fault"};
@@ -1865,11 +1869,15 @@ void machine::write_virtual_memory(uint64_t vaddr_start, const unsigned char *da
     if (data == nullptr) {
         throw std::invalid_argument{"invalid data buffer"};
     }
+    if (vaddr_start + (length - 1) < vaddr_start) {
+        throw std::invalid_argument{"virtual address range wraps around"};
+    }
+    // vaddr_limit and vaddr_page_limit wrap to 0 when the range ends exactly at 2^64
     const uint64_t vaddr_limit = vaddr_start + length;
     const uint64_t vaddr_page_start = vaddr_start & ~(AR_PAGE_SIZE - 1);                      // align page backward
     const uint64_t vaddr_page_limit = (vaddr_limit + AR_PAGE_SIZE - 1) & ~(AR_PAGE_SIZE - 1); // align page forward
     // copy page by page, because we need to perform address translation again for each page
-    for (uint64_t vaddr_page = vaddr_page_start; vaddr_page < vaddr_page_limit; vaddr_page += AR_PAGE_SIZE) {
+    for (uint64_t vaddr_page = vaddr_page_start; vaddr_page != vaddr_page_limit; vaddr_page += AR_PAGE_SIZE) {
         uint64_t paddr_page = 0;
         // perform address translation using read access mode,
         // so we can write any reachable virtual memory range

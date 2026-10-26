@@ -458,6 +458,18 @@ describe("cartesi evmu", function()
         assert(weak[1] == nil, "parsed function signature was not collected")
     end)
 
+    it("shifts bints by bint counts too large for a lua integer", function()
+        local bint = evmu.bint
+        local two64 = bint(1) << 64
+        assert(bint(5) << two64 == bint(0))
+        assert(bint(5) << (two64 + 1) == bint(0))
+        assert(bint(5) << (two64 - 1) == bint(0))
+        assert(bint(5) >> (two64 - 1) == bint(0))
+        assert(bint(5) << -two64 == bint(0))
+        assert(bint(5) << bint(1) == bint(10) and bint(5) >> bint(-1) == bint(10))
+        assert(bint(5) << bint(-1) == bint(2) and bint(5) >> bint(255) == bint(0))
+    end)
+
     it("calldata encoding and decoding", function()
         -- check calldata encoding
         check_encode_decode_calldata_hex("_()", {}, "0xb7ba4583")

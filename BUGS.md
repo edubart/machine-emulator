@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-31 confirmed issues: 2 high, 6 medium, 23 low.
+30 confirmed issues: 2 high, 6 medium, 22 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -51,7 +51,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
-| [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
 | [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
@@ -1274,59 +1273,6 @@ The test exits 1 while the bug is present. It exits 0 once `tojson` raises an er
 
 **Related**: B69 (fixed).
 
-### B79. bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64
-
-**Title**: bint `<<` / `>>` with a bint shift count of 2^63 or more wraps the count modulo 2^64: `x << bint(2^64-1) == x >> 1` and `x << bint(2^64) == x`
-
-**Problem**: `bint.__shl` and `bint.__shr` convert the shift count with `bint_assert_tointeger(y)`. That calls `bint.tointeger`, which ORs every 32-bit word into one Lua integer (`n = n | (x[i] << (BINT_WORDBITS*(i-1)))`). Bits above 64 are shifted out, so the count wraps modulo 2^64 with no range check. `bint_assert_tointeger` raises only when the result is `nil`, which never happens for a bint. The `y == math_mininteger or math_abs(y) >= BINT_BITS` guard, which should send any count of 256 or more to zero, runs only after the wrap. A count passed as a bint (or a numeric string) of 2^63 or more therefore turns into an unrelated shift:
-- 2^64 becomes 0, so the shift does nothing;
-- 2^64+1 becomes 1;
-- 2^64-1 becomes -1, so the shift goes the other way.
-
-The result is a plausible wrong value, not 0 and not an error. Native Lua gives 0 for these counts (`5 << 64 == 0`). The shift docs say "@raise Asserts in case inputs are not convertible to integers". The wrap inside `bint.tointeger` is itself documented ("integer values wrap around"). What is wrong is the shift operators trusting that wrapped value.
-
-Two related observations are not bugs. `brol`/`bror` (lines 944, 962) use the same helper. But rotation is modulo 256 and 2^64 is a multiple of 256, so their results stay correct: `brol(1, 2^64+1) == 2` and `bror(1, 2^64-1) == 2`, both checked. `bint.trunc("0x10000000000000005")` returns 5 because `bint.trunc` calls Lua's own `tonumber`, which wraps hex literals. That is standard Lua behaviour, not this helper. A negative count reversing the shift (`bint(5) << -1 == 2`) is also intended and matches native Lua.
-
-**Origin**: Pre-existing. `bint.lua` is vendored lua-bint and the branch does not change it. The branch adds `evmu.encode_abi`/`evmu.decode_abi`, which return every `uint` as a bint. That makes it easier for a caller to pass a raw on-chain value as a shift count.
-
-**Area**: Lua `cartesi.third-party.bint`, exported as `cartesi.evmu`'s `evmu.bint`.
-
-**Category**: Correctness (silent wrong result).
-
-**Location**:
-- `src/cartesi/third-party/bint.lua:480-496`: `bint.tointeger` builds the integer by OR-ing words, so it wraps modulo 2^64.
-- `src/cartesi/third-party/bint.lua:499-505`: `bint_assert_tointeger` checks only for `nil`, never for range.
-- `src/cartesi/third-party/bint.lua:1506-1509`: `__shl` converts first, then applies the `>= BINT_BITS` guard to the wrapped value.
-- `src/cartesi/third-party/bint.lua:1534-1537`: `__shr`, same pattern.
-
-**Evidence**: The test checks shift counts given as bints, including a `uint256` round-tripped through `evmu.encode_abi`/`evmu.decode_abi`. It expects 0 (or an error) for every count of 256 or more. Run it with `eval $(make -s env); lua5.4 bugs/p3-13-bint-shift-count-wraps-mod-2-64/test.lua`, which exits 1:
-```
-decoded count:	18446744073709551615	type bint:	true
-BUG: bint(5) << bint(2^64) = 5, expected 0
-BUG: bint(5) << bint(2^64+1) = 10, expected 0
-BUG: bint(5) << bint(2^64-1) = 2, expected 0
-BUG: bint(5) >> bint(2^64-1) = 10, expected 0
-BUG: bint(5) << decoded_uint256(2^64-1) = 2, expected 0
-ok: bint(1) << bint(2^63) (min int) = 0
-BUG: bint.trunc('0x10000000000000005') = 5, expected 18446744073709551621
-bint.tointeger(2^64+5) =	5
-```
-The `bint.trunc` line comes from Lua's `tonumber` (see Problem) and is informational. The five shift lines are the defect.
-
-**Scenario**: A validator or app script built on `cartesi.evmu` shifts by a decoded on-chain value without narrowing it to a Lua integer first. Examples are `position << descriptor.log2Stride` or `1 << height`, where the stride or height is a `uint256` from a contract event or from a hostile contract's return data. A value such as 2^64-1 then gives a wrong cycle, position or mask (here a right shift by 1) with no error, and the node can be steered to the wrong step or proof. The in-tree PRT node recipe (`doc/recipes/prt-bridge.lua:196, 209, 222`) narrows decoded values with `eth.small` before using them. Every in-tree bint shift in `src/cartesi/evmu.lua` uses a small constant or an ABI type width. So no shipped caller is affected today. Nothing in the library catches the misuse, though. The emulator's hashes, proofs and step logs are not affected.
-
-**Possible solution**: In `__shl`/`__shr`, check the count before converting it. If `y` is a bint, return `bint_zero()` when `y` is negative-large or `bint.ult(BINT_BITS - 1, |y|)`, and convert only once it is known to be small. Another option is a range-checked conversion helper, used only by the shift operators, that raises `value has no integer representation` (or returns zero) when the bint does not fit in a signed 64-bit integer. Leave the documented wrap of `bint.tointeger` as it is. `brol`/`bror` need no change, because their results are already correct modulo 256. Callers can also narrow with `eth.small`/an explicit `assert(count < 256)` before shifting.
-
-**Severity**: Low. Both reviewers agree. It is a real silent wrong-result bug, but in vendored, pre-existing library code. It needs a caller that shifts by an unnarrowed count of at least 2^63, which no in-tree caller or the PRT node does, and it cannot affect machine hashes, proofs or step logs.
-
-**Risks**: Bug: third-party Lua code (PRT validators, Dave/Rollups Node tooling, apps using `evmu.bint`) that shifts by attacker-influenced 256-bit values gets a quietly wrong value instead of 0 or an error. That is the kind of mistake that is hard to notice in testing and can be exploited when the result picks a cycle or a proof position. Fix: the change is limited to the shift operators and their behaviour for in-range counts does not change. It does make bint diverge from upstream lua-bint, which matters for future vendor updates. If the fix raises instead of returning 0, a caller that relied on the wrap would now fail loudly, which is the intended outcome.
-
-**Proof of concept**: `bugs/p3-13-bint-shift-count-wraps-mod-2-64/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/p3-13-bint-shift-count-wraps-mod-2-64/test.lua` (it needs only the built `cartesi` Lua package and no machine images). It exits 1 and prints `BUG:` lines while the bug is present, and prints `no bug` once it is fixed.
-
-**ID**: `p3-13-bint-shift-count-wraps-mod-2-64`
-
-**Related**: [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing).
-
 ### B80. bint.new returns non-numeric values unchanged instead of failing
 
 **Title**: `bint.new` / `evmu.bint()` returns `true`, tables and `evmu.hex` wrappers unchanged instead of asserting, so the evmu int/uint encoders' "value not an integer" check never fires
@@ -1397,7 +1343,7 @@ It exits with code 1 and prints `BUG:` lines while the defect is present, and pr
 
 **ID**: `p3-14-bint-new-returns-non-numeric-input`
 
-**Related**: [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264).
+**Related**: B79 (fixed).
 
 ### B82. Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot
 

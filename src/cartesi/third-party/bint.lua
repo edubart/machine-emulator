@@ -504,6 +504,14 @@ local function bint_assert_tointeger(x)
   return x
 end
 
+-- Convert a shift count to an integer, saturating bints that do not fit in a lua integer.
+local function bint_assert_toshift(x)
+  if getmetatable(x) == bint and (x >= BINT_BITS or x <= -BINT_BITS) then
+    return BINT_BITS
+  end
+  return bint_assert_tointeger(x)
+end
+
 --- Convert a bint to a lua float in case integer would wrap around or lua integer otherwise.
 -- Different from @{bint.tointeger} the operation does not wrap around integers,
 -- but digits precision are lost in the process of converting to a float.
@@ -1504,7 +1512,7 @@ end
 -- @return The result of shift operation, a bint.
 -- @raise Asserts in case inputs are not convertible to integers.
 function bint.__shl(x, y)
-  x, y = bint_new(x), bint_assert_tointeger(y)
+  x, y = bint_new(x), bint_assert_toshift(y)
   if y == math_mininteger or math_abs(y) >= BINT_BITS then
     return bint_zero()
   end
@@ -1532,7 +1540,7 @@ end
 -- @return The result of shift operation, a bint.
 -- @raise Asserts in case inputs are not convertible to integers.
 function bint.__shr(x, y)
-  x, y = bint_new(x), bint_assert_tointeger(y)
+  x, y = bint_new(x), bint_assert_toshift(y)
   if y == math_mininteger or math_abs(y) >= BINT_BITS then
     return bint_zero()
   end

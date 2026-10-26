@@ -1992,6 +1992,10 @@ http::message_generator handle_request(HTTP_REQ &&rreq, const std::shared_ptr<ht
         return res;
     }
     SLOG(trace) << session->handler->local_endpoint << " request body is " << req.body().data();
+    // nlohmann::json stops at a NUL byte as if it were the end of input, so reject it here
+    if (req.body().find('\0') != std::string::npos) {
+        return jsonrpc_http_reply(req, jsonrpc_response_parse_error("unexpected NUL byte"), session);
+    }
     // Parse request body into a JSON object
     json j;
     try {

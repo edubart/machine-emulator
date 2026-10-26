@@ -160,8 +160,14 @@ static int cartesi_mod_tojson(lua_State *L) {
 
 static int cartesi_mod_fromjson(lua_State *L) {
     lua_settop(L, 3);
+    size_t len = 0;
+    const char *s = luaL_checklstring(L, 1, &len);
+    // nlohmann::json stops at a NUL byte as if it were the end of input, so reject it here
+    if (std::string_view(s, len).find('\0') != std::string_view::npos) {
+        return luaL_error(L, "failed to parse JSON from a string: unexpected NUL byte");
+    }
     const char *schema_name = luaL_optstring(L, 2, nullptr);
-    clua_fromjson(L, luaL_checkstring(L, 1), schema_name, clua_tojsonschemadict(L, 3));
+    clua_fromjson(L, s, schema_name, clua_tojsonschemadict(L, 3));
     return 1;
 }
 

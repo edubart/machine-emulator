@@ -96,6 +96,12 @@ describe("tojson / fromjson schema dictionary", function()
         expect.equal(cartesi.fromjson('{"a\\u0000b":1,"a":2}'), { ["a\0b"] = 1, a = 2 })
     end)
 
+    it("should reject trailing data after a NUL byte", function()
+        expect.fail(function()
+            cartesi.fromjson('{"a":1}\0x')
+        end, "unexpected NUL byte")
+    end)
+
     it("should serialize bare scalars with no schema", function()
         expect.equal(cartesi.tojson(42), "42")
         expect.equal(cartesi.tojson("str"), '"str"')

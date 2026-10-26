@@ -804,6 +804,13 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(jsonrpc_parse_error_test, spawned_server_fixture)
     BOOST_CHECK(j["id"].is_null());
 }
 
+BOOST_FIXTURE_TEST_CASE_NOLINT(jsonrpc_parse_error_after_nul_test, spawned_server_fixture) {
+    auto j =
+        jsonrpc_post(bound_address, std::string{R"({"jsonrpc":"2.0","id":1,"method":"get_version"})"} + '\0' + "x");
+    BOOST_REQUIRE(j.contains("error"));
+    BOOST_CHECK_EQUAL(j["error"]["code"].get<int>(), -32700);
+}
+
 BOOST_FIXTURE_TEST_CASE_NOLINT(jsonrpc_nesting_request_test, spawned_server_fixture) {
     BOOST_REQUIRE_EQUAL(cm_create(m, minimal_machine_config().c_str(), nullptr, nullptr), CM_ERROR_OK);
     BOOST_REQUIRE_EQUAL(cm_write_reg(m, CM_REG_X1, 42), CM_ERROR_OK);

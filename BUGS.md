@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-23 confirmed issues: 2 high, 6 medium, 15 low.
+22 confirmed issues: 2 high, 6 medium, 14 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -42,7 +42,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
-| [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
@@ -794,63 +793,6 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 **ID**: `p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo`
 
 **Related**: B35 (fixed).
-
-### B73. fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data
-
-**Title**: `cartesi.fromjson` (and the JSON-RPC server's request parsing) stops at the first NUL byte and accepts JSON followed by NUL plus any trailing data
-
-**Problem**: `cartesi.fromjson` reads its argument with `luaL_checkstring`, which drops the Lua string's length, and passes the bare `const char *` to `clua_fromjson`. That function calls `nlohmann::json::parse(s, cb)`. nlohmann treats a `const char *` as a NUL-terminated C string, so parsing ends at the first embedded NUL. The end-of-input check, which normally rejects trailing data, never sees the bytes after the NUL. As a result `'{"a":1} x'` is rejected, but `'{"a":1}\0{"zzz'` is accepted and returns `{a=1}`. Lua strings are binary-safe, so callers expect the whole string to be validated. The JSON-RPC server has the same pattern: it parses `req.body().data()` as a C string, so a request body is only read up to its first NUL.
-
-**Origin**: pre-existing (`fromjson` is unchanged from `origin/main`).
-
-**Area**: Lua JSON (`cartesi.fromjson`); also the JSON-RPC server's request parsing.
-
-**Category**: correctness (input validation)
-
-**Location**:
-- `src/clua-cartesi.cpp:176-180`: `cartesi_mod_fromjson`. Line 179 calls `luaL_checkstring(L, 1)`, which drops the length.
-- `src/clua-i-machine.cpp:640-651`: `clua_fromjson(lua_State *, const char *s, ...)`. Line 646 calls `nlohmann::json::parse(s, clua_json_parse_callback)`.
-- `src/jsonrpc-remote-machine.cpp:1947`: `json::parse(req.body().data(), jsonrpc_parse_callback)`, the same pattern on the server side. This one is not covered by the PoC.
-- Affected callers that pass whole files: `src/cartesi/hash-tree.lua:528` (StoredTree), `:944` (Base64Array), `:994` (StoredFrontier) and `src/cartesi-machine.lua:3089` (`--load-config`).
-
-**Evidence**: The test runs a control input and three NUL cases through `cartesi.fromjson`:
-- Control: trailing garbage without a NUL is rejected.
-- NUL followed by garbage is accepted.
-- A JSON document followed by 4096 zero bytes is accepted.
-- A `Base64Array` document followed by NUL and garbage is accepted.
-
-Run with `eval $(make -s env); lua5.4 bugs/p3-05-fromjson-truncates-at-nul/test.lua`:
-```
-ok: trailing garbage without NUL rejected: ... parse error at line 1, column 9: ... last read: '1} x'; expected end of input
-BUG: trailing garbage after NUL accepted (len=13), parsed a=1
-BUG: zero-filled tail (file extended with NULs) accepted (len=4103), parsed a=1
-BUG: Base64Array with trailing NUL+garbage accepted, #v=1
-exit=1
-```
-
-**Scenario**: The PRT node loads its stored tree, frontier and epoch files with `cartesi.fromjson(fs.read_file(path), ...)`. If one of these files holds valid JSON, then NUL bytes, then anything else, it loads silently instead of being rejected as corrupt. This could happen if a file is extended with zero-filled blocks, if bytes are appended by mistake, or if a stale prefix document sits in front of other data. The same applies to a CLI user's `--load-config` file and to tooling that feeds wire data containing NUL to `fromjson`. On the JSON-RPC server, bytes after a NUL in a request body are silently ignored. In practice the impact is small:
-- `filesystem.write_file` writes a temp file, fsyncs it and renames it into place, so a crash rarely leaves a valid prefix followed by NULs. A torn write normally gives an empty or fully zeroed file, and both fail to parse.
-- The accepted prefix is always a complete, well-formed JSON value.
-- The StoredTree and StoredFrontier loads re-check the height and hashes afterward.
-
-**Possible solution**: In `cartesi_mod_fromjson`, use `size_t len; const char *s = luaL_checklstring(L, 1, &len);`. Change `clua_fromjson` to take a `std::string_view` or a `(ptr, len)` pair, and call `nlohmann::json::parse(s, s + len, cb)`. Update the internal callers, which pass `std::string`/`const char *` values from the C API, to pass the length. In `jsonrpc-remote-machine.cpp:1947`, parse `req.body()` (a string or iterator range) instead of `.data()`. Add a regression test: `fromjson('{"a":1}\0x')` must fail.
-
-**Severity**: low. Both reviewers agree:
-- It only matters when the input already holds a complete valid JSON value followed by a NUL, and the effect is that some corruption is hidden instead of rejected.
-- Atomic writes make the corrupted-file case unlikely, and the downstream height and hash checks in `hash-tree.lua` catch most stale-content cases.
-- It causes no wrong hashes or proofs, no crash or hang, and no memory-safety issue.
-
-**Risks**:
-- Bug: a corrupted state, frontier or config file can load as a valid prefix document instead of failing loudly. This makes corruption harder to diagnose, and a stale prefix could be used where the follow-up checks do not cover it. JSON-RPC request bodies are not strictly validated.
-- Fix: very low risk. Inputs that hold valid JSON followed by NUL, which are malformed anyway, will now be rejected. Any caller that relied on NUL-terminated buffers with trailing slack would start failing, but no such caller was found. Callers of `clua_fromjson` must pass the correct length.
-
-**Proof of concept**: `bugs/p3-05-fromjson-truncates-at-nul/test.lua`. Run from the repo root:
-`eval $(make -s env); timeout 30 lua5.4 bugs/p3-05-fromjson-truncates-at-nul/test.lua`
-It exits with 1 and prints `BUG:` lines while the bug is present. It prints `PASS` and exits with 0 once the bug is fixed.
-
-**ID**: `p3-05-fromjson-truncates-at-nul`
-
-**Related**: B72 (fixed).
 
 ### B74. tojson silently writes NaN and infinities as null
 

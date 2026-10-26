@@ -74,10 +74,27 @@ filesystem.sync_directory = core.sync_directory
 -- Creates a temporary filename (an empty file is also created).
 function filesystem.temp_filename() return (assert(os.tmpname())) end
 
--- Returns a temporary path name (without creating a file or directory).
+-- Private directory holding the paths temp_pathname returns, created on first use and removed, if
+-- empty, when Lua closes.
+local temp_directory = setmetatable({}, {
+    __gc = function(self)
+        if self.path then pcall(core.remove_directory, self.path) end
+    end,
+})
+
+-- Returns a temporary path name (without creating a file or directory). The path is inside a
+-- directory only this user can write, so other users cannot claim it before the caller uses it.
 function filesystem.temp_pathname()
-    local pathname = assert(os.tmpname())
-    assert(os.remove(pathname))
+    for _ = 1, 10 do -- another user may claim the name of the directory before it is created
+        if temp_directory.path then break end
+        local dirname = assert(os.tmpname())
+        assert(os.remove(dirname))
+        if pcall(core.create_directory, dirname) then temp_directory.path = dirname end
+    end
+    local dirname = assert(temp_directory.path, "unable to create a temporary directory")
+    local file, pathname = core.create_temporary_file(dirname, "lua_")
+    file:close()
+    core.remove_file(pathname)
     return pathname
 end
 

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-58 confirmed issues: 3 high, 11 medium, 44 low.
+57 confirmed issues: 3 high, 11 medium, 43 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -50,7 +50,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
-| [B37](#b37-filesystemtemp_pathname-returns-a-deleted-tmp-name-that-another-user-can-claim) | low | introduced by branch | Lua cartesi.filesystem | filesystem.temp_pathname returns a deleted /tmp name that another user can claim | `bugs/lua-27-temp-pathname-toctou/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 | [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
 | [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
@@ -1130,55 +1129,6 @@ Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image c
 **ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
 
 **Related**: B39 (fixed).
-
-### B37. filesystem.temp_pathname returns a deleted /tmp name that another user can claim
-
-**Title**: `cartesi.filesystem.temp_pathname` returns a `/tmp` name it has just deleted, so another local user can claim it (TOCTOU)
-
-**Problem**: `filesystem.temp_pathname()` calls `os.tmpname()`, which uses `mkstemp` to create `/tmp/lua_XXXXXX`. It then deletes that file and returns the name. This is the insecure `tmpnam` / `mktemp -u` pattern. Between the return and the caller's use of the name, any local user can create a symlink or a directory at that path in the world-writable `/tmp`. Callers use the returned name as the place to create a store, a checkpoint or a status directory.
-
-**Origin**: Introduced by this branch. On `main` the same helper existed only in `tests/lua/cartesi/filesystem.lua`. This branch moves it into `src/cartesi/filesystem.lua`, which the Makefile installs through `EMU_TO_LUA_PATH`, so it is now part of the public `cartesi.filesystem` module.
-
-**Area**: Lua library `cartesi.filesystem` (`temp_pathname`)
-
-**Category**: Security (local TOCTOU / insecure temporary file)
-
-**Location**:
-- `src/cartesi/filesystem.lua:78-82` (`filesystem.temp_pathname`)
-- `Makefile:80` (`EMU_TO_LUA_PATH` installs `src/cartesi/filesystem.lua`)
-- Example callers (recipes, not shipped code): `doc/recipes/prt-demo.lua:99`, and `doc/recipes/prt-test.lua:170, 823, 2008, 2217, 2314`
-
-**Evidence**: The test runs the victim as root. Right after `temp_pathname()` returns, it runs the attacker's steps as uid 65534 (`nobody`) through `setpriv`, which stands in for an attacker who has won the race.
-(1) The attacker plants a symlink at the returned path that points to a file inside the victim's private 0700 directory. The victim's `fs.write_file` follows the symlink and overwrites that file. This host has `fs.protected_symlinks=0`.
-(2) The attacker runs `mkdir` on the returned path first. The victim's `fs.create_directory` then fails with EEXIST.
-Run command: `eval $(make -s env); lua5.4 bugs/lua-27-temp-pathname-toctou/test.lua`
-```
-running as root: true, fs.protected_symlinks=0
-temp_pathname() -> /tmp/lua_wXY1oK (exists: false)
-victim write_file to temp path: ok=true
-BUG: write to fs.temp_pathname() path followed attacker's symlink and overwrote /tmp/tmp.shPbRLvdjK/precious
-victim create_directory(temp_pathname()): ok=false err=unable to create directory '/tmp/lua_e39RDd': File exists
-BUG: attacker pre-created directory at fs.temp_pathname() path; victim's create_directory fails (DoS)
-exit=1
-```
-
-**Scenario**: A validator node or tool built on the shipped Lua library runs on a shared host and uses `fs.temp_pathname()` as the location for its store, checkpoint or status directory, the way the PRT recipes do. A local attacker watches `/tmp` (for example with inotify) and creates the name first.
-- On every kernel: a pre-created directory or file makes the node's directory creation or store fail at startup. This is a denial of service.
-- On hosts with `fs.protected_symlinks=0`: the node's writes follow a planted symlink, so it can overwrite files the attacker chose, with the node's privileges.
-
-No shipped emulator code path (the `cartesi-machine` CLI, the C API or the other Lua modules) calls this helper. Hashes, proofs and step logs are not affected.
-
-**Possible solution**: Remove `temp_pathname` from the shipped module, or make it safe. One option is to create a private directory with `mkdtemp` (mode 0700) and return a path inside it, so no other user can create that path. Another is to provide `create_temporary_directory()` built on `mkdtemp` and move the callers to it. A `mkdtemp` binding in the C filesystem core would make either option straightforward. With either fix the PoC exits 0.
-
-**Severity**: Low. Both reviewers and the prover agree. An attacker needs a local account on a shared host and must win a race against a random name. On default kernels (`protected_symlinks=1`) the impact is limited to making the node fail at startup. No shipped emulator code uses the helper, and consensus data (hashes and proofs) is not affected.
-
-**Risks**:
-- Of the bug: other node implementations may copy the recipe pattern and get startup DoS on shared hosts, or symlink-redirected writes where `protected_symlinks` is off.
-- Of the fix: removing or renaming the function breaks callers (the recipes and the tests). Returning a path inside a private directory changes cleanup semantics, because the caller must also remove the parent directory, so temporary directories may leak if callers are not updated.
-
-**Proof of concept**: `bugs/lua-27-temp-pathname-toctou/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-27-temp-pathname-toctou/test.lua`. It exits 1 when the bug reproduces and 0 when the returned path cannot be claimed. Run it as root (with `setpriv` available) so the attacker steps run as `nobody`. As a non-root user it only gives a weaker same-user demonstration.
-
-**ID**: `lua-27-temp-pathname-toctou`
 
 ### B38. ABI decoder accepts dirty address bits and non-zero padding
 

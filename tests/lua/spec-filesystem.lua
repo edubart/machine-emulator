@@ -155,6 +155,14 @@ describe("filesystem", function()
         expect.equal(get_permissions(temporary.path), get_permissions(dirname .. "/file"))
     end)
 
+    it("returns temporary path names in a directory others cannot write", function()
+        local pathname = filesystem.temp_pathname()
+        expect.falsy(filesystem.exists(pathname))
+        local p <close> = assert(io.popen("ls -ld '" .. pathname:match("^(.*)/") .. "'"))
+        -- unlike /tmp, group and others cannot create the path before the caller does
+        expect.truthy(p:read("l"):match("^d....%-..%-"))
+    end)
+
     it("reports missing paths", function()
         local missing = filesystem.temp_pathname()
         expect.falsy(filesystem.exists(missing))

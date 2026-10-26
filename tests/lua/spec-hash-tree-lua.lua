@@ -1284,6 +1284,33 @@ describe("hash-tree.lua", function()
                 expect.equal(hash_tree.frontier_forest_get_node_hash(reopened, 15, 0), leaves[16])
             end)
 
+            it("syncs the files of an expansion before its parent's file on the first store", function()
+                local _ <close>, directory = new_scope_directory()
+                -- Another forest may already hold an expansion's hash, so a parent's file must not
+                -- become durable before the files below it.
+                local events = {}
+                local rename_file, sync_directory = fs.rename_file, fs.sync_directory
+                fs.rename_file = function(from, to)
+                    events[#events + 1] = to
+                    rename_file(from, to)
+                end
+                fs.sync_directory = function(path)
+                    events[#events + 1] = "sync"
+                    sync_directory(path)
+                end
+                local forest = fixtures.expanded()
+                local ok, err = pcall(hash_tree.frontier_forest_store, forest, directory, directory .. "/frontier.json")
+                fs.rename_file, fs.sync_directory = rename_file, sync_directory
+                assert(ok, err)
+                local parent_path = tree_path(directory, hash_tree.frontier_forest_get_root_hash(forest), H4)
+                for i, event in ipairs(events) do
+                    if event == parent_path then
+                        expect.equal(events[i - 1], "sync")
+                    end
+                end
+                expect.truthy(fs.exists(parent_path))
+            end)
+
             it("leaves the leaf opaque when storing its expansion fails", function()
                 local _ <close>, directory = new_scope_directory()
                 local frontier_path = directory .. "/frontier.json"

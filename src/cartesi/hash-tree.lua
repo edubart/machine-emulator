@@ -498,8 +498,8 @@ end
 -- tree its children, all as hashes, so a loaded tree reproduces its hash only when every stored
 -- value is intact. A fixed-point tree over a single raw hash has that hash, so it has no file and
 -- is rebuilt from the hash. Trees below a loaded fixed-point tree load when a query reaches them.
--- A file becomes reachable only once the files below it are durable: the frontier file is written
--- after its trees' directory entries are synced, and so is the top file of an expansion. The
+-- A file becomes reachable only once the files below it are durable: a tree file is written after
+-- the directory entries of the files below it are synced, and so is the frontier file. The
 -- forest records in durable the trees a completed sync confirmed, and those it loaded.
 local STORED_SCHEMAS = {
     StoredHashes = { items = "Hex" },
@@ -630,9 +630,12 @@ end
 -- children, so finding a file does not end the walk. A single-value tree has no file, since its
 -- parent records the hash of its value, but an expansion of that value is stored. A file another
 -- tree with the same hash and height left may describe it down to another height, where loads
--- then continue, so the subtrees at that height are stored too.
+-- then continue, so the subtrees at that height are stored too. A file is written only once the
+-- files below it are durable, so a tree with a tree below it recorded in this round is counted in
+-- written.deferred and left for a later round, and so is a tree with a deferred tree below it.
 store_tree = function(forest, tree, written)
     if forest.durable[tree] then return end
+    local count, deferred = #written, written.deferred
     store_children(forest, tree, written)
     if tree.kind == "fixed_point" and tree.base_height == tree.height then return end
     local path = get_tree_path(forest.directory, tree.hash, tree.height)
@@ -642,6 +645,8 @@ store_tree = function(forest, tree, written)
         if stored_base_height ~= (tree.kind == "mixed" and tree.height - 1 or tree.base_height) then
             store_subtrees(forest, tree, stored_base_height, written)
         end
+    elseif #written > count then
+        written.deferred = written.deferred + 1
     else
         local stored
         if tree.kind == "mixed" then
@@ -655,7 +660,7 @@ store_tree = function(forest, tree, written)
         end
         write_file(cartesi.tojson(stored, -1, "StoredTree", STORED_SCHEMAS), path)
     end
-    written[#written + 1] = tree
+    if written.deferred == deferred then written[#written + 1] = tree end
 end
 
 -- Makes the directory entries of the written trees durable and records the trees as durable.
@@ -666,14 +671,16 @@ local function sync_trees(forest, written)
     end
 end
 
--- Stores an expansion, whose top file makes it reachable, after the files below it are durable.
-local function store_expansion(forest, tree)
-    local written = {}
-    store_children(forest, tree, written)
-    sync_trees(forest, written)
-    written = {}
-    store_tree(forest, tree, written)
-    sync_trees(forest, written)
+-- Stores trees in rounds that each end with a sync, until no tree is deferred.
+local function store_trees(forest, trees)
+    local written
+    repeat
+        written = { deferred = 0 }
+        for _, tree in ipairs(trees) do
+            store_tree(forest, tree, written)
+        end
+        sync_trees(forest, written)
+    until written.deferred == 0
 end
 
 -- Descends along leaf_index until bit reaches stop_bit. When siblings is given, appends
@@ -959,7 +966,7 @@ local function frontier_forest_expand_leaf(forest, position, subtree)
                 if not value then
                     assert(tree.base_height == height, "leaf height mismatch")
                     assert(values[index] == replacement.hash, "leaf hash mismatch")
-                    if forest.directory then store_expansion(forest, replacement) end
+                    if forest.directory then store_trees(forest, { replacement }) end
                     values[index] = replacement
                     return
                 end
@@ -1038,15 +1045,15 @@ local function frontier_forest_store(forest, directory, frontier_path)
     forest.durable = forest.durable or setmetatable({}, { __mode = "k" })
     forest_flush(forest)
     local levels = {}
-    local written = {}
+    local trees = {}
     for level = 1, forest.height + 1 do
         local tree = forest[level]
         if tree then
-            store_tree(forest, tree, written)
+            trees[#trees + 1] = tree
             levels[#levels + 1] = { height = level - 1, hash = tree.hash }
         end
     end
-    sync_trees(forest, written)
+    store_trees(forest, trees)
     local stored = {
         hash_type = forest.hash_type,
         height = forest.height,

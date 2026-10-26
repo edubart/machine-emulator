@@ -5141,6 +5141,10 @@ It exits with status 1 and prints `BUG:` lines while the defect is present, and 
 
 **ID**: `u2-02-clone-file-hardlinks-symlink-itself`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `u1-04-clone-file-hardlinks-symlink-instead-of-target`: run with `eval $(make -s env); lua5.4 bugs/u1-04-clone-file-hardlinks-symlink-instead-of-target/test.lua`.
+
 **Related**: [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain).
 
 ### B90. uarch WRITE_TLB with slot_index of 256 or more fails to record but verifies on replay

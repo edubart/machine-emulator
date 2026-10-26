@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-16 confirmed issues: 2 high, 4 medium, 10 low.
+15 confirmed issues: 2 high, 4 medium, 9 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -34,7 +34,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
-| [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
@@ -348,51 +347,6 @@ eval $(make -s env); lua5.4 bugs/rpc-10-dump-memory-ranges-shell-mkdir/test_dump
 It uses a fresh `mktemp -d` work directory, or the directory given as the first argument. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK` once it is fixed.
 
 **ID**: `rpc-10-dump-memory-ranges-shell-mkdir`
-
-### B28. get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64
-
-**Title**: Lua `get_data_root_hash` returns nil for empty data, rejects `log2_root_size` 63/64 (shift overflow), and accepts sizes below a word
-
-**Problem**: `cartesi.hash-tree.get_data_root_hash(data, log2_root_size)` has three defects:
-1. **Empty data.** With `data == ""`, level 0 gets no entries, so the pairing loop `for i = 1, #level, 2` never runs. Every level stays `{}` and the function returns `level[1] == nil`. The function's own contract says "the data need not fill the tree" and that untouched nodes take the pristine hash, so it should return the pristine subtree root. That is the same value as `get_data_root_hash(zeros(2^n), n)` and the same value the machine reports for an untouched region.
-2. **Shift overflow.** The guard `#data <= (1 << log2_root_size)` uses Lua's 64-bit integers. `1 << 63` is `math.mininteger` and `1 << 64` is `0`, so any non-empty data is rejected with "data does not fit in the tree" at log2 63 or 64. 64 is the machine's root size.
-3. **No lower bound.** For `log2_root_size < WORD_LOG2_SIZE` (5, i.e. 32-byte words), the level loop does not run. The function silently returns the zero-padded full-word hash, for example `("a", 0)` and `("abcd", 2)`, instead of rejecting a size smaller than any proof target.
-
-**Origin**: Pre-existing. The function body is the same on `origin/main`; the branch changes other parts of `hash-tree.lua` (the forest storage) but not this function.
-
-**Area**: Lua hash-tree library (`cartesi.hash-tree`), used by off-chain verifiers of input/output regions.
-
-**Category**: correctness (wrong result on an edge input, and integer overflow in a bounds check).
-
-**Location**:
-- `src/cartesi/hash-tree.lua:46-69` (`get_data_root_hash`)
-- `src/cartesi/hash-tree.lua:48` (overflowing fit guard)
-- `src/cartesi/hash-tree.lua:63-69` (level loop, with no lower bound and no empty-level handling; `return level[1]` gives nil)
-- Caller example: `doc/recipes/slice-calculator-output.lua:26,36`
-
-**Evidence**: The test computes `get_data_root_hash("", n)` and compares it with the all-zero root and with `machine:get_proof(flash_start, 12).target_hash` for an untouched 4 KiB flash drive. It also calls the function with 1-byte data at log2 63 and 64, and with sub-word sizes. Run: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`
-```
-BUG: empty data, log2=12 returned nil, expected pristine 0x292c23a9aa1d8bea7e2435e555a4a60e379a5a35f3f452bae60121073fb6eead
-BUG: verifier comparing get_data_root_hash('',12) against machine proof target fails (got nil)
-BUG: 1-byte data, log2=63 rejected: .../src/cartesi/hash-tree.lua:48: data does not fit in the tree
-BUG: 1-byte data, log2=64 rejected: .../src/cartesi/hash-tree.lua:48: data does not fit in the tree
-BUG: log2_root_size=0 (< word) silently returns the full-word hash instead of rejecting
-BUG: log2_root_size=2 (< word) silently returns the full-word hash
-9 bug(s)
-```
-(The test exits with status 1 while the bug is present.)
-
-**Scenario**: An application writes an empty result, or a result that starts with a NUL byte, to its output NVRAM. A Lua verifier that follows the documented recipe `doc/recipes/slice-calculator-output.lua` does `result = string.unpack("z", read_memory(output_nvram))` and gets `""`. It then calls `get_data_root_hash(result, log2_size)` and gets nil. The next step, `verify_splice` / `roll_hash_up_tree`, either fails its assertion or raises an error on `keccak256(nil, sibling)`, so an honest, correct proof is rejected or the verifier crashes. The machine's own target hash for that region is the all-zero root. A caller that hashes small data as a whole-machine root (log2 64) is wrongly rejected. The PRT C API paths are not affected: `get_root_hash`, `get_proof`, step and uarch logs, and the frontier/forest code. No on-chain hash or dispute outcome changes.
-
-**Possible solution**: Add `assert(log2_root_size >= WORD_LOG2_SIZE and log2_root_size <= 64)`. Replace the guard with an overflow-safe form, such as `log2_root_size >= 63 or #data <= (1 << log2_root_size)`. Seed level 0 with the pristine word hash when `data` is empty (or return the pristine hash for that height), so the result is always a hash.
-
-**Severity**: low. Both reviewers agree. This is a Lua convenience helper that is not on the PRT/C-API path. Its main failure, on empty data, fails loudly (nil, then an error) and never produces a wrong hash that would be accepted. Callers can work around it with zero-padded data, and the 63/64 and sub-word cases are rarely reached in practice.
-
-**Risks**: Bug: Lua-based output/input verifiers reject valid proofs, or crash, for empty results. Code that hashes at the full machine size breaks. Sub-word sizes quietly give a hash that matches no proof target. Fix: low risk. Callers that relied on `nil` as an "empty" sentinel will now receive the pristine hash, and callers that passed sub-word sizes will get an error instead of a hash.
-
-**Proof of concept**: `bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. It needs no machine images: it builds a RAM-only machine with a flash drive.
-
-**ID**: `lua-16-get-data-root-hash-empty-nil`
 
 ### B49. Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes
 

@@ -49,14 +49,16 @@ end
 -- docs:begin get_data_root_hash
 local function get_data_root_hash(data, log2_root_size, hash_type)
     local hash_function = cartesi[hash_type or "keccak256"]
-    assert(#data <= (1 << log2_root_size), "data does not fit in the tree")
-    -- Level zero is one hash per word, a trailing partial word zero-padded after the loop.
+    assert(log2_root_size >= WORD_LOG2_SIZE, "tree is smaller than a word")
+    -- Every string fits a tree of 2^63 bytes or more, where the shift would overflow.
+    assert(log2_root_size >= 63 or #data <= (1 << log2_root_size), "data does not fit in the tree")
+    -- Level zero is one hash per word, a trailing partial word or empty data zero-padded after the loop.
     local level = {}
     local full = #data - #data % WORD_LENGTH
     for i = 1, full, WORD_LENGTH do
         level[#level + 1] = hash_function(data:sub(i, i + WORD_LENGTH - 1))
     end
-    if full < #data then
+    if full < #data or #data == 0 then
         local word = data:sub(full + 1)
         level[#level + 1] = hash_function(word .. string.rep("\0", WORD_LENGTH - #word))
     end

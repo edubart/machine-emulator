@@ -526,12 +526,14 @@ public:
             if (e.get_borrowed()) {
                 throw std::runtime_error{"page hash-tree cache entry already borrowed"};
             }
+            // Mark it borrowed before touching LRU links, so a stored cache left mid-update is initialized anew
+            e.set_borrowed(true);
             // Make it most recently used
             m_lru.splice(m_lru.begin(), m_lru, m_lru.iterator_to(e));
             hit = true;
             ++m_stats.page_hits;
             // Return borrowed entry
-            return std::ref(e.set_borrowed(true));
+            return std::ref(e);
         }
         hit = false;
         // Not in map, but we still have unused entries to lend
@@ -541,10 +543,11 @@ public:
             if (e.get_borrowed()) {
                 throw std::runtime_error{"page hash-tree cache entry already borrowed"};
             }
+            e.set_borrowed(true);
             m_lru.push_front(e);
             m_map.emplace(paddr_page, e);
             // Return borrowed
-            return std::ref(e.set_borrowed(true).set_paddr_page(paddr_page));
+            return std::ref(e.set_paddr_page(paddr_page));
         }
         // Evict least recently used
         auto &e = m_lru.back();
@@ -553,11 +556,12 @@ public:
             return {};
         }
         ++m_stats.page_misses;
+        e.set_borrowed(true);
         m_map.erase(e.get_paddr_page());
         m_lru.pop_back();
         m_lru.push_front(e);
         m_map.emplace(paddr_page, e);
-        return std::ref(e.set_borrowed(true).set_paddr_page(paddr_page));
+        return std::ref(e.set_paddr_page(paddr_page));
     }
 
     /// \brief Tries to borrow a cache entry

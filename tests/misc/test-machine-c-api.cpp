@@ -53,6 +53,11 @@
 #include <sys/stat.h>
 #endif
 
+#if defined(__linux__)
+#include <csignal>
+#include <sys/mman.h>
+#endif
+
 #if defined(__linux__) && defined(__GLIBC__)
 #include <dlfcn.h>
 #include <unistd.h>
@@ -2249,6 +2254,43 @@ BOOST_AUTO_TEST_CASE_NOLINT(page_hash_tree_cache_payload_alignment_test) {
         }
     }
 }
+
+#if defined(__linux__)
+// Start of the read-only page hash-tree cache metadata page, and offset of the first store into it
+// NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
+static unsigned char *g_phtc_metadata{};
+static std::optional<ptrdiff_t> g_phtc_first_store;
+// NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
+
+static void record_phtc_first_store(int /*sig*/, siginfo_t *info, void * /*context*/) {
+    g_phtc_first_store = static_cast<unsigned char *>(info->si_addr) - g_phtc_metadata;
+    mprotect(g_phtc_metadata, cartesi::HASH_TREE_PAGE_SIZE, PROT_READ | PROT_WRITE);
+}
+
+BOOST_AUTO_TEST_CASE_NOLINT(page_hash_tree_cache_borrow_marks_entry_first_test) {
+    // A process killed while borrowing a stored cache entry must leave it marked borrowed before its LRU links change
+    cartesi::page_hash_tree_cache cache{cartesi::keccak_256_hasher{}, 2, "", false};
+    g_phtc_metadata = const_cast<unsigned char *>(cache.get_storage_data().data());
+    struct sigaction action{};
+    action.sa_sigaction = record_phtc_first_store;
+    action.sa_flags = SA_SIGINFO;
+    struct sigaction old_action{};
+    BOOST_REQUIRE_EQUAL(sigaction(SIGSEGV, &action, &old_action), 0);
+    // Take unused entries for pages 0 and 1, hit page 0, then evict page 1 for page 2
+    for (const uint64_t page : {0, 1, 0, 2}) {
+        g_phtc_first_store.reset();
+        BOOST_REQUIRE_EQUAL(mprotect(g_phtc_metadata, cartesi::HASH_TREE_PAGE_SIZE, PROT_READ), 0);
+        auto borrowed = cache.borrow_entry(page * cartesi::HASH_TREE_PAGE_SIZE);
+        BOOST_REQUIRE(borrowed.has_value());
+        BOOST_REQUIRE(g_phtc_first_store.has_value());
+        // The borrowed flag follows the LRU links and the page address in the entry
+        const auto entry_offset = reinterpret_cast<unsigned char *>(&borrowed->get()) - g_phtc_metadata;
+        BOOST_CHECK_EQUAL(*g_phtc_first_store, entry_offset + 24);
+        BOOST_CHECK(cache.return_entry(borrowed->get()));
+    }
+    BOOST_REQUIRE_EQUAL(sigaction(SIGSEGV, &old_action, nullptr), 0);
+}
+#endif
 
 BOOST_FIXTURE_TEST_CASE_NOLINT(read_write_reg_basic_test, ordinary_machine_fixture) {
     uint64_t reg_origin = 42;

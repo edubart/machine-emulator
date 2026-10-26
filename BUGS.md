@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-64 confirmed issues: 4 high, 12 medium, 48 low.
+63 confirmed issues: 4 high, 12 medium, 47 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -50,7 +50,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
-| [B29](#b29-frontier-api-accepts-heights-above-the-tree-height-and-silently-grows-the-frontier) | low | pre-existing | Lua cartesi.hash-tree (frontier) | Frontier API accepts heights above the tree height and silently grows the frontier | `bugs/lua-17-frontier-height-args-unvalidated/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
 | [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for files directly under the filesystem root | `bugs/lua-24-hash-tree-root-parent-directory/` |
@@ -966,70 +965,6 @@ BUG: log2_root_size=2 (< word) silently returns the full-word hash
 **Proof of concept**: `bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. It needs no machine images: it builds a RAM-only machine with a flash drive.
 
 **ID**: `lua-16-get-data-root-hash-empty-nil`
-
-### B29. Frontier API accepts heights above the tree height and silently grows the frontier
-
-**Title**: Lua frontier API accepts subtree and pad heights above the tree height, and non-hash `hash_type` values, then silently grows the frontier or returns the pad as the root
-
-**Problem:** No function in the `cartesi.hash-tree` frontier API checks that a subtree or pad height is at most `log2_max_leaves` (`#frontier - 1`):
-- `frontier_push_back(f, hash, height)` sets `level = height + 1`. Its only capacity check, `assert(not frontier[#frontier])`, looks at the current top level. When `height + 1 > #frontier`, the final `frontier[level] = right` writes past the end of the array. The tree silently gets taller: on a height-3 frontier, `push_back(f, x, 5)` makes `#f == 6`. After that, `frontier_get_root_hash` returns `x` and `frontier_get_leaf_count` returns 32 for a tree that holds at most 8 leaves.
-- `frontier_append(..., height)` relies on `frontier_padding_fits`. When `first_level > #frontier`, the local `height = #frontier - first_level` is negative, so the capacity bits are never checked and the function returns true. `append` then calls `push_back` past the end, giving `#g == 5`.
-- `frontier_get_root_hash(f, pad, pad_height)` with `pad_height >= #f - 1` runs its level loop zero times and returns `pad` itself as the root. `frontier_pad_back` has the same gap.
-- `frontier_genesis` and `frontier_load` use `assert(cartesi[hash_type])`, so they accept any truthy field of the `cartesi` module, such as `"tohex"`, as a hash function.
-
-These functions' own comments promise the opposite: "Appending past the tree capacity fails" and "Appending past the tree capacity fails before anything changes". `frontier_store` writes a frontier corrupted this way without error, but `frontier_load(path, L)` then rejects it with "frontier height does not match the expected height".
-
-**Origin:** Pre-existing. `origin/main` has the same `frontier_push_back`, `frontier_append`, `frontier_get_root_hash` and `cartesi[hash_type]` lookups, one line earlier.
-
-**Area:** Lua library `cartesi.hash-tree` (frontier functions).
-
-**Category:** API contract / input validation.
-
-**Location:**
-- `src/cartesi/hash-tree.lua:144-158`: `frontier_padding_fits`, which mishandles a negative `height`
-- `src/cartesi/hash-tree.lua:165-177`: `frontier_push_back`
-- `src/cartesi/hash-tree.lua:186-213`: `frontier_append`
-- `src/cartesi/hash-tree.lua:219-236`: `frontier_get_root_hash`
-- `src/cartesi/hash-tree.lua:248-254`: `frontier_pad_back`
-- `src/cartesi/hash-tree.lua:363-364`: `frontier_genesis`, the `hash_type` lookup
-- `src/cartesi/hash-tree.lua:942-946`: `frontier_load`, the `hash_type` lookup and height check
-
-**Evidence:** The test uses only the public `cartesi.hash-tree` API. Every out-of-range call succeeds, and each one corrupts the tree or returns a wrong root instead of raising an error:
-```
-$ eval $(make -s env); lua5.4 bugs/lua-17-frontier-height-args-unvalidated/test_frontier_height_args.lua
-push_back(f,x,5) ok=	true	nil	#f=	6
-BUG: frontier_push_back with height 5 > log2_max_leaves 3 grew frontier from 4 to 6 levels
-BUG: after that, frontier_get_root_hash returns the pushed hash x as the root of the height-3 tree
-leaf count after:	true	32
-append({x},1,2,4) ok=	true	nil	#g=	5
-BUG: frontier_append with height 4 > log2_max_leaves 3 grew frontier to 5 levels
-BUG: frontier_get_root_hash with pad_height 6 > 3 returns the pad itself as the height-3 root
-BUG: frontier accepts hash_type 'tohex' (not a hash function)
-load corrupted with L=3:	false	.../hash-tree.lua:946: frontier height does not match the expected height
-BUG: stored frontier cannot be reloaded with its original height (...)
-exit=1
-```
-
-**Scenario:** An external validator, such as a Rollups Node or Dave component written in Lua, builds commitment or output trees with `cartesi.hash-tree`. A unit mix-up passes a height in the wrong unit, for example log2 of the bundle size in leaves where the tree counts bundles. Instead of an assertion, the node computes a silently wrong root (or the pad as the root) and a tree whose leaf count is wrong. If it persists that frontier, it cannot reload it after a restart. In-tree callers cannot reach this, because every height is bounded by construction. That covers `src/cartesi-machine.lua` (around lines 3535, 4033, 4158, 4160 and 4198) and the PRT recipes. An honest node that uses the API correctly gets correct roots.
-
-**Possible solution:** Validate the height in `push_back`, `append`, `get_root_hash` and `pad_back`, before anything is mutated:
-```lua
-local h = height or 0
-assert(math.type(h) == "integer" and h >= 0 and h <= #frontier - 1, "subtree height exceeds the tree height")
-```
-`height == #frontier - 1` must stay legal, because one subtree can fill the whole tree. In `frontier_genesis`, `frontier_load` and `frontier_forest`, accept only the supported hash types (`"keccak256"`, `"sha256"`).
-
-**Severity:** Low. Both reviewers rated it low. It can only be triggered by a caller that breaks the precondition with an out-of-range height or a non-hash `hash_type`. No in-tree CLI or PRT path can do that, and correct use always gives correct hashes. The real cost is that such a programming error in an external validator produces silently wrong roots, or a persisted frontier that cannot be reloaded, where the documented behaviour is a clean failure.
-
-**Risks:**
-- Of the bug: a caller's mistake becomes a wrong commitment or root, or a node that cannot restart from its stored frontier, instead of an immediate error. In a fraud-proof setting, that can surface late, during a dispute.
-- Of the fix: low. Valid calls are unchanged. Code that passed `height == log2_max_leaves` stays legal. Callers that relied on the silent growth were already producing wrong trees, and they will now fail loudly.
-
-**Proof of concept:** `bugs/lua-17-frontier-height-args-unvalidated/test_frontier_height_args.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-17-frontier-height-args-unvalidated/test_frontier_height_args.lua`. It uses a temporary file from `os.tmpname()` and removes it at the end. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: frontier rejects out-of-range heights and hash types` once the bug is fixed.
-
-**ID**: `lua-17-frontier-height-args-unvalidated`
-
-**Related**: B20 (fixed).
 
 ### B30. verify_hash_tree returns true when inner nodes or the root are corrupted
 

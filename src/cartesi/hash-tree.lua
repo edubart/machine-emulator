@@ -165,6 +165,7 @@ end
 local function frontier_push_back(frontier, hash, height)
     local hash_function = assert(frontier.hash_function)
     local level = (height or 0) + 1
+    assert(level <= #frontier, "subtree height exceeds the tree height")
     assert_aligned_below(frontier, level, "frontier is not aligned to the subtree size")
     assert(not frontier[#frontier], "too many leaves")
     local right = hash
@@ -187,6 +188,7 @@ local function frontier_append(frontier, hashes, begin_index, end_index, height)
     local hash_function = assert(frontier.hash_function)
     begin_index, end_index = normalize_range(hashes, begin_index, end_index)
     local first_level = (height or 0) + 1
+    assert(first_level <= #frontier, "subtree height exceeds the tree height")
     assert_aligned_below(frontier, first_level, "frontier is not aligned to the subtree size")
     assert(frontier_padding_fits(frontier, end_index - begin_index, first_level), "too many leaves")
     while begin_index < end_index do
@@ -219,6 +221,7 @@ end
 local function frontier_get_root_hash(frontier, pad, pad_height)
     local hash_function = assert(frontier.hash_function)
     local height = #frontier - 1
+    assert((pad_height or 0) <= height, "pad height exceeds the tree height")
     if frontier[height + 1] then return frontier[height + 1] end
     pad = pad or pristine_leaf
     local root = pad
@@ -361,9 +364,12 @@ local function frontier_next_proofs(frontier, next_output_hashes)
 end
 -- docs:end frontier_next_proofs
 
+-- The hash functions a frontier can use, by hash type.
+local hash_functions = { keccak256 = cartesi.keccak256, sha256 = cartesi.sha256 }
+
 -- An empty frontier of the given height: all log2_max_leaves + 1 levels unfilled (false).
 local function frontier_genesis(log2_max_leaves, hash_type)
-    local f = { hash_function = assert(cartesi[hash_type], "unsupported hash function") }
+    local f = { hash_function = assert(hash_functions[hash_type], "unsupported hash function") }
     for level = 1, log2_max_leaves + 1 do
         f[level] = false
     end
@@ -723,7 +729,7 @@ local function frontier_forest(log2_max_leaves, hash_type)
     local forest = {
         kind = "forest",
         hash_type = hash_type,
-        hash_function = assert(cartesi[hash_type], "unsupported hash function"),
+        hash_function = assert(hash_functions[hash_type], "unsupported hash function"),
         height = log2_max_leaves,
         leaf_count = 0,
         pending = { values = {}, pad_count = 0 },
@@ -1002,7 +1008,7 @@ end
 -- Reopens a frontier stored by frontier_store, checking that it has log2_max_leaves + 1 levels of
 -- hashes and that an exactly full frontier holds only its root.
 local function frontier_load(path, log2_max_leaves, hash_type)
-    local hash_function = assert(cartesi[hash_type], "unsupported hash function")
+    local hash_function = assert(hash_functions[hash_type], "unsupported hash function")
     local f = cartesi.fromjson(fs.read_file(path), "Base64Array")
     local nf = #f
     assert(nf == log2_max_leaves + 1, "frontier height does not match the expected height")

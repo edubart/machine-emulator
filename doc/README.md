@@ -8541,6 +8541,7 @@ frontier:
 local function frontier_push_back(frontier, hash, height)
     local hash_function = assert(frontier.hash_function)
     local level = (height or 0) + 1
+    assert(level <= #frontier, "subtree height exceeds the tree height")
     assert_aligned_below(frontier, level, "frontier is not aligned to the subtree size")
     assert(not frontier[#frontier], "too many leaves")
     local right = hash
@@ -8572,6 +8573,7 @@ local function frontier_append(frontier, hashes, begin_index, end_index, height)
     local hash_function = assert(frontier.hash_function)
     begin_index, end_index = normalize_range(hashes, begin_index, end_index)
     local first_level = (height or 0) + 1
+    assert(first_level <= #frontier, "subtree height exceeds the tree height")
     assert_aligned_below(frontier, first_level, "frontier is not aligned to the subtree size")
     assert(frontier_padding_fits(frontier, end_index - begin_index, first_level), "too many leaves")
     while begin_index < end_index do
@@ -8602,6 +8604,7 @@ padded with zero leaves to completion:
 local function frontier_get_root_hash(frontier, pad, pad_height)
     local hash_function = assert(frontier.hash_function)
     local height = #frontier - 1
+    assert((pad_height or 0) <= height, "pad height exceeds the tree height")
     if frontier[height + 1] then return frontier[height + 1] end
     pad = pad or pristine_leaf
     local root = pad

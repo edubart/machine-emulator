@@ -379,6 +379,25 @@ describe("backing stores", function()
         end
     end)
 
+    it("should rename and remove a stored machine given paths with a trailing slash", function()
+        local stored_dirname = filesystem.temp_pathname()
+        local renamed_dirname = filesystem.temp_pathname()
+        do
+            local machine <close> = cartesi.machine({ ram = { length = 0x10000 } })
+            machine:store(stored_dirname)
+        end
+        local _ <close> = tests_util.scope_exit(function()
+            for _, dirname in ipairs({ stored_dirname, renamed_dirname }) do
+                pcall(cartesi.machine.remove_stored, cartesi.machine, dirname)
+            end
+        end)
+
+        cartesi.machine:rename_stored(stored_dirname .. "/", renamed_dirname .. "/")
+        expect.falsy(os.rename(stored_dirname, stored_dirname))
+        cartesi.machine:remove_stored(renamed_dirname .. "/")
+        expect.falsy(os.rename(renamed_dirname, renamed_dirname))
+    end)
+
     it("should sync a stored machine", function()
         local stored_dirname = filesystem.temp_pathname()
         local expected_root_hash

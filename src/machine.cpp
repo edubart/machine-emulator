@@ -546,7 +546,12 @@ void machine::clone_stored(const std::string &from_dir, const std::string &to_di
 /// \brief Returns the parent directory whose entries must be synced when a directory changes.
 /// \param dir Path to the directory.
 static std::string parent_directory(const std::string &dir) {
-    const auto parent = std::filesystem::path(dir).parent_path();
+    auto path = std::filesystem::path(dir);
+    // Skip trailing separators, so "a/b/" maps to "a" rather than to "a/b" itself
+    if (!path.has_filename()) {
+        path = path.parent_path();
+    }
+    const auto parent = path.parent_path();
     if (parent.empty()) {
         return ".";
     }

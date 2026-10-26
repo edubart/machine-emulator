@@ -597,6 +597,7 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 - `lua-08-clone-file-emlink-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/lua-08-clone-file-emlink-no-fallback/test.lua`. It reaches the same failure through `cartesi.filesystem.clone_file`.
 - `u3-05-clone-file-reflink-einval-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/u3-05-clone-file-reflink-einval-no-fallback/test.lua`. It shows the same incomplete fallback list for reflinks: `ioctl(FICLONE)` returns `EINVAL` when btrfs clones a COW file into a NOCOW (`chattr +C`) directory, and `clone_stored` fails although a copy would work. The fix should fall back to `copy_file` on `EINVAL` as well as `EMLINK`.
 - `u2-03-clone-file-no-fallback-einval-eagain`: run with `eval $(make -s env); lua5.4 bugs/u2-03-clone-file-no-fallback-einval-eagain/test.lua`. It also shows the missing fallback for `EAGAIN`, which some filesystems return from `FICLONE` when a reflink cannot be made right away.
+- `u1-01-clone-file-reflink-einval-eagain-no-copy-fallback`: run with `eval $(make -s env); lua5.4 bugs/u1-01-clone-file-reflink-einval-eagain-no-copy-fallback/test.lua`.
 
 ### B09. JSON-RPC server exits when an error message contains invalid UTF-8
 

@@ -236,6 +236,28 @@ BUG: torn .phtc loads with correct root hash and verify_hash_tree()==true but yi
 
 **Related**: B01 (fixed), B03 (fixed), B32 (fixed), B92 (fixed).
 
+## Limits of fixed issues
+
+Independent verifiers re-checked every fix on the integrated branch. These limits remain, each by choice or outside the
+reported problem:
+
+- **B03**: a process killed while the page cache relinks entries in `clear()` (clear_hash_tree recovery, update-failure
+  handling) or in load-time eviction can still leave a SHARING_ALL directory that does not load. The window is small;
+  it is the same torn-cache class as B91.
+- **B14**: stored forest tree files are now named by hash and height, so forest stores written by earlier builds of this
+  branch are not found. The format was not released.
+- **B16**: `verify_slice` still accepts a valid proof whose `target_address` is offset by a multiple of the tree size,
+  because `get_proof` returns absolute addresses for sub-tree proofs. Callers must check the address range themselves.
+- **B32**: covers a killed process. Surviving power loss still needs `sync_stored` before the directory is used.
+- **B38**: non-zero padding after dynamic `bytes` and `string` data is still accepted, as in Solidity.
+- **B47**: a table whose `#` length stops before its highest index still encodes only the first `#` elements.
+- **B63**: the `Breaks`/`Replaces` fields only take effect against the published 0.22 tests package once the package
+  version is bumped for the release.
+- **B65**: drive-relative Windows paths such as `C:f.json` are not split.
+- **B79**: a hex string shift count such as `"0x10000000000000000"` still wraps, through Lua's `tonumber`.
+- **B85, B90**: the Solidity step must pick up the same index check, and the constants it uses, when it is next
+  transpiled from `uarch-step.cpp`.
+
 ## Candidates that were not confirmed
 
 These candidates were proposed and investigated but did not pass review. They are listed so that readers can see what

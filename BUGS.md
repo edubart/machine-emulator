@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-50 confirmed issues: 3 high, 9 medium, 38 low.
+49 confirmed issues: 3 high, 9 medium, 37 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -61,7 +61,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
 | [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays) | low | pre-existing | Lua bindings (JSON conversion) | Lua-to-JSON conversion fails on numeric keys and expands sparse integer keys into huge arrays | `bugs/w2b-13-clua-json-numeric-keys-lua-next/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
-| [B65](#b65-frontier-stores-fail-for-native-windows-paths-because-hash-treelua-splits-paths-only-on-slashes) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for native Windows paths because hash-tree.lua splits paths only on slashes | `bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/` |
 | [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
 | [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema) | low | pre-existing | Lua bindings (JSON with schemas) | fromjson rewrites strings that match a key of a struct, array or tuple schema | `bugs/p3-01-fromjson-object-schema-string-enum-rewrite/` |
 | [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys) | low | pre-existing | Lua bindings (JSON conversion) | tojson and fromjson truncate object keys at NUL bytes, merging distinct keys | `bugs/p3-06-json-nul-in-keys-truncated-merged/` |
@@ -1796,68 +1795,6 @@ Exit 1 with `BUG: ... SIGBUS` means the bug reproduced. Exit 0 means fixed (no c
 **ID**: `w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc`
 
 **Related**: [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).
-
-### B65. Frontier stores fail for native Windows paths because hash-tree.lua splits paths only on slashes
-
-**Title**: hash-tree.lua splits paths only on '/', so frontier_store / frontier_forest_store with a native Windows absolute path (C:\dir\f.json) always fail
-
-**Problem**: `get_parent_directory(path)` is `path:match("^(.*)/[^/]*$") or "."`, and `write_file` builds the temporary-file prefix with `path:match("[^/]*$")`. Both split only on `/`. The C side (`os::create_temporary_file`, `os::sync_file`, `os::sync_directory` in `src/os-filesystem.cpp`) has explicit `_WIN32` branches. For a native Windows path such as `C:\node\frontier.json`, the directory comes out as `.` and the prefix as `C:\node\frontier.json.tmp.`. `create_temporary_file` then builds the template `./C:\node\frontier.json.tmp.XXXXXX`, which is not a valid name on Windows because a path component contains `:`. So every `frontier_store` and `frontier_forest_store` to such a path throws while creating the temporary file. The original claim of a silent durability loss does not hold. `sync_directory('.')` is also wrong, but `os::sync_directory` does nothing on Windows, and the store fails before it gets that far anyway.
-
-**Origin**: introduced by this branch (commit `fcf6819 feat: store frontier forests durably in hash-tree`, which also added the `_WIN32` branches in `os-filesystem.cpp`).
-
-**Area**: Lua libraries (`src/cartesi/hash-tree.lua` write_file / frontier_store / frontier_forest_store).
-
-**Category**: portability / durability (on Windows the store fails outright).
-
-**Location**:
-- `src/cartesi/hash-tree.lua:505` (`get_parent_directory`)
-- `src/cartesi/hash-tree.lua:509-514` (`write_file`; the temporary prefix comes from `path:match("[^/]*$")` at :510)
-- `src/cartesi/hash-tree.lua:935-938` (`frontier_store`)
-- `src/cartesi/hash-tree.lua:988-989` (`frontier_forest_store`)
-- `src/os-filesystem.cpp:665-693` (`create_temporary_file`, template `dirname + "/" + prefix + "XXXXXX"`, with the `_WIN32` `_mktemp_s` branch)
-- `src/os-filesystem.cpp:740-760` (`sync_directory`, which does nothing on Windows)
-
-**Evidence**: The test runs on Linux. It intercepts `fs.new_temporary_file`, `fs.rename_file` and `fs.sync_directory`, calls the real `hash_tree.frontier_store` with `C:\node\frontier.json`, and prints the arguments it records:
-```
-$ eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/test.lua
-path            = C:\node\frontier.json
-temporary dir   = .
-temporary prefix= C:\node\frontier.json.tmp.
-mkstemp template= ./C:\node\frontier.json.tmp.XXXXXX
-synced dir      = .
-BUG: temporary file directory is '.' instead of 'C:\node'
-BUG: temporary file prefix contains path separators / drive colon: 'C:\node\frontier.json.tmp.'
-BUG: synced directory is '.' instead of 'C:\node'
-exit=1
-```
-The test exits 1 while the bug is present and 0 once it is fixed.
-
-**Scenario**: A Lua tool or PRT recipe running on a Windows build calls `hash_tree.frontier_store(f, "D:\\prt\\frontier.json")` or `frontier_forest_store(forest, "C:\\node\\forest")` with a native backslash path, for example one taken from a Windows config value or an environment variable. Every epoch persist throws "unable to create temporary file", so the node cannot checkpoint its frontier. Several things limit how often this happens:
-- Forward-slash Windows paths (`C:/node/f.json`) and relative backslash paths (`sub\f.json`) still work.
-- The Makefiles and CI have no Windows target.
-- Production validators (Rollups Node, Dave) run on Linux through the C API, not through this Lua module.
-On Linux, `\` is an ordinary filename character, so Linux behaves correctly.
-
-**Possible solution**: Treat both `/` and `\` as separators when running on Windows (or always, if a literal `\` in Linux file names is not a concern):
-- the parent directory as `path:match("^(.*)[/\\][^/\\]*$")`
-- the base name as `path:match("[^/\\]*$")`
-
-Also handle the bare-drive forms: `C:f.json` has parent `C:`, and `C:\f.json` has parent `C:\`. A simpler alternative is to do this split in C++ with `std::filesystem::path::parent_path()` / `filename()` and expose it through `cartesi.filesystem`, so the Lua and C sides agree on what a path means.
-
-**Severity**: low. Both reviewers and the prover agree. The bug hits only Windows, which has no supported build target, and only absolute paths written with backslashes. It fails loudly instead of corrupting state, forward slashes work around it, and no hashes, proofs or dispute outcomes are affected.
-
-**Risks**:
-- Of the bug: a Windows user of the Lua hash-tree library cannot persist frontiers or forests to native absolute paths.
-- Of the fix: if `\` is treated as a separator on Linux too, a Linux file whose name really contains `\` would get its temporary file placed in, and its sync aimed at, a directory that does not exist, which fails. Limit the backslash handling to Windows, or document it. The drive-root and bare-drive cases need explicit tests.
-
-**Proof of concept**: `bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/test.lua`. It needs no machine images and writes one throwaway temporary file to `$TMPDIR` (or `/tmp`). Run it from the repo root with:
-```
-eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/test.lua
-```
-
-**ID**: `w2a-07-hash-tree-lua-parent-dir-ignores-backslash`
-
-**Related**: B34 (fixed), B42 (fixed).
 
 ### B67. Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable
 

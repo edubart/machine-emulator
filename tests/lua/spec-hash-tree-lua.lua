@@ -267,6 +267,47 @@ describe("hash-tree.lua", function()
             expect.equal(#hash_tree.frontier_load(directory .. "/frontier.json", 4, "keccak256"), 5)
         end)
 
+        it("splits native paths on backslashes on Windows", function()
+            -- Load the module as on Windows, where package.config starts with the directory separator.
+            local config, loaded = package.config, package.loaded["cartesi.hash-tree"]
+            package.config, package.loaded["cartesi.hash-tree"] = "\\" .. config:sub(2), nil
+            local ok, windows_hash_tree = pcall(require, "cartesi.hash-tree")
+            package.config, package.loaded["cartesi.hash-tree"] = config, loaded
+            assert(ok, windows_hash_tree)
+            -- Record the directories and the temporary file prefix used for each path.
+            local _ <close>, directory = new_scope_directory()
+            local used = {}
+            local list_directory, new_temporary_file, rename_file, sync_directory =
+                fs.list_directory, fs.new_temporary_file, fs.rename_file, fs.sync_directory
+            fs.list_directory = function(path)
+                used[#used + 1] = path
+                return {}
+            end
+            fs.new_temporary_file = function(dirname, prefix)
+                used[#used + 1] = dirname .. "|" .. prefix
+                return new_temporary_file(directory, prefix)
+            end
+            fs.rename_file = function(from)
+                rename_file(from, directory .. "/frontier.json")
+            end
+            fs.sync_directory = function(path)
+                used[#used + 1] = path
+            end
+            local err
+            ok, err = pcall(function()
+                for _, path in ipairs({ [[C:\node\frontier.json]], [[C:\frontier.json]] }) do
+                    windows_hash_tree.frontier_store(hash_tree.frontier(4, "keccak256"), path)
+                end
+            end)
+            fs.list_directory, fs.new_temporary_file, fs.rename_file, fs.sync_directory =
+                list_directory, new_temporary_file, rename_file, sync_directory
+            assert(ok, err)
+            expect.equal(
+                table.concat(used, ","),
+                [[C:\node,C:\node|frontier.json.tmp.,C:\node,C:/,C:/|frontier.json.tmp.,C:/]]
+            )
+        end)
+
         it("rejects a frontier of another height, invalid entries, or a full frontier with other levels", function()
             local _ <close>, directory = new_scope_directory()
             local path = directory .. "/frontier.json"

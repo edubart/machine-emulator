@@ -513,16 +513,22 @@ local function get_tree_path(directory, hash, height)
     return directory .. "/" .. cartesi.tohex(hash) .. "-" .. height .. ".json"
 end
 
--- Like std::filesystem::path::parent_path(), a name directly under the root has the root as parent.
+-- Like std::filesystem, '\' also separates path components on Windows.
+local SEPARATORS = package.config:sub(1, 1) == "\\" and "/\\" or "/"
+
+-- Like std::filesystem::path::parent_path(), a name directly under the root, or under the root of a
+-- drive such as C:, has that root as parent.
 local function get_parent_directory(path)
-    local parent = path:match("^(.*)/[^/]*$") or "."
-    return parent == "" and "/" or parent
+    local parent = path:match("^(.*)[" .. SEPARATORS .. "][^" .. SEPARATORS .. "]*$") or "."
+    return (parent == "" or parent:match("^%a:$")) and parent .. "/" or parent
 end
+
+local function get_file_name(path) return path:match("[^" .. SEPARATORS .. "]*$") end
 
 -- Writes through a temporary file in the same directory, synced before the rename, so the name
 -- never appears with incomplete contents. Making the name itself durable is left to the caller.
 local function write_file(contents, path)
-    local temporary <close> = fs.new_temporary_file(get_parent_directory(path), path:match("[^/]*$") .. ".tmp.")
+    local temporary <close> = fs.new_temporary_file(get_parent_directory(path), get_file_name(path) .. ".tmp.")
     assert(temporary.file:write(contents))
     fs.sync_file(temporary.file)
     temporary:rename(path)
@@ -1021,7 +1027,7 @@ end
 -- frontier_load can reopen it. The file is written through a temporary file, and its directory is
 -- synced after the rename. Temporary files that interrupted stores left for it are removed.
 local function frontier_store(f, path)
-    remove_temporary_files(get_parent_directory(path), (path:match("[^/]*$"):gsub("%W", "%%%0")))
+    remove_temporary_files(get_parent_directory(path), (get_file_name(path):gsub("%W", "%%%0")))
     write_file(cartesi.tojson(table.move(f, 1, #f, 1, {}), 2, "Base64Array") .. "\n", path)
     fs.sync_directory(get_parent_directory(path))
 end
@@ -1057,7 +1063,7 @@ end
 local function frontier_forest_store(forest, directory, frontier_path)
     assert(forest.directory == nil or forest.directory == directory, "the forest is stored in another directory")
     remove_temporary_files(directory, "0x%x+%-%d+%.json")
-    remove_temporary_files(get_parent_directory(frontier_path), (frontier_path:match("[^/]*$"):gsub("%W", "%%%0")))
+    remove_temporary_files(get_parent_directory(frontier_path), (get_file_name(frontier_path):gsub("%W", "%%%0")))
     forest.directory = directory
     forest.durable = forest.durable or setmetatable({}, { __mode = "k" })
     forest_flush(forest)

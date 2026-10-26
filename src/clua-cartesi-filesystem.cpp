@@ -35,39 +35,27 @@ extern "C" {
 
 namespace cartesi {
 
-static int filesystem_core_mod_exists(lua_State *L) try {
+static int filesystem_core_mod_exists(lua_State *L) {
     lua_pushboolean(L, static_cast<int>(os::exists(luaL_checkstring(L, 1))));
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_file_size(lua_State *L) try {
+static int filesystem_core_mod_file_size(lua_State *L) {
     lua_pushinteger(L, static_cast<lua_Integer>(os::file_size(luaL_checkstring(L, 1))));
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_create_directory(lua_State *L) try {
+static int filesystem_core_mod_create_directory(lua_State *L) {
     os::create_directory(luaL_checkstring(L, 1));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_remove_directory(lua_State *L) try {
+static int filesystem_core_mod_remove_directory(lua_State *L) {
     os::remove_directory(luaL_checkstring(L, 1));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_list_directory(lua_State *L) try {
+static int filesystem_core_mod_list_directory(lua_State *L) {
     const auto names = os::list_directory(luaL_checkstring(L, 1));
     lua_createtable(L, static_cast<int>(names.size()), 0);
     lua_Integer index = 0;
@@ -76,46 +64,31 @@ static int filesystem_core_mod_list_directory(lua_State *L) try {
         lua_rawseti(L, -2, ++index);
     }
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
 // Clones a file into a new path by a hard link if it is read-only, or a reflink if it is writable,
 // falling back to a copy.
-static int filesystem_core_mod_clone_file(lua_State *L) try {
+static int filesystem_core_mod_clone_file(lua_State *L) {
     os::clone_file(luaL_checkstring(L, 1), luaL_checkstring(L, 2));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_remove_file(lua_State *L) try {
+static int filesystem_core_mod_remove_file(lua_State *L) {
     os::remove_file(luaL_checkstring(L, 1));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_rename_file(lua_State *L) try {
+static int filesystem_core_mod_rename_file(lua_State *L) {
     os::rename_file(luaL_checkstring(L, 1), luaL_checkstring(L, 2));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
 // Truncates or extends a file to a size, filling an extension with zeros.
-static int filesystem_core_mod_truncate_file(lua_State *L) try {
+static int filesystem_core_mod_truncate_file(lua_State *L) {
     const lua_Integer size = luaL_checkinteger(L, 2);
     luaL_argcheck(L, size >= 0, 2, "size must not be negative");
     os::truncate_file(luaL_checkstring(L, 1), static_cast<uint64_t>(size));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
 // Closes a file created by create_temporary_file, as the io library closes its own files.
@@ -125,7 +98,7 @@ static int filesystem_core_file_close(lua_State *L) {
 }
 
 // Returns an open Lua file and the path of a new file created exclusively with a unique name.
-static int filesystem_core_mod_create_temporary_file(lua_State *L) try {
+static int filesystem_core_mod_create_temporary_file(lua_State *L) {
     auto *stream = static_cast<luaL_Stream *>(lua_newuserdatauv(L, sizeof(luaL_Stream), 0));
     stream->closef = nullptr; // a closed file until fully initialized
     luaL_setmetatable(L, LUA_FILEHANDLE);
@@ -134,13 +107,10 @@ static int filesystem_core_mod_create_temporary_file(lua_State *L) try {
     stream->closef = &filesystem_core_file_close;
     lua_pushlstring(L, path.data(), path.size());
     return 2;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
 // Syncs an open Lua file, after flushing its buffer, or the file at a path.
-static int filesystem_core_mod_sync_file(lua_State *L) try {
+static int filesystem_core_mod_sync_file(lua_State *L) {
     auto *stream = static_cast<luaL_Stream *>(luaL_testudata(L, 1, LUA_FILEHANDLE));
     if (stream == nullptr) {
         os::sync_file(luaL_checkstring(L, 1));
@@ -157,33 +127,27 @@ static int filesystem_core_mod_sync_file(lua_State *L) try {
     }
     os::sync_file_descriptor(fileno(stream->f), "<open file>");
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int filesystem_core_mod_sync_directory(lua_State *L) try {
+static int filesystem_core_mod_sync_directory(lua_State *L) {
     os::sync_directory(luaL_checkstring(L, 1));
     return 0;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
 /// \brief Contents of the cartesi.filesystem.core module table.
 static const auto filesystem_core_mod = clua_make_luaL_Reg_array({
-    {.name = "exists", .func = filesystem_core_mod_exists},
-    {.name = "file_size", .func = filesystem_core_mod_file_size},
-    {.name = "create_directory", .func = filesystem_core_mod_create_directory},
-    {.name = "remove_directory", .func = filesystem_core_mod_remove_directory},
-    {.name = "list_directory", .func = filesystem_core_mod_list_directory},
-    {.name = "clone_file", .func = filesystem_core_mod_clone_file},
-    {.name = "remove_file", .func = filesystem_core_mod_remove_file},
-    {.name = "rename_file", .func = filesystem_core_mod_rename_file},
-    {.name = "truncate_file", .func = filesystem_core_mod_truncate_file},
-    {.name = "create_temporary_file", .func = filesystem_core_mod_create_temporary_file},
-    {.name = "sync_file", .func = filesystem_core_mod_sync_file},
-    {.name = "sync_directory", .func = filesystem_core_mod_sync_directory},
+    {.name = "exists", .func = clua_protect<filesystem_core_mod_exists>},
+    {.name = "file_size", .func = clua_protect<filesystem_core_mod_file_size>},
+    {.name = "create_directory", .func = clua_protect<filesystem_core_mod_create_directory>},
+    {.name = "remove_directory", .func = clua_protect<filesystem_core_mod_remove_directory>},
+    {.name = "list_directory", .func = clua_protect<filesystem_core_mod_list_directory>},
+    {.name = "clone_file", .func = clua_protect<filesystem_core_mod_clone_file>},
+    {.name = "remove_file", .func = clua_protect<filesystem_core_mod_remove_file>},
+    {.name = "rename_file", .func = clua_protect<filesystem_core_mod_rename_file>},
+    {.name = "truncate_file", .func = clua_protect<filesystem_core_mod_truncate_file>},
+    {.name = "create_temporary_file", .func = clua_protect<filesystem_core_mod_create_temporary_file>},
+    {.name = "sync_file", .func = clua_protect<filesystem_core_mod_sync_file>},
+    {.name = "sync_directory", .func = clua_protect<filesystem_core_mod_sync_directory>},
 });
 
 } // namespace cartesi

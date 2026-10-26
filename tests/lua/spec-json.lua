@@ -279,6 +279,42 @@ describe("tojson / fromjson schema dictionary", function()
             cartesi.fromjson("{}", "NoSuchType")
         end, "NoSuchType")
     end)
+
+    it("should not leak memory when parsing fails", function()
+        if (os.getenv("LD_PRELOAD") or ""):find("asan") then -- the sanitizer quarantine keeps freed memory resident
+            return
+        end
+        local function rss_kib()
+            local f = io.open("/proc/self/status")
+            if not f then
+                return nil
+            end
+            local rss = f:read("a"):match("VmRSS:%s*(%d+)")
+            f:close()
+            return tonumber(rss)
+        end
+        local bad = "{bad" .. string.rep("x", 200)
+        -- the error still carries the position of the caller
+        local _, err = pcall(function()
+            cartesi.fromjson(bad)
+        end)
+        expect.truthy(err:find("spec%-json%.lua:%d+: failed to parse JSON"))
+        local function fail_many()
+            for _ = 1, 50000 do
+                expect.falsy(pcall(cartesi.fromjson, bad))
+            end
+            collectgarbage()
+            collectgarbage()
+        end
+        fail_many() -- warm up
+        local before = rss_kib()
+        if not before then -- VmRSS is only available on Linux
+            return
+        end
+        fail_many()
+        -- each leaked parse error would hold hundreds of bytes, adding up to tens of MiB
+        expect.truthy(rss_kib() - before < 4096)
+    end)
 end)
 
 lester.report()

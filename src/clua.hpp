@@ -20,6 +20,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <utility>
 
 extern "C" {
@@ -70,6 +71,21 @@ const char *clua_rawname() {
 template <size_t N>
 constexpr auto clua_make_luaL_Reg_array(luaL_Reg const (&vec)[N]) noexcept {
     return detail::clua_make_luaL_Reg_array_impl(vec, std::make_index_sequence<N>{});
+}
+
+/// \brief Calls a Lua C function, raising any C++ exception it throws as a Lua error
+/// \tparam F Lua C function
+/// \param L Lua state.
+/// \details The Lua error is raised only after the exception handler ends, because Lua raises errors
+/// with longjmp, and jumping out of a handler leaks the exception.
+template <lua_CFunction F>
+int clua_protect(lua_State *L) {
+    try {
+        return F(L);
+    } catch (const std::exception &e) {
+        lua_pushstring(L, e.what());
+    }
+    return luaL_error(L, "%s", lua_tostring(L, -1));
 }
 
 /// \brief Pushes the metatable of a previously defined type to the top of stack

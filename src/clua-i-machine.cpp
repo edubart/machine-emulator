@@ -58,7 +58,7 @@ void clua_delete(nlohmann::json *ptr) {
     delete ptr;
 }
 
-cm_reg clua_check_cm_proc_reg(lua_State *L, int idx) try {
+cm_reg clua_check_cm_proc_reg(lua_State *L, int idx) {
     /// \brief Mapping between register names and C API constants
     const static std::unordered_map<std::string, cm_reg> g_cm_proc_reg_name = {
         // clang-format off
@@ -225,12 +225,6 @@ cm_reg clua_check_cm_proc_reg(lua_State *L, int idx) try {
         luaL_argerror(L, idx, "unknown register");
     }
     return got->second;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return CM_REG_UNKNOWN_; // will not be reached
-} catch (...) {
-    luaL_error(L, "unknown error with register type conversion");
-    return CM_REG_UNKNOWN_; // will not be reached
 }
 
 void clua_check_cm_hash(lua_State *L, int idx, cm_hash *c_hash) {
@@ -529,7 +523,7 @@ static void clua_push_json_value(lua_State *L, const nlohmann::json &j, const nl
     }
 }
 
-static const nlohmann::json &clua_get_machine_schema_dict(lua_State *L) try {
+static const nlohmann::json &clua_get_machine_schema_dict(lua_State * /*unused*/) {
     // In order to convert Lua tables <-> JSON objects we have to define a schema
     // to transform some special fields, we only care about:
     // - Binary strings (translate Base64 or Hex strings in JSON to binary strings in Lua)
@@ -602,10 +596,6 @@ static const nlohmann::json &clua_get_machine_schema_dict(lua_State *L) try {
             }},
     };
     return machine_schema_dict;
-} catch (const std::exception &e) {
-    luaL_error(L, "failed to create machine schema dictionary: %s", e.what());
-    static const nlohmann::json dummy;
-    return dummy;
 }
 
 const nlohmann::json &clua_tojsonschemadict(lua_State *L, int idx, int ctxidx) {
@@ -632,9 +622,10 @@ const char *clua_tojson(lua_State *L, int idx, int indent, const char *schema_na
         lua_pop(L, 2);                   // pop s, j references
         return luaL_checkstring(L, idx); // return the string
     } catch (const std::exception &e) {
-        luaL_error(L, "failed to convert a Lua value to JSON: %s", e.what());
-        return nullptr;
+        lua_pushstring(L, e.what());
     }
+    luaL_error(L, "failed to convert a Lua value to JSON: %s", lua_tostring(L, -1));
+    return nullptr;
 }
 
 void clua_fromjson(lua_State *L, const char *s, const char *schema_name, const nlohmann::json &user_schema_dict,
@@ -647,9 +638,11 @@ void clua_fromjson(lua_State *L, const char *s, const char *schema_name, const n
         clua_push_json_value(L, j, schema, user_schema_dict, ctxidx);
         lua_replace(L, -3); // move into the placeholder slot
         lua_pop(L, 1);      // pop j reference
+        return;
     } catch (const std::exception &e) {
-        luaL_error(L, "failed to parse JSON from a string: %s", e.what());
+        lua_pushstring(L, e.what());
     }
+    luaL_error(L, "failed to parse JSON from a string: %s", lua_tostring(L, -1));
 }
 
 /// \brief This is the machine:get_proof() method implementation.
@@ -784,10 +777,8 @@ static int machine_obj_index_read_memory(lua_State *L) {
     auto &m = clua_check<clua_managed_cm_ptr<cm_machine>>(L, 1);
     const uint64_t address = luaL_checkinteger(L, 2);
     const uint64_t length = luaL_checkinteger(L, 3);
-    unsigned char *data{};
-    try {
-        data = new unsigned char[length];
-    } catch (const std::bad_alloc &e) {
+    auto *data = new (std::nothrow) unsigned char[length];
+    if (data == nullptr) {
         luaL_error(L, "failed to allocate memory for buffer");
     }
     auto &managed_data = clua_push_to(L, clua_managed_cm_ptr<unsigned char>(data));
@@ -807,10 +798,8 @@ static int machine_obj_index_read_virtual_memory(lua_State *L) {
     auto &m = clua_check<clua_managed_cm_ptr<cm_machine>>(L, 1);
     const uint64_t address = luaL_checkinteger(L, 2);
     const uint64_t length = luaL_checkinteger(L, 3);
-    unsigned char *data{};
-    try {
-        data = new unsigned char[length];
-    } catch (const std::bad_alloc &e) {
+    auto *data = new (std::nothrow) unsigned char[length];
+    if (data == nullptr) {
         luaL_error(L, "failed to allocate memory for buffer");
     }
     auto &managed_data = clua_push_to(L, clua_managed_cm_ptr<unsigned char>(data));
@@ -1084,10 +1073,8 @@ static int machine_obj_index_read_console_output(lua_State *L) {
 
     // Read the console output data
     if (max_length > 0) {
-        unsigned char *buffer{};
-        try {
-            buffer = new unsigned char[max_length];
-        } catch (const std::bad_alloc &e) {
+        auto *buffer = new (std::nothrow) unsigned char[max_length];
+        if (buffer == nullptr) {
             luaL_error(L, "failed to allocate memory for buffer");
         }
 
@@ -1156,7 +1143,7 @@ static int machine_obj_index_destroy(lua_State *L) {
 
 /// \brief This is the machine:receive_cmio_request() method implementation.
 /// \param L Lua state.
-static int machine_obj_index_receive_cmio_request(lua_State *L) try {
+static int machine_obj_index_receive_cmio_request(lua_State *L) {
     auto &m = clua_check<clua_managed_cm_ptr<cm_machine>>(L, 1);
     bool remote{};
     if (cm_is_jsonrpc_machine(m.get(), &remote) != 0) {
@@ -1184,9 +1171,6 @@ static int machine_obj_index_receive_cmio_request(lua_State *L) try {
     lua_pushinteger(L, reason);
     lua_pushlstring(L, data.data(), data.size());
     data.clear();
-    return 3;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
     return 3;
 }
 
@@ -1499,7 +1483,7 @@ static const auto machine_obj_index = cartesi::clua_make_luaL_Reg_array({
     {.name = "get_proof", .func = machine_obj_index_get_proof},
     {.name = "get_hash_tree_stats", .func = machine_obj_index_get_hash_tree_stats},
     {.name = "clear_hash_tree", .func = machine_obj_index_clear_hash_tree},
-    {.name = "get_reg_address", .func = machine_obj_index_get_reg_address},
+    {.name = "get_reg_address", .func = clua_protect<machine_obj_index_get_reg_address>},
     {.name = "get_uarch_pristine_hash", .func = machine_obj_index_get_uarch_pristine_hash},
     {.name = "get_root_hash", .func = machine_obj_index_get_root_hash},
     {.name = "read_revert_root_hash", .func = machine_obj_index_read_revert_root_hash},
@@ -1515,10 +1499,10 @@ static const auto machine_obj_index = cartesi::clua_make_luaL_Reg_array({
     {.name = "move", .func = machine_obj_index_move},
     {.name = "read_console_output", .func = machine_obj_index_read_console_output},
     {.name = "read_memory", .func = machine_obj_index_read_memory},
-    {.name = "read_reg", .func = machine_obj_index_read_reg},
+    {.name = "read_reg", .func = clua_protect<machine_obj_index_read_reg>},
     {.name = "read_virtual_memory", .func = machine_obj_index_read_virtual_memory},
     {.name = "read_word", .func = machine_obj_index_read_word},
-    {.name = "receive_cmio_request", .func = machine_obj_index_receive_cmio_request},
+    {.name = "receive_cmio_request", .func = clua_protect<machine_obj_index_receive_cmio_request>},
     {.name = "replace_memory_range", .func = machine_obj_index_replace_memory_range},
     {.name = "reset_uarch", .func = machine_obj_index_reset_uarch},
     {.name = "run", .func = machine_obj_index_run},
@@ -1539,7 +1523,7 @@ static const auto machine_obj_index = cartesi::clua_make_luaL_Reg_array({
     {.name = "verify_step_uarch", .func = machine_obj_index_verify_step_uarch},
     {.name = "write_console_input", .func = machine_obj_index_write_console_input},
     {.name = "write_memory", .func = machine_obj_index_write_memory},
-    {.name = "write_reg", .func = machine_obj_index_write_reg},
+    {.name = "write_reg", .func = clua_protect<machine_obj_index_write_reg>},
     {.name = "write_virtual_memory", .func = machine_obj_index_write_virtual_memory},
     {.name = "write_word", .func = machine_obj_index_write_word},
 });

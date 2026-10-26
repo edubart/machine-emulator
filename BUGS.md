@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-51 confirmed issues: 3 high, 9 medium, 39 low.
+50 confirmed issues: 3 high, 9 medium, 38 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -47,7 +47,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
-| [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
@@ -946,71 +945,6 @@ While the bug is present it prints `BUG:` lines and exits 1. Once fixed it print
 **ID**: `api-05-torn-phtc-silent-wrong-hash`
 
 **Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B33. Lua bindings call luaL_error inside C++ catch handlers and leak the exception
-
-**Title**: Lua bindings call `luaL_error` inside C++ `catch` handlers, so every failed call leaks the exception object (about 200-500 B each)
-
-**Problem:** Many Lua bindings are function-try-blocks with this handler:
-```cpp
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
-}
-```
-Lua is built as C, so `luaL_error` raises the error with `longjmp`. Calling it inside the handler jumps straight out of the handler, which means `__cxa_end_catch` never runs. The exception object from `__cxa_allocate_exception` is never freed, and neither is anything it owns, such as the message string of a nlohmann `parse_error` or a `std::system_error`. The entry also stays on the thread's `caughtExceptions` chain. Formally this is undefined behaviour: a `longjmp` out of a handler, across frames with non-trivial destructors. Each failed call leaks memory that `collectgarbage` cannot reclaim. Most `machine` methods are not affected, because they call `cm_*`, check the returned error code and call `luaL_error` outside any handler.
-
-**Origin:** Mixed.
-- Introduced by this branch: the new `cartesi.filesystem` core module (`src/clua-cartesi-filesystem.cpp`, which is not on `origin/main`) repeats the pattern in all 8 of its functions.
-- Pre-existing: the sites in `src/clua-cartesi.cpp` (the same 7 handlers exist on `origin/main`) and in `src/clua-i-machine.cpp`.
-
-**Area:** Lua bindings. These are `cartesi.filesystem`; `cartesi.tobase64`, `frombase64`, `tohex`, `fromhex`, `tojson`, `fromjson` and `new`; and the `clua-i-machine` helpers (register-name conversion, schema dictionary, `clua_tojson`, `clua_fromjson`).
-
-**Category:** Resource leak (unbounded native memory growth on error paths) and undefined behaviour.
-
-**Location:**
-- `src/clua-cartesi-filesystem.cpp:41-43, 49-51, 63-65, 73-75, 84-86, 105-107, 125-127, 133-135`
-- `src/clua-cartesi.cpp:123-125, 135-137, 147-149, 159-161, 171-173, 181-183, 192-194` (tobase64, frombase64, tohex, fromhex, tojson, fromjson, new)
-- `src/clua-i-machine.cpp:228-229` (register conversion), `605-606` (schema dictionary), `634-635` (`clua_tojson`), `650-651` (`clua_fromjson`), `1188`
-
-**Evidence:** The test runs 200,000 failing `pcall`s per case. It measures `VmRSS` after two full GC cycles and compares against a control case that fails through `luaL_argerror`, with no C++ exception involved. The control grows by 0 KiB. The three exception paths grow linearly:
-```
-$ eval $(make -s env); timeout 300 lua5.4 bugs/lua-22-lual-error-in-catch-leaks-exceptions/test.lua
-control: cartesi.fromhex(non-string)     RSS 14432 KiB -> 14432 KiB (+0 KiB, 0.0 bytes/failed call)
-cartesi.fromjson('{bad')                 RSS 15180 KiB -> 99900 KiB (+84720 KiB, 433.8 bytes/failed call)
-cartesi.fromhex('zz')                    RSS 100092 KiB -> 138756 KiB (+38664 KiB, 198.0 bytes/failed call)
-filesystem.create_directory(bad)         RSS 139552 KiB -> 240096 KiB (+100544 KiB, 514.8 bytes/failed call)
-BUG: cartesi.fromjson('{bad') leaks ~434 bytes per failed call (...)
-BUG: filesystem.create_directory(bad) leaks ~515 bytes per failed call (...)
-exit=1
-```
-`/usr/bin/lua5.4` imports `_setjmp` and `__longjmp_chk` and does not link libstdc++, which confirms it is a C build that raises errors with `longjmp`.
-
-**Scenario:** The leak hits a long-running Lua process that handles expected failures with `pcall`. Examples:
-- a Lua PRT validator, or a JSON-RPC client script, that parses JSON or hex from counterparties that may be malformed or adversarial;
-- a process that probes filesystem paths through `cartesi.filesystem`.
-
-Such a process loses a few hundred bytes for every handled failure, and memory grows without bound. An attacker who can make a Lua validator parse many bad inputs can drive memory up slowly, at roughly 2-5 million failures per GB. Hashes, proofs and machine state are not affected. The C API that the Rollups Node and Dave use does not have this pattern, so only Lua-hosted processes are affected. The `cartesi-machine` CLI usually exits on the first error, so in practice it is not affected.
-
-**Possible solution:** Never raise a Lua error while a C++ exception is still being handled. Two ways to do that:
-- Inside the `catch`, push the message onto the Lua stack with `lua_pushstring(L, e.what())`, or copy it into a buffer the function owns. Let the handler finish normally, then call `lua_error(L)` after the `try`/`catch`.
-- Factor this into a shared helper that wraps the body (for example `clua_protect(L, [&]{ ... })`), which returns a flag and calls `lua_error` after the handler.
-
-The `cm_*` wrappers already raise errors outside any handler. Also check that no C++ object with a non-trivial destructor is still alive in the frame when `lua_error` is called. Temporaries should stay owned by Lua through `clua_push_new_managed_toclose_ptr`.
-
-**Severity:** Low. Both reviewers rated it low. The leak is real and unbounded, but it happens only on error paths in the Lua bindings and it does not corrupt anything. Results stay correct, and memory becomes a problem only after millions of handled failures in one long-running Lua process.
-
-**Risks:**
-- Of the bug: slow memory growth, which could end in an OOM kill of a long-running Lua validator or tool fed many malformed inputs. In theory, stale `caughtExceptions` entries could also change what `std::current_exception()` or a bare `throw;` sees later.
-- Of the fix: low. The change is mechanical, but it touches many bindings. The fix must keep the same error messages, which callers and tests may match on. It must also keep the message alive until `lua_error` runs (push it before leaving the handler), and it must keep the existing `catch (...)` fallbacks.
-
-**Proof of concept:** `bugs/lua-22-lual-error-in-catch-leaks-exceptions/test.lua`. Run it from the repo root:
-```
-eval $(make -s env); timeout 300 lua5.4 bugs/lua-22-lual-error-in-catch-leaks-exceptions/test.lua
-```
-It exits with 1 and prints `BUG:` lines while the leak is present. It exits with 0 and prints `OK: no per-call leak detected` once the leak is fixed.
-
-**ID**: `lua-22-lual-error-in-catch-leaks-exceptions`
 
 ### B35. collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image
 

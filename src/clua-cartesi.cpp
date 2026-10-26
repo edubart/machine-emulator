@@ -113,84 +113,63 @@ static int cartesi_mod_sha256(lua_State *L) {
     return cartesi_mod_hasher<CM_HASH_SHA256>(L);
 }
 
-static int cartesi_mod_tobase64(lua_State *L) try {
+static int cartesi_mod_tobase64(lua_State *L) {
     size_t size = 0;
     const char *data = luaL_checklstring(L, 1, &size);
     std::string &value = *clua_push_new_managed_toclose_ptr(L, encode_base64(std::string_view(data, size)));
     lua_pushlstring(L, value.data(), value.size());
     value.clear();
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int cartesi_mod_frombase64(lua_State *L) try {
+static int cartesi_mod_frombase64(lua_State *L) {
     size_t size = 0;
     const char *data = luaL_checklstring(L, 1, &size);
     std::string &value = *clua_push_new_managed_toclose_ptr(L, decode_base64(std::string_view(data, size)));
     lua_pushlstring(L, value.data(), value.size());
     value.clear();
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int cartesi_mod_tohex(lua_State *L) try {
+static int cartesi_mod_tohex(lua_State *L) {
     size_t size = 0;
     const char *data = luaL_checklstring(L, 1, &size);
     std::string &value = *clua_push_new_managed_toclose_ptr(L, encode_hex(std::string_view(data, size)));
     lua_pushlstring(L, value.data(), value.size());
     value.clear();
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int cartesi_mod_fromhex(lua_State *L) try {
+static int cartesi_mod_fromhex(lua_State *L) {
     size_t size = 0;
     const char *data = luaL_checklstring(L, 1, &size);
     std::string &value = *clua_push_new_managed_toclose_ptr(L, decode_hex(std::string_view(data, size)));
     lua_pushlstring(L, value.data(), value.size());
     value.clear();
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int cartesi_mod_tojson(lua_State *L) try {
+static int cartesi_mod_tojson(lua_State *L) {
     lua_settop(L, 4);
     const int indent = clua_opt_integer<int>(L, 2, -1);
     const char *schema_name = luaL_optstring(L, 3, nullptr);
     clua_tojson(L, 1, indent, schema_name, clua_tojsonschemadict(L, 4));
     lua_settop(L, 1);
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int cartesi_mod_fromjson(lua_State *L) try {
+static int cartesi_mod_fromjson(lua_State *L) {
     lua_settop(L, 3);
     const char *schema_name = luaL_optstring(L, 2, nullptr);
     clua_fromjson(L, luaL_checkstring(L, 1), schema_name, clua_tojsonschemadict(L, 3));
     return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
-    return 1;
 }
 
-static int cartesi_mod_new(lua_State *L) try {
+static int cartesi_mod_new(lua_State *L) {
     auto &m = clua_push_to(L, clua_managed_cm_ptr<cm_machine>(nullptr));
     if (cm_new(&m.get()) != 0) {
         return luaL_error(L, "%s", cm_get_last_error_message());
     }
-    return 1;
-} catch (const std::exception &e) {
-    luaL_error(L, "%s", e.what());
     return 1;
 }
 
@@ -198,13 +177,13 @@ static int cartesi_mod_new(lua_State *L) try {
 static const auto cartesi_mod = clua_make_luaL_Reg_array({
     {.name = "keccak256", .func = cartesi_mod_keccak256},
     {.name = "sha256", .func = cartesi_mod_sha256},
-    {.name = "tobase64", .func = cartesi_mod_tobase64},
-    {.name = "frombase64", .func = cartesi_mod_frombase64},
-    {.name = "tohex", .func = cartesi_mod_tohex},
-    {.name = "fromhex", .func = cartesi_mod_fromhex},
-    {.name = "tojson", .func = cartesi_mod_tojson},
-    {.name = "fromjson", .func = cartesi_mod_fromjson},
-    {.name = "new", .func = cartesi_mod_new},
+    {.name = "tobase64", .func = clua_protect<cartesi_mod_tobase64>},
+    {.name = "frombase64", .func = clua_protect<cartesi_mod_frombase64>},
+    {.name = "tohex", .func = clua_protect<cartesi_mod_tohex>},
+    {.name = "fromhex", .func = clua_protect<cartesi_mod_fromhex>},
+    {.name = "tojson", .func = clua_protect<cartesi_mod_tojson>},
+    {.name = "fromjson", .func = clua_protect<cartesi_mod_fromjson>},
+    {.name = "new", .func = clua_protect<cartesi_mod_new>},
 });
 
 } // namespace cartesi

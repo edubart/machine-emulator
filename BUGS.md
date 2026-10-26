@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-69 confirmed issues: 4 high, 13 medium, 52 low.
+68 confirmed issues: 4 high, 12 medium, 52 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -33,7 +33,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
 | [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
-| [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail) | medium | pre-existing | JSON-RPC client (spawn_server) | Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail | `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
@@ -451,70 +450,6 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 - `u3-05-clone-file-reflink-einval-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/u3-05-clone-file-reflink-einval-no-fallback/test.lua`. It shows the same incomplete fallback list for reflinks: `ioctl(FICLONE)` returns `EINVAL` when btrfs clones a COW file into a NOCOW (`chattr +C`) directory, and `clone_stored` fails although a copy would work. The fix should fall back to `copy_file` on `EINVAL` as well as `EMLINK`.
 - `u2-03-clone-file-no-fallback-einval-eagain`: run with `eval $(make -s env); lua5.4 bugs/u2-03-clone-file-no-fallback-einval-eagain/test.lua`. It also shows the missing fallback for `EAGAIN`, which some filesystems return from `FICLONE` when a reflink cannot be made right away.
 - `u1-01-clone-file-reflink-einval-eagain-no-copy-fallback`: run with `eval $(make -s env); lua5.4 bugs/u1-01-clone-file-reflink-einval-eagain-no-copy-fallback/test.lua`.
-
-### B10. Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail
-
-**Title**: `cm_jsonrpc_spawn_server` leaks client sockets into spawned servers: concurrent spawns on fixed addresses fail with EADDRINUSE, and closed connections stay in CLOSE_WAIT
-
-**Problem.** The spawn constructor binds a listening acceptor on the requested address and calls `posix_spawnp(&child_pid, bin, nullptr, nullptr, args, environ)`. It passes no `posix_spawn_file_actions`. Boost.Asio opens sockets without `SOCK_CLOEXEC` (only its epoll fd and timerfd get CLOEXEC), and nothing in `src/` sets `FD_CLOEXEC` on sockets or calls `close_range`/`closefrom`. So every socket open in the client process at spawn time is inherited by `cartesi-jsonrpc-machine`. That includes keep-alive connections to other remote machines and, in a multi-threaded host, acceptors other threads have just bound for their own spawns. The server never closes fds it does not know about. Its `fork` handler keeps them in the grandchild, and the grandchild is the long-lived server whose pid is returned. This has two effects:
-1. **Concurrent spawns fail.** Thread A's acceptor stays LISTENing inside thread B's server tree. A's later `rebind` to that address (or A's next acceptor bind) then fails with `bind: Address already in use`. It keeps failing for as long as B's servers live.
-2. **Closed connections leak.** When the client closes a connection (`shutdown_and_close_socket`: receive shutdown plus linger-0 close), the close only drops one reference while another server holds a copy. No RST or FIN is sent, so the remote session never sees EOF. The socket stays in CLOSE_WAIT for the whole lifetime of the inheriting server and its fork descendants.
-
-**Origin.** Pre-existing.
-
-**Area.** JSON-RPC client library (`libcartesi_jsonrpc`, `cm_jsonrpc_spawn_server`) and the `cartesi-jsonrpc-machine` server.
-
-**Category.** Resource leak / file-descriptor inheritance, causing spawn failures (denial of service).
-
-**Location.**
-- `src/jsonrpc-machine.cpp:473-494`: the acceptor is bound, then `posix_spawnp` runs with no file actions.
-- `src/jsonrpc-machine.cpp:180-198`: `json_post` keep-alive sockets, opened with `async_connect` and no CLOEXEC.
-- `src/jsonrpc-machine.cpp:549-551`: the parent closes the acceptor only after the spawn, which leaves a window in which other threads' spawns inherit it.
-- `src/jsonrpc-machine.cpp:581-584` and `src/jsonrpc-remote-machine.cpp:894-907`: `rebind` to the requested address, where the EADDRINUSE shows up.
-- `src/jsonrpc-remote-machine.cpp:830-886`: the `fork` handler, which carries the inherited fds into the grandchild.
-- `src/jsonrpc-remote-machine.cpp:2121-2166`: `--server-fd` handling, which never closes other inherited fds.
-
-**Evidence.** The PoC uses only the public C API.
-- **Part A, single thread.** It spawns m1, makes one request (which opens a keep-alive socket), then spawns m2. It then inspects `/proc/<pid2>/fd` and `/proc/net/tcp`.
-- **Part B, concurrency.** 4 threads x 8 rounds. Each thread spawns on its own fixed port, outside the ephemeral range. A sequential control run uses one fixed port.
-
-Re-run output (`eval $(make -s env); sh bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/run.sh`):
-```
-[A] client sockets before spawning m2: 1, of which held by server2 (pid 4645): 1
-    leaked socket:[143122]  tcp: 01 local=0100007F:DC26 remote=0100007F:81B1
-    after cm_delete(m1): server2 still holds socket:[143122]  tcp: 08 local=0100007F:DC26 remote=0100007F:81B1
-BUG: spawned server2 inherited 1 client socket(s) (keep-alive connection to server1); 1 still held after server1 was deleted
-    [B] thread 0 round 0 spawn on 127.0.0.1:23461 failed: bind: Address already in use [system:98
-        LISTEN holders of port 23461 now: pid=4652(cartesi-jsonrpc) pid=4653(cartesi-jsonrpc) pid=4655(cartesi-jsonrpc)
-[B] concurrent spawns: 23/32 failed (23 with 'Address already in use')
-[B] sequential control on one fixed port: 0/32 failed
-```
-State 08 is CLOSE_WAIT. The prover and two independent reviewers saw between 12/32 and 24/32 concurrent failures across runs. The sequential control always failed 0/32. When a spawn fails, the LISTEN socket for the failing port is held by other threads' `cartesi-jsonrpc-machine` processes.
-
-**Scenario.** A validator node (Cartesi Rollups Node, Dave, or another PRT node written in Go or Rust) hosts several applications or tournaments. It calls `cm_jsonrpc_spawn_server` from several threads, each with its own machine object. With cgo this is the normal case, because cgo calls run on separate OS threads. If each machine is configured on a fixed address, a large share of spawns fail with EADDRINUSE. Retries on the same address keep failing while the servers holding the inherited acceptor are alive, so the node can fail to start or restart machines, for example when it needs a fresh machine to compute a commitment or a step proof during a dispute deadline. Even single-threaded, a long-running node that spawns many servers piles up stale fds and CLOSE_WAIT sockets in them. Remote sessions also never see the client's EOF, so the server holds those connections open. CLI users and Lua scripts that spawn several servers are affected the same way, though less severely.
-
-**Possible solution.**
-- In the client, pass `posix_spawn_file_actions` that keep only the acceptor fd. Alternatively, have `cartesi-jsonrpc-machine` close every inherited fd except `--server-fd` and stdio on startup (`close_range(3, ~0U, 0)` around the server fd, or iterate `/proc/self/fd`).
-- Also open all client sockets and acceptors with CLOEXEC, for example by setting `FD_CLOEXEC` right after open, and clear it only on the acceptor passed to the child (with `posix_spawn_file_actions_adddup2`, or by clearing the flag just before the spawn). This narrows the window but does not remove it unless spawns are serialized, so the server-side close is the robust fix.
-- Optionally serialize the acceptor-bind-to-spawn section with a process-wide mutex as defence in depth.
-
-**Severity.** Medium. Both reviewers agree. It causes a denial of service for nodes that spawn concurrently on fixed addresses, plus a bounded fd and socket leak in long-running nodes. It cannot produce wrong or nondeterministic hashes or proofs, and the common `127.0.0.1:0` (ephemeral port) configuration avoids the bind failure.
-
-**Risks.**
-- Of the bug: a validator can fail to start or restart machines at a critical moment, such as a dispute deadline. A failure that looks transient tends to persist, because the leaked listeners live as long as unrelated servers. Stale CLOSE_WAIT sockets and missed EOFs slowly use up fds and kernel memory, and they keep remote sessions open.
-- Of the fix: closing fds in the server must keep `--server-fd` and stdio, or spawning breaks. Setting CLOEXEC on asio sockets needs care so the acceptor is still inherited. Embedders that deliberately pass extra fds to spawned servers through `CARTESI_JSONRPC_MACHINE` wrappers (unlikely) would lose them.
-
-**Proof of concept.** Files are in `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/`:
-- `test_spawn_fd_leak.cpp`: the C++ test.
-- `run.sh`: compiles the test against `src/` into a temp dir and runs it.
-
-Run from the repo root (Linux, needs `/proc`):
-```
-eval $(make -s env); sh bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/run.sh > rpc-02.log 2>&1; cat rpc-02.log
-```
-Redirect the output to a file as shown: while the bug is present, leftover spawned servers inherit the shell's stdout, so piping the output (for example into `grep`) never reaches end of file. Exit status 1 and `BUG:` lines mean the bug reproduced. Exit status 0 means it is fixed.
-
-**ID**: `rpc-02-jsonrpc-client-fds-leak-into-spawned-servers`
 
 ### B11. JSON-RPC request with an invalid id is rejected but still executed
 
@@ -2282,7 +2217,7 @@ The test exits 1 and prints a `BUG:` line while the defect is present, and exits
 
 **ID**: `w2b-07-spawn-server-hangs-when-sigterm-blocked`
 
-**Related**: [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail).
+**Related**: B10 (fixed).
 
 ### B57. read/write_virtual_memory silently do nothing for ranges that reach 2^64
 
@@ -2409,7 +2344,7 @@ It exits 1 and prints `BUG:` lines while the defect is present, and exits 0 once
 
 **ID**: `w2b-01-rpc-timeout-request-still-executes-fork-leaks-server`
 
-**Related**: [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail).
+**Related**: B10 (fixed).
 
 ### B59. replace_memory_range leaves the config stale, so store persists the old flash image
 

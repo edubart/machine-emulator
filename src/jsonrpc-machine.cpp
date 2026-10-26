@@ -30,6 +30,7 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -470,6 +471,10 @@ jsonrpc_machine::jsonrpc_machine(const std::string &address, int64_t spawn_timeo
         (std::chrono::steady_clock::now() + std::chrono::milliseconds(spawn_timeout_ms)) :
         std::chrono::time_point<std::chrono::steady_clock>::max();
 
+    // Serialize spawns until the acceptor is closed, so servers spawned by other threads cannot inherit it
+    static std::mutex spawn_mutex;
+    std::unique_lock spawn_lock{spawn_mutex};
+
     // Create a TCP acceptor and bind it to the specified address
     // The acceptor automatically performs open, bind and listen operations
     boost::asio::ip::tcp::acceptor a(*m_ioc,
@@ -550,6 +555,7 @@ jsonrpc_machine::jsonrpc_machine(const std::string &address, int64_t spawn_timeo
     // Close the acceptor socket, as its ownership is now transferred to the child process
     boost::system::error_code ec;
     std::ignore = a.close(ec);
+    spawn_lock.unlock();
 
     // Install signal handler to ignore SIGPIPE signals that would otherwise
     // terminate the process when writing to a closed socket connection

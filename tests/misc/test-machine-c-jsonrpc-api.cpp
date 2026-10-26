@@ -249,6 +249,20 @@ BOOST_AUTO_TEST_CASE_NOLINT(spawn_during_store_test) {
     BOOST_CHECK(!servers.empty());
 }
 
+// What: a spawned server must not keep sockets it inherited from the client open.
+// How:  listen on a port while spawning a server, then close the listener and listen on that port again.
+BOOST_AUTO_TEST_CASE_NOLINT(spawn_closes_inherited_sockets_test) {
+    boost::asio::io_context ioc;
+    boost::asio::ip::tcp::acceptor listener{ioc, {boost::asio::ip::address_v4::loopback(), 0}};
+    const auto endpoint = listener.local_endpoint();
+    cm_machine *server{};
+    const auto err = cm_jsonrpc_spawn_server("127.0.0.1:0", 5000, &server, nullptr, nullptr);
+    const machine_ptr owner{server, cm_delete};
+    BOOST_REQUIRE_EQUAL(err, CM_ERROR_OK);
+    listener.close();
+    BOOST_CHECK_NO_THROW(boost::asio::ip::tcp::acceptor(ioc, endpoint));
+}
+
 // ---------------------------------------------------------------------------
 // Group A: argument-validation errors (no running server required)
 // ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@
 #include <utility>
 #include <vector>
 
+#include <dirent.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h> // IWYU pragma: keep
@@ -180,6 +181,31 @@ static void install_signal_handlers() {
     // Reset signal handlers that might have been set by the parent process who spawned us
     install_signal_handler(SIGINT, SIG_DFL);
     install_signal_handler(SIGTERM, SIG_DFL);
+}
+
+/// \brief Closes all file descriptors inherited from the parent, except stdio and the server fd
+/// \param server_fd File descriptor to keep open
+/// \details The client that spawned us may have other sockets open, such as connections to other servers
+/// or acceptors being bound by other threads, and we must not keep them alive.
+static void close_inherited_fds(int server_fd) {
+    DIR *dir = opendir("/dev/fd");
+    if (dir == nullptr) {
+        return;
+    }
+    std::vector<int> fds;
+    while (const auto *entry = readdir(dir)) {
+        int fd = -1;
+        int end = 0;
+        // NOLINTNEXTLINE(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
+        if (sscanf(entry->d_name, "%d%n", &fd, &end) == 1 && entry->d_name[end] == 0 && fd > STDERR_FILENO &&
+            fd != server_fd && fd != dirfd(dir)) {
+            fds.push_back(fd);
+        }
+    }
+    closedir(dir);
+    for (const int fd : fds) {
+        std::ignore = close(fd);
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -2114,6 +2140,10 @@ int main(int argc, char *argv[]) try {
                << cartesi::JSONRPC_VERSION_MINOR << "." << cartesi::JSONRPC_VERSION_PATCH;
 
     install_signal_handlers();
+
+    if (server_fd >= 0) {
+        close_inherited_fds(server_fd);
+    }
 
     // IO context that will process async events
     asio::io_context ioc{1};

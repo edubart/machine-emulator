@@ -401,9 +401,17 @@ local function frontier(log2_max_leaves_or_last_proof, hash_type)
         local log2_max_leaves = proof.log2_root_size
         local f = frontier_genesis(log2_max_leaves, hash_type)
         local hash_function = f.hash_function
+        assert(proof.log2_target_size == 0, "proof target is not a leaf")
+        -- Heights from 64 on hold every 64-bit address.
+        assert(
+            log2_max_leaves >= 64 or math.ult(proof.target_address, 1 << log2_max_leaves),
+            "proof target address is out of range"
+        )
+        verify_slice(proof, hash_type)
+        -- A leaf count of 2^64 wraps to 0, and its lowest complete level is 65.
         local leaf_count = proof.target_address + 1
         local lowest_complete_level = 1
-        while (leaf_count & (1 << (lowest_complete_level - 1))) == 0 do
+        while lowest_complete_level <= 64 and (leaf_count & (1 << (lowest_complete_level - 1))) == 0 do
             lowest_complete_level = lowest_complete_level + 1
         end
         -- Above the lowest complete level, where the leaf count's bit at that level is set, the last leaf

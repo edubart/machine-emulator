@@ -184,6 +184,29 @@ describe("hash-tree.lua", function()
             end
         end)
 
+        it("rejects an invalid last proof and resumes from the last leaf of a 64-bit tree", function()
+            local proof = hash_tree.frontier_next_proofs(hash_tree.frontier(4, "keccak256"), make_leaves(6))[6]
+            for _, case in ipairs({
+                { "target_address", 16, "proof target address is out of range" },
+                { "log2_target_size", 1, "proof target is not a leaf" },
+                { "root_hash", leaf(1), "target node not in tree" },
+            }) do
+                local invalid = setmetatable({ [case[1]] = case[2] }, { __index = proof })
+                expect.fail(function()
+                    hash_tree.frontier(invalid, "keccak256")
+                end, case[3])
+            end
+            local frontier = hash_tree.frontier(64, "keccak256")
+            for level = 1, 64 do -- leaf count 2^64 - 1
+                frontier[level] = leaf(level)
+            end
+            proof = hash_tree.frontier_next_proofs(frontier, { leaf(65) })[1]
+            expect.equal(proof.target_address, -1)
+            frontier = hash_tree.frontier(proof, "keccak256")
+            expect.equal(frontier[65], proof.root_hash)
+            expect.equal(hash_tree.frontier_get_root_hash(frontier), proof.root_hash)
+        end)
+
         it("has nothing to prove for an empty epoch", function()
             expect.equal(#hash_tree.frontier_next_proofs(hash_tree.frontier(H, "keccak256"), {}), 0)
         end)

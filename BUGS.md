@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-42 confirmed issues: 2 high, 8 medium, 32 low.
+41 confirmed issues: 2 high, 8 medium, 31 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -35,7 +35,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
 | [B89](#b89-clone_file-hard-links-the-symlink-itself-when-a-read-only-source-is-reached-through-a-symlink) | medium | pre-existing | cartesi.filesystem and stored machine API (os::clone_file) | clone_file hard-links the symlink itself when a read-only source is reached through a symlink | `bugs/u2-02-clone-file-hardlinks-symlink-itself/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
-| [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
@@ -241,102 +240,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 - `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B15. frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof
-
-**Title**: `hash_tree.frontier(last_proof)` loops forever on `target_address = 2^64-1` (so `cartesi-machine` hangs on `last_output_proof`) and accepts out-of-range or inconsistent proofs without checking them
-
-**Problem**
-
-`frontier(proof)` rebuilds an outputs frontier from the last leaf's proof. It sets `leaf_count = proof.target_address + 1` and then runs `while (leaf_count & (1 << (lowest_complete_level - 1))) == 0 do ... end`, a loop with no upper bound. Take a proof with `target_address = 0xFFFFFFFFFFFFFFFF`:
-
-- `cartesi.fromjson(..., "Proof")` accepts `18446744073709551615` for a `log2_root_size` 63 proof and returns Lua integer `-1`.
-- `leaf_count` wraps to 0.
-- In Lua 5.4, `1 << n` is 0 for `n >= 64`, so the mask stays 0 and the loop never ends (100% CPU).
-
-The function also never validates the proof. Nothing checks any of these:
-
-- `0 <= target_address < 2^log2_root_size`
-- `log2_target_size == 0`
-- `#sibling_hashes == log2_root_size`
-- that the target hash rolled up through the siblings equals `root_hash`
-
-As a result, an out-of-range `target_address` silently produces a frontier for a different leaf count. For example, address 16 in a height-4 tree gives `leaf_count` 1. A proof whose `root_hash` does not match its target and siblings is also accepted, and the frontier built from it has a different root.
-
-**Origin**
-
-Pre-existing. `frontier(proof)` and its loop are identical on `origin/main`. This branch changes code around them, and the new PRT recipe node calls the same API.
-
-**Area**
-
-Lua hash-tree library (`cartesi.hash-tree` frontier) and the `cartesi-machine` CLI (`--cmio-advance-state ... last_output_proof:`). The C++ JSON `Proof` parser is also involved: it does not range-check `target_address` against `log2_root_size`.
-
-**Category**
-
-Hang (infinite loop) and missing input validation, which leads to a silently wrong frontier.
-
-**Location**
-
-- `src/cartesi/hash-tree.lua:389-421`: `frontier()`. The unbounded loop is at 397-399; there is no proof validation, and bits at or above `log2_max_leaves` are ignored at 402-405.
-- `src/cartesi-machine.lua:3392-3401`: `initialize_cmio_outputs` only asserts `log2_root_size == 63` and `log2_target_size == 0`, then calls `hash_tree.frontier(proof, "keccak256")`.
-- `src/cartesi-machine.lua:3305-3309`: `read_proof` uses `cartesi.fromjson(contents, "Proof")`, which accepts out-of-range `target_address`.
-- `doc/recipes/vg.lua:715`: the PRT recipe node calls the same API on a stored `last_output_proof`.
-
-**Evidence**
-
-`eval $(make -s env); lua5.4 bugs/lua-05-frontier-from-proof-hang-and-no-validation/test_frontier_from_proof.lua` (about 26 s, mostly the two timeouts):
-
-```
-BUG: hash_tree.frontier(proof) with target_address=2^64-1 (log2_root_size 63) did not return within 5s (infinite loop)
-ok: control CLI run with genuine last_output_proof exited 0
-BUG: cartesi-machine --cmio-advance-state last_output_proof:<target_address 18446744073709551615> hung (killed by 20s timeout)
-BUG: frontier(proof) accepted target_address=16 in a 2^4-leaf tree; frontier leaf_count=1 (expected error; true count would be 17)
-BUG: frontier(proof) accepted a proof whose root_hash does not match its target/siblings (frontier root differs from proof.root_hash)
-ok: sanity genuine proof rebuilds frontier with leaf_count 6 and matching root
-exit=1
-```
-
-The test runs `cartesi-machine.lua --revert-mode=none --cmio-advance-state=...,last_output_proof:hang-proof.json,format:json -- true`, which hangs before any input is processed. The same command with a genuine last-output proof exits 0 in about 1.4 s, so the hang comes from the proof. The test also shows that the JSON parser turns `18446744073709551615` into `-1` without complaint.
-
-**Scenario**
-
-- **CLI hang.** An operator or script runs `cartesi-machine --cmio-advance-state=...,last_output_proof:<file>,format:json` with a corrupted, hand-edited or externally received Proof JSON that has `target_address` 18446744073709551615. The process spins forever instead of failing.
-- **Validator hang.** A validator node built on the Lua library rebuilds the previous epoch's outputs frontier from a stored or received proof in the same way (the recipe node does this). It hangs, which is a liveness failure.
-- **Wrong outputs.** Any `target_address` in `[2^63, 2^64-2]` (for the CLI), or `>= 2^L` in general, or a proof whose root does not match, is silently accepted. Outputs are then numbered from the wrong index and appended to the wrong frontier, so the node produces wrong outputs roots and output proofs instead of rejecting the input.
-- **Why this is not a normal-flow bug.** Proofs the emulator itself produces are always in range and consistent, so honest flows that use the node's own previous-epoch proof are not affected. The Rollups Node and Dave, which use the C API, do not go through this Lua function.
-
-**Possible solution**
-
-In `frontier(proof)`, before using the proof:
-
-- Require `math.type(proof.target_address) == "integer"`.
-- Require `0 < log2_root_size < 64` and `0 <= target_address < (1 << log2_root_size)`, using an unsigned comparison such as `math.ult`.
-- Require `log2_target_size == 0` and `#sibling_hashes == log2_root_size`.
-- Check that rolling `target_hash` up through `sibling_hashes` (or `verify_slice`) reproduces `proof.root_hash`.
-- Cap the loop at `log2_max_leaves + 1` as defense in depth.
-
-Optionally, make the C++ JSON `Proof` parser reject `target_address` values that are out of range for `log2_root_size`.
-
-**Severity**
-
-Low. Both reviewers rated it low, and the prover rated it low to medium. The bug really hangs a library function and the CLI forever, and it silently builds wrong frontiers. But it is reached only with malformed, corrupted or untrusted proof files that the emulator never produces. It cannot make an honest player who uses genuine proofs lose a dispute, and the C API used by the Rollups Node and Dave is not involved.
-
-**Risks**
-
-- **Of the bug:** a validator or CLI hangs at 100% CPU on bad input instead of failing fast. A wrong frontier, wrong output numbering, and wrong outputs roots or proofs can follow from out-of-range or inconsistent input with no error raised.
-- **Of the fix:** the root-hash consistency check costs `log2_root_size` hashes, which is negligible. Strict checks could reject callers that today pass proofs with extra fields or a non-zero `log2_target_size` on purpose, but none are known in this repo. The unsigned range check must handle `log2_root_size` 63 correctly, where `1 << 63` is negative in Lua.
-
-**Proof of concept**
-
-`bugs/lua-05-frontier-from-proof-hang-and-no-validation/test_frontier_from_proof.lua`. Run it from the repo root:
-
-```
-eval $(make -s env); lua5.4 bugs/lua-05-frontier-from-proof-hang-and-no-validation/test_frontier_from_proof.lua
-```
-
-It exits 1 and prints `BUG:` lines while the defect is present, and prints `PASS` once it is fixed. It writes `hang-proof.json`, `ok-proof.json`, `child_hang.lua` and `cli*.log` next to itself, and needs `cartesi-machine.lua` in `PATH`, which the env provides, plus the default kernel and rootfs images.
-
-**ID**: `lua-05-frontier-from-proof-hang-and-no-validation`
 
 ### B16. verify_slice and verify_splice accept malformed proofs
 

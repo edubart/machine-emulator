@@ -184,6 +184,13 @@ static void fuzz_read_registers(fuzz_reader &r, cartesi::registers_state &regs, 
     regs.mcycle = 0;
     regs.iflags.H = 0; // not halted
     regs.iflags.Y = 0; // not yielded
+
+    // Keep the fields cm_write_memory() validates in a full shadow state write
+    regs.x[0] = 0;
+    regs.mvendorid = cartesi::MVENDORID_INIT;
+    regs.marchid = cartesi::MARCHID_INIT;
+    regs.mimpid = cartesi::MIMPID_INIT;
+    regs.iunrep = 0; // matches the default machine config
 }
 
 // ---------------------------------------------------------------------------

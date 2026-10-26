@@ -8546,6 +8546,7 @@ frontier:
 ``` lua
 local function frontier_push_back(frontier, hash, height)
     local hash_function = assert(frontier.hash_function)
+    assert(is_raw_hash(hash), "invalid hash")
     local level = (height or 0) + 1
     assert(level <= #frontier, "subtree height exceeds the tree height")
     assert_aligned_below(frontier, level, "frontier is not aligned to the subtree size")

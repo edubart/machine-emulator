@@ -579,6 +579,17 @@ describe("hash-tree.lua", function()
             end, "frontier is not aligned to the subtree size")
         end)
 
+        it("rejects entries that are not hashes", function()
+            local frontier = hash_tree.frontier(4, "keccak256")
+            expect.fail(function()
+                hash_tree.frontier_push_back(frontier, string.rep("x", 31))
+            end, "invalid hash")
+            hash_tree.frontier_push_back(frontier, leaf(1))
+            expect.fail(function()
+                hash_tree.frontier_push_back(frontier, "")
+            end, "invalid hash")
+        end)
+
         it("appends an array of hashes like repeated scalar pushes", function()
             for _, n in ipairs({ 0, 1, 2, 3, 5, 8, 11, 16 }) do
                 local leaves = make_leaves(n)

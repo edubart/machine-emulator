@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-10 confirmed issues: 2 high, 2 medium, 6 low.
+9 confirmed issues: 2 high, 2 medium, 5 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -31,7 +31,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
-| [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
@@ -300,56 +299,6 @@ eval $(make -s env); lua5.4 bugs/rpc-10-dump-memory-ranges-shell-mkdir/test_dump
 It uses a fresh `mktemp -d` work directory, or the directory given as the first argument. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK` once it is fixed.
 
 **ID**: `rpc-10-dump-memory-ranges-shell-mkdir`
-
-### B49. Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes
-
-**Title**: `cartesi.keccak256`/`sha256(h, "")` and `(h, nil)` return `hash(h)` instead of raising an error; in-memory hash-tree frontier and proof functions accept entries that are not 32 bytes
-
-**Problem**: `cartesi_mod_hasher` reads its second argument with `luaL_optlstring(L, 2, "", &len2)` and takes the two-hash concat path only `if (len2 > 0)`. So `keccak256(h, "")` and `keccak256(h, nil)` (and the same calls to `sha256`) look exactly like the one-argument call. They return `hash(h)` with no error, although the two-argument form is documented as the hash of two 32-byte hashes. The check is also asymmetric: `("", h)` and `(h, 31-byte)` raise an error, but `(h, "")` does not. The in-memory functions in `cartesi.hash-tree` pass caller entries straight to `hash_function(left, right)` without checking that they are 32-byte hashes. These are `frontier_push_back`, `frontier_append`, the pad of `frontier_get_root_hash`, `frontier_pad_back`, `frontier_next_proofs`, and `roll_hash_up_tree`/`verify_slice`. When an empty right-hand entry reaches them, they build a wrong node or root and report nothing. Only `frontier_load` and `load_tree` check sizes with `is_raw_hash`. A 31-byte entry is accepted on insertion and fails only later, inside a root or proof computation, with a confusing error.
-
-**Origin**: Pre-existing. `cartesi_mod_hasher` is the same as on `origin/main`. The frontier functions already exist on `main`; this branch extends them, and the PRT node uses them.
-
-**Area**: The Lua bindings (`src/clua-cartesi.cpp`) and the shipped Lua module `cartesi.hash-tree` (`src/cartesi/hash-tree.lua`), which validators use to build output and computation commitments and their proofs.
-
-**Category**: Correctness / input validation (fail-open).
-
-**Location**:
-- `src/clua-cartesi.cpp:64-101` (`cartesi_mod_hasher`: `luaL_optlstring(L, 2, "", ...)` at line 77, `if (len2 > 0)` at line 81)
-- `src/cartesi/hash-tree.lua:9-23` (`roll_hash_up_tree`, used by `verify_slice`)
-- `src/cartesi/hash-tree.lua:165-178` (`frontier_push_back`)
-- `src/cartesi/hash-tree.lua:186-214` (`frontier_append`)
-- `src/cartesi/hash-tree.lua:219-238` (`frontier_get_root_hash`, `pad` argument)
-- `src/cartesi/hash-tree.lua:248` (`frontier_pad_back`)
-- `src/cartesi/hash-tree.lua:310-359` (`frontier_next_proofs`)
-- For contrast: `src/cartesi/hash-tree.lua:516` (`is_raw_hash`, used only by the load paths at lines 543, 548, 949 and 1008)
-
-**Evidence**: The test runs each case under `pcall`. The only cases that raise an error are the ones where the empty value is the left operand. Excerpt:
-```
-BUG: keccak256(a, "") returned keccak256(a) instead of raising an error
-BUG: keccak256(a, nil) returned keccak256(a) instead of raising an error
-ok: keccak256("", a) raises: true (bad argument #1 to 'cartesi.keccak256' (concatenate hash is only supported for inputs with size of hash))
-BUG: sha256(a, "") returned sha256(a) instead of raising an error
-BUG: frontier_push_back(f, "") accepted; f[2] == keccak256(a) (single-input hash of left sibling)
-BUG: frontier_push_back(f, 31-byte entry) accepted; later root computation fails late with: .../hash-tree.lua:229: bad argument #1 to 'hash_function' (...)
-BUG: frontier_get_root_hash(f, "") accepted empty pad, returned 0x9de88bce...334270e
-BUG: frontier_next_proofs(f, {a, ""}) accepted; root 0xb839c4dc...4634a8f1, target_hash[2] length 0
-   proof[1] verifies against that root: true
-BUG: verify_slice accepted a proof with an empty sibling hash (root = keccak256(target))
-9 defect(s) observed
-```
-Run: `eval $(make -s env); timeout 30 lua5.4 bugs/lua-15-concat-hash-empty-second-arg/test.lua` (exit status 1 while the bug is present).
-
-**Scenario**: A Lua validator (the PRT node, or another node built on the same `cartesi` / `cartesi.hash-tree` APIs) builds its outputs or computation commitment with `frontier_push_back`, `frontier_append` or `frontier_next_proofs`. A bug in the caller can feed it `""` or `nil` instead of a hash, for example an off-by-one index into a table of hashes, a missing field, or a truncated read. Lua code hits these mistakes easily. The library does not fail loudly. It computes a commitment that looks valid but is wrong, and the node posts it, so an honest player can end up defending a wrong claim. Code that calls `keccak256(left, right)` directly, with `right` coming from a sparse table, makes the same silent mistake. An adversary cannot exploit this. A forged proof cannot be made to verify against an honest root, because the bogus parent `keccak256(child)` would have to match a node built from 64 bytes, which needs a preimage. Every hash the C API returns is exactly 32 bytes.
-
-**Possible solution**: In `cartesi_mod_hasher`, choose the concat path with `nargs == 2` (or `!lua_isnoneornil(L, 2)`) instead of `len2 > 0`, and require both inputs to be `CM_HASH_SIZE`. Decide whether an explicit `nil` second argument is an error or the one-argument form, and document the choice. Optionally, assert `is_raw_hash` on the entries, pads and siblings that `frontier_push_back`, `frontier_append`, `frontier_pad_back`, `frontier_get_root_hash`, `frontier_next_proofs` and `roll_hash_up_tree` receive, so that bad input is rejected when it enters, not deep inside a later computation.
-
-**Severity**: Low. All three reviewers rated it low, and one of them argued it is not a defect. With well-formed 32-byte inputs every hash and proof is correct and deterministic, verification cannot be fooled, and there is no crash or hang. The impact is fail-open behaviour that turns a separate caller bug into a silently wrong commitment instead of an error.
-
-**Risks**: Of the bug: a caller-side mistake goes unnoticed and leads to a wrong on-chain commitment or proof, which in the worst case makes an honest validator lose a dispute. It also makes such bugs harder to diagnose, because the error, if any, appears far from its cause. Of the fix: code that today calls `keccak256(x, nil)` or `keccak256(x, "")` on purpose to mean "hash x" would start raising an error. A search of in-tree callers is needed. Size asserts in the frontier functions cost a little time on hot paths, which matters little next to the hashing itself.
-
-**Proof of concept**: `bugs/lua-15-concat-hash-empty-second-arg/test.lua`. Run it from the repo root with `eval $(make -s env); timeout 30 lua5.4 bugs/lua-15-concat-hash-empty-second-arg/test.lua`. It prints one `BUG:` line per accepted malformed input and exits with 1 while the bug is present, and with 0 once it is fixed.
-
-**ID**: `lua-15-concat-hash-empty-second-arg`
 
 ### B52. A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages
 

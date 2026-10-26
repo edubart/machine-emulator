@@ -79,7 +79,7 @@ static int cartesi_mod_hasher(lua_State *L) {
 
     cm_hash hash{};
 
-    if (len2 > 0) { // Concat hash of two inputs
+    if (nargs == 2) { // Concat hash of two inputs
         if (len1 != CM_HASH_SIZE || len2 != CM_HASH_SIZE) {
             luaL_argerror(L, 1, "concatenate hash is only supported for inputs with size of hash");
         }

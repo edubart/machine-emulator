@@ -94,6 +94,8 @@ end
 -- pristine subtrees double on demand inside each loop (keccak256(pristine, pristine)).
 local pristine_leaf = string.rep("\0", cartesi.HASH_SIZE)
 
+local function is_raw_hash(value) return type(value) == "string" and #value == cartesi.HASH_SIZE end
+
 -- The hash of node "index" at one level, given that level's frontier entry (the complete left
 -- subtree to the left, or false) and pristine entry (the all-pristine subtree to the right). The
 -- three regions read left-to-right as they sit in the tree: the frontier, the active region
@@ -170,6 +172,7 @@ end
 -- docs:begin frontier_push_back
 local function frontier_push_back(frontier, hash, height)
     local hash_function = assert(frontier.hash_function)
+    assert(is_raw_hash(hash), "invalid hash")
     local level = (height or 0) + 1
     assert(level <= #frontier, "subtree height exceeds the tree height")
     assert_aligned_below(frontier, level, "frontier is not aligned to the subtree size")
@@ -556,8 +559,6 @@ local function remove_temporary_files(directory, pattern)
         if name:match("^" .. pattern .. "%.tmp%.%w%w%w%w%w%w$") then fs.remove_file(directory .. "/" .. name) end
     end
 end
-
-local function is_raw_hash(value) return type(value) == "string" and #value == cartesi.HASH_SIZE end
 
 local function new_raw_hash_tree(hash_function, hash, height)
     return new_fixed_point_tree(hash_function, height, 0, { hash }, 1)

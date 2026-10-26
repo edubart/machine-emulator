@@ -2411,6 +2411,10 @@ rc=1
 
 **ID**: `api-09-collect-uarch-halted-uarch-assert-abort`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `c1-03-collect-uarch-halt-without-mcycle-assert-abort`: run with `eval $(make -s env); lua5.4 bugs/c1-03-collect-uarch-halt-without-mcycle-assert-abort/test-uarch-halt-no-mcycle-abort.lua`. It reaches the same assert through a second trigger: a uarch RAM image that halts before advancing mcycle, while `run_uarch`, `log_step_uarch` and `verify_step_uarch` handle the same machine normally. A remote `cartesi-jsonrpc-machine` aborts too.
+
 **Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image), [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree).
 
 ### B40. Over-long revert_uarch_tail aborts on an assert or yields an invalid mcycle subtree

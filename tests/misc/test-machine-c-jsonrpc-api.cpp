@@ -594,6 +594,30 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(rebind_server_null_address_test, spawned_server_f
     BOOST_CHECK(new_addr == nullptr);
 }
 
+// What: the client and the server accept IPv6 addresses, both in the bracketed
+//       form the server reports and in the unbracketed form --help documents.
+// How:  rebind to "[::1]:0" and connect to IPv6 addresses; on hosts without
+//       IPv6 only socket errors are acceptable, never address parsing errors.
+BOOST_FIXTURE_TEST_CASE_NOLINT(ipv6_address_test, spawned_server_fixture) {
+    const auto parse_error = [] {
+        const std::string message = cm_get_last_error_message();
+        return message.find("invalid endpoint address") != std::string::npos ||
+            message.find("failed to parse endpoint") != std::string::npos;
+    };
+    const char *new_addr{};
+    if (cm_jsonrpc_rebind_server(m, "[::1]:0", &new_addr) == CM_ERROR_OK) {
+        const char *ver{};
+        BOOST_CHECK_EQUAL(cm_jsonrpc_get_server_version(m, &ver), CM_ERROR_OK);
+    } else {
+        BOOST_CHECK(!parse_error());
+    }
+    for (const char *address : {"[::1]:1", "::1:1"}) {
+        cm_machine *client{};
+        BOOST_CHECK_NE(cm_jsonrpc_connect_server(address, 1000, &client), CM_ERROR_OK);
+        BOOST_CHECK(!parse_error());
+    }
+}
+
 // What: cm_jsonrpc_emancipate_server returns OK on a freshly spawned server.
 // How:  call the wrapper once against the fixture server and expect success.
 BOOST_FIXTURE_TEST_CASE_NOLINT(emancipate_server_test, spawned_server_fixture) {

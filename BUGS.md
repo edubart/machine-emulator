@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-12 confirmed issues: 2 high, 3 medium, 7 low.
+11 confirmed issues: 2 high, 3 medium, 6 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -36,7 +36,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
-| [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
 
 ## Issues
 
@@ -576,66 +575,6 @@ It exits with status 1 and prints `BUG: ...` while the bug is present, and print
 **ID**: `p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race`
 
 **Related**: B58 (fixed).
-
-### B84. The JSON-RPC client cannot use IPv6 server addresses
-
-**Title**: The JSON-RPC client cannot use any IPv6 server address, and the "[::1]:N" form the server reports is rejected by both client and server
-
-**Problem**: The remote-machine endpoint helpers disagree on the IPv6 address format, so the IPv6 support that `cartesi-jsonrpc-machine --help` advertises (`<ipv6-address>:<port>`) does not work end to end:
-1. `endpoint_to_string` (`ss << tcp::endpoint`) writes IPv6 endpoints in brackets, for example `[::1]:41234`. The server returns this string from `fork_server`, `rebind_server` and `get_server_address`, and `spawn_server` hands it back.
-2. The client's `parse_endpoint` splits the address at the **first** `:` (`find_first_of`). `[::1]:N` gives host `[` and calls `stoi(":1]:N")`. `::1:N` gives an empty host and calls `stoi(":1:N")`. Both throw. `parse_endpoint` runs on every request (`json_post`), so the client cannot talk to an IPv6 server in any address form.
-3. Both copies of `address_to_endpoint` split at the last `:`, but they pass the host to `make_address` with its brackets still on, so it is rejected. As a result `spawn_server("[::1]:0")`, `rebind_server("[::1]:0")` and `cartesi-jsonrpc-machine --server-address=[::1]:0` all fail with `invalid endpoint address`. The last of these fails fatally at startup.
-
-The unbracketed form `::1:0` gets through `address_to_endpoint`, so an IPv6 server can bind. It then fails at the first client request (`check_server_version` during spawn), because `parse_endpoint` cannot parse the address.
-
-**Origin**: Pre-existing. `origin/main` has the same `parse_endpoint` (`find_first_of(':')`), the same `address_to_endpoint` and `endpoint_to_string`, and the same IPv6 help text.
-
-**Area**: Remote-machine lifecycle (`spawn_server`, `connect_server`, `fork_server`, `rebind_server`, `get_server_address`, `--server-address`). This is the JSON-RPC client (`src/jsonrpc-machine.cpp`) and server (`src/jsonrpc-remote-machine.cpp`), reached through the C API (`cm_jsonrpc_*`), the Lua `cartesi.jsonrpc` module and the `cartesi-jsonrpc-machine` CLI.
-
-**Category**: Correctness (a documented feature does not work, and the address formats are inconsistent).
-
-**Location**:
-- `src/jsonrpc-machine.cpp:131-147`: `parse_endpoint` splits at `find_first_of(':')`.
-- `src/jsonrpc-machine.cpp:175`: every `json_post` calls `parse_endpoint`.
-- `src/jsonrpc-machine.cpp:442-455`: `address_to_endpoint` (used by spawn) keeps the brackets.
-- `src/jsonrpc-machine.cpp:457-461`: `endpoint_to_string` returns the bracketed form.
-- `src/jsonrpc-remote-machine.cpp:801-813`: `address_to_endpoint` (used by rebind and `--server-address`) keeps the brackets.
-- `src/jsonrpc-remote-machine.cpp:815-819`: `endpoint_to_string` returns the bracketed form for fork, rebind and the server address.
-- `src/jsonrpc-remote-machine.cpp:2032`: `--help` documents `<ipv6-address>:<port>`.
-
-**Evidence**: The test has five parts:
-- `fmt.cpp`, compiled on the fly, prints what `ss << tcp::endpoint` produces for `::1`.
-- `connect_server` is tried with both IPv6 forms.
-- `spawn_server("[::1]:0")` is tried.
-- An IPv4 server is spawned, then `rebind_server("[::1]:0")` is called on it.
-- `cartesi-jsonrpc-machine --server-address=[::1]:0` is run.
-
-Only address-parsing errors (`failed to parse endpoint`, `invalid endpoint address`) count as defects. Socket errors (EAFNOSUPPORT, connection refused) do not count, so a fixed build passes even on a host without IPv6. Run it with `eval $(make -s env); lua5.4 bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/test.lua`. It exits 1:
-```
-server/client endpoint_to_string(::1, 41234) = [::1]:41234
-connect_server("[::1]:41234") -> false jsonrpc error: post error contacting [::1]:41234 (failed to parse endpoint from address "[::1]:41234": stoi)
-connect_server("::1:41234") -> false jsonrpc error: post error contacting ::1:41234 (failed to parse endpoint from address "::1:41234": stoi)
-spawn_server("[::1]:0") -> false invalid endpoint address "[::1]:0"
-rebind_server("[::1]:0") -> false invalid endpoint address "[::1]:0"
-cartesi-jsonrpc-machine --server-address=[::1]:0 -> ... fatal cartesi-jsonrpc-machine ... caught exception: invalid endpoint address "[::1]:0"
-5 IPv6 endpoint parsing defects found
-```
-The sandbox has no IPv6 networking, so the full `spawn_server("::1:0")` path (bind succeeds, then the client fails to parse) could not be run end to end. Every step it depends on is covered above.
-
-**Scenario**: An operator configures a PRT validator, a Rollups Node, Dave or an app's tooling to run remote machines on IPv6 loopback (`::1`) or another IPv6 address, for example on an IPv6-only host or in a container network. `spawn_server("[::1]:0")` fails immediately. `spawn_server("::1:0")` binds the server, then fails when the client contacts it. A server started by hand with `--server-address=::1:N` cannot be reached by `connect_server`, and `--server-address=[::1]:N` exits at startup. Because of this, the node cannot create, fork (snapshot) or roll back (rebind) machines. Every failure is loud and happens at setup. Nothing goes wrong silently during a dispute.
-
-**Possible solution**: Use one shared parser in both files. It should accept `[v6]:port`, strip the brackets before `make_address`, split at the last `:` for the unbracketed form, and reject a bare IPv6 address with no port. A simpler alternative is to call `address_to_endpoint` (fixed) from the client instead of `parse_endpoint`. Keep `endpoint_to_string` producing the bracketed form, which is the standard one, and make sure every parser round-trips it. Add a unit test that parses `endpoint_to_string` output for IPv4 and IPv6 endpoints. Optionally, either stop documenting the unbracketed `<ipv6-address>:<port>` form or keep accepting it for compatibility.
-
-**Severity**: Low. Both reviewers rated it low. It only affects deployments that choose IPv6, while the default (127.0.0.1) works. It fails deterministically and loudly at setup, with a clear parse error. Hashes, proofs and stored state are not affected, and a running dispute cannot be disrupted by it.
-
-**Risks**:
-- Of the bug: IPv6-only environments cannot use remote machines at all, and the documented IPv6 option misleads operators. Because the failure is immediate, the risk is limited to deployment friction.
-- Of the fix: low. Parsing changes could alter how malformed IPv4 strings are accepted or rejected. For example, `find_first_of` currently rejects `1.2.3.4:5:6`, while splitting at the last `:` would read `1.2.3.4:5` as the host and still reject it in `make_address`. The fix should be covered by tests for IPv4, bracketed IPv6, unbracketed IPv6, missing port and out-of-range port. Both copies of the helper (client and server) must change together.
-
-**Proof of concept**: `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/test.lua` and `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/fmt.cpp`. `test.lua` compiles `fmt.cpp` into a temporary file with `g++`, using the Boost headers from the system or `third-party/`. `CXX` and `BOOST_INC` can override the compiler and the include dir. If the compile fails, the test falls back to the known `[::1]:41234` format. Run from the repo root:
-`eval $(make -s env); lua5.4 bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/test.lua` (exits 1 while the bug is present, 0 once fixed).
-
-**ID**: `p1-07-rml-05-ipv6-endpoint-format-unparseable`
 
 ### B91. Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs
 

@@ -850,7 +850,10 @@ static json jsonrpc_get_version_handler(const json &j, const std::shared_ptr<htt
 static tcp::endpoint address_to_endpoint(const std::string &address) {
     try {
         const auto pos = address.find_last_of(':');
-        const std::string ip = address.substr(0, pos);
+        std::string ip = address.substr(0, pos);
+        if (ip.size() >= 2 && ip.front() == '[' && ip.back() == ']') {
+            ip = ip.substr(1, ip.size() - 2);
+        }
         const int port = std::stoi(address.substr(pos + 1));
         if (port < 0 || port > 65535) {
             throw std::runtime_error{"invalid port"};

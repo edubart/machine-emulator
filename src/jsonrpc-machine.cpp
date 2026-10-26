@@ -129,14 +129,17 @@ static void shutdown_and_close_socket(auto &socket) {
     std::ignore = socket.close(ec);
 }
 
-// Parses an endpoint from an address string in the format "<ip>:<port>"
+// Parses an endpoint from an address string in the format "<ip>:<port>" or "[<ipv6>]:<port>"
 static asio::ip::tcp::endpoint parse_endpoint(const std::string &address) {
     try {
-        const auto colon_pos = address.find_first_of(':');
+        const auto colon_pos = address.find_last_of(':');
         if (colon_pos == std::string::npos) {
             throw std::runtime_error("missing port number"s);
         }
-        const std::string host = address.substr(0, colon_pos);
+        std::string host = address.substr(0, colon_pos);
+        if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+            host = host.substr(1, host.size() - 2);
+        }
         const int port = std::stoi(address.substr(colon_pos + 1));
         if (port <= 0 || port >= 65536) {
             throw std::runtime_error("invalid port number"s);
@@ -444,7 +447,10 @@ jsonrpc_machine::jsonrpc_machine(std::string address) :
 static boost::asio::ip::tcp::endpoint address_to_endpoint(const std::string &address) {
     try {
         const auto pos = address.find_last_of(':');
-        const std::string ip = address.substr(0, pos);
+        std::string ip = address.substr(0, pos);
+        if (ip.size() >= 2 && ip.front() == '[' && ip.back() == ']') {
+            ip = ip.substr(1, ip.size() - 2);
+        }
         const int port = std::stoi(address.substr(pos + 1));
         if (port < 0 || port > 65535) {
             throw std::runtime_error{"invalid port"};

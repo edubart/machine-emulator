@@ -241,6 +241,25 @@ BOOST_AUTO_TEST_CASE_NOLINT(back_merkle_tree_size_validation_test) {
     }
 }
 
+BOOST_AUTO_TEST_CASE_NOLINT(json_log2_size_bounds_test) {
+    const std::string key = "value";
+    const uint64_t wrapped = (UINT64_C(1) << 32) + 3;
+    nlohmann::json proof_json = {{key, cartesi::hash_tree_proof{64, 3}}};
+    cartesi::not_default_constructible<cartesi::hash_tree_proof> proof;
+    BOOST_REQUIRE_NO_THROW(cartesi::ju_get_opt_field(proof_json, key, proof));
+    for (const std::string field : {"log2_root_size", "log2_target_size"}) {
+        auto json = proof_json;
+        json[key][field] = wrapped;
+        BOOST_CHECK_THROW(cartesi::ju_get_opt_field(json, key, proof), std::domain_error);
+    }
+    cartesi::access a;
+    a.set_log2_size(3);
+    nlohmann::json access_json = {{key, a}};
+    BOOST_REQUIRE_NO_THROW(cartesi::ju_get_opt_field(access_json, key, a));
+    access_json[key]["log2_size"] = wrapped;
+    BOOST_CHECK_THROW(cartesi::ju_get_opt_field(access_json, key, a), std::domain_error);
+}
+
 BOOST_AUTO_TEST_CASE_NOLINT(clone_empty_remote_cleanup_test) {
     using machine_ptr = std::unique_ptr<cm_machine, decltype(&cm_delete)>;
     const char *config = R"({"ram":{"length":4096},"hash_tree":{"phtc_size":32}})";

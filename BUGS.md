@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-76 confirmed issues: 4 high, 16 medium, 56 low.
+75 confirmed issues: 4 high, 16 medium, 55 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -67,7 +67,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree) | low | pre-existing | Machine API (uarch cycle collection) | Over-long revert_uarch_tail aborts on an assert or yields an invalid mcycle subtree | `bugs/api-10-collect-uarch-revert-tail-length-unvalidated/` |
 | [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
 | [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
-| [B44](#b44-json-parsers-truncate-64-bit-log2-sizes-in-access-logs-and-proofs-without-range-checks) | low | pre-existing | JSON parsing (json-util) | JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks | `bugs/api-12-access-log2-size-truncation/` |
 | [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
@@ -2095,55 +2094,6 @@ BUG: rename_file did not replace existing destination (second frontier store fai
 It needs `lua5.4` and `wine` (or `wine64`). It also needs either `WIN_LUA=<path to a Windows lua.exe>`, or `x86_64-w64-mingw32-gcc` so the script can cross-build Lua 5.4.6. The script builds it from `LUA_TARBALL`, or downloads it from lua.org, and caches it in `${TMPDIR:-/tmp}/bugs-lua-26-winlua`. Exit status 1 together with a `BUG:` line means the bug reproduced.
 
 **ID**: `lua-26-rename-not-replacing-on-windows`
-
-### B44. JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks
-
-**Title**: JSON parsing truncates a 64-bit access `log2_size` to `int` without a range check, and the proof parser's `log2_target_size` bound check tests `log2_root_size` instead
-
-**Problem**: Two validation gaps in the JSON-to-C++ parsers in `src/json-util.cpp`:
-1. Access-log parser (`ju_get_opt_field(..., access&)`). It reads `log2_size` as `uint64_t` and calls `access.set_log2_size(static_cast<int>(log2_size))` with no range check. `access::set_log2_size(int)` does not validate the value either. So `4294967299` (2^32+3) silently becomes `3`.
-2. Proof parser (`ju_get_opt_field(..., not_default_constructible<hash_tree_proof>&)`). After reading `log2_target_size` it checks `if (log2_root_size > INT_MAX)` again. This is a copy-paste error: the error message names `log2_target_size`, but `log2_target_size` itself is never bounds-checked before `static_cast<int>`. An out-of-range target size wraps (2^32+5 becomes 5). An out-of-range root size is correctly rejected.
-
-So the emulator accepts non-canonical JSON: a log or proof whose literal field values differ from the values the emulator actually uses.
-
-**Origin**: Pre-existing. This branch changes only 2 unrelated lines of `src/json-util.cpp`.
-
-**Area**: json-util access log / proof parsing (C API `cm_verify_step_uarch` / `cm_verify_*` JSON inputs, Lua `verify_*`, JSON-RPC client `get_proof`).
-
-**Category**: api-contract (input validation).
-
-**Location**:
-- `src/json-util.cpp:1377-1379`: access `log2_size` read as `uint64_t`, then `static_cast<int>` with no range check
-- `src/json-util.cpp:1214-1219`: second bound check tests `log2_root_size` instead of `log2_target_size`, followed by `static_cast<int>(log2_target_size)`
-- `src/access-log.hpp:84`: `set_log2_size(int)` does no validation
-- Reached via `cm_verify_step_uarch` and the other `cm_verify_*` functions (access logs), and via `jsonrpc_machine::do_get_proof` (`src/jsonrpc-machine.cpp:869`)
-
-**Evidence**: `test.lua` records a real uarch step log and sets `accesses[1].log2_size = 2^32+3`. `verify_step_uarch` still accepts it and returns the correct post-state root. The test then runs a real `cartesi-jsonrpc-machine` behind `proxy.py`, which adds 2^32 to one field of the `machine.get_proof` result. The client rejects the out-of-range `log2_root_size` but accepts the out-of-range `log2_target_size` and wraps it to 5:
-```
-verify_step_uarch with accesses[1].log2_size=4294967299 ->	true	true
-BUG: verify_step_uarch accepted access log2_size=4294967299 (truncated to int 3, no range check)
-get_proof with server log2_root_size=64+2^32   ->	false	...test.lua:49: jsonrpc server error: "result/log2_root_size" is out of bounds
-get_proof with server log2_target_size=5+2^32  ->	true	log2_target_size=5
-BUG: JSON-RPC client accepted get_proof result with log2_target_size=4294967301 (wrapped to 5); bound check tests log2_root_size instead of log2_target_size
-```
-Run with `eval $(make -s env); lua5.4 bugs/api-12-access-log2-size-truncation/test.lua`. Exit code 1 means the bug is present.
-
-**Scenario**: A tool (relay, archiver, dispute helper) receives a JSON access log, checks it with `cm_verify_step_uarch`, and forwards the same JSON to a downstream encoder or external verifier that reads `log2_size` as a 64-bit value. The emulator accepts the log, but the downstream consumer sees a different access size, so the two disagree on the same artifact. Separately, a buggy or malicious JSON-RPC server can return a `get_proof` result with a huge `log2_target_size`, and the client accepts it silently instead of rejecting it. The emulator itself stays internally consistent: it verifies against the truncated value, which matches the real access. So no wrong state transition is accepted and no honest transition is rejected. Honest PRT nodes (Dave, Rollups Node) produce their own logs and proofs locally, and on-chain step verification uses the Solidity step contract, so an honest player cannot lose a dispute because of this.
-
-**Possible solution**:
-- In the access parser, reject `log2_size > INT_MAX`, or better, anything outside the valid range (for example `[3, 63/64]`), before the cast.
-- In the proof parser, change the second check to `if (log2_target_size > INT_MAX)`.
-- Optionally, make `access::set_log2_size` assert or validate its argument.
-
-**Severity**: Low. Both reviewers and the prover agree. No hash, proof or verification result changes, and nothing crashes or hangs. The only effect is that malformed JSON is accepted when it should be rejected, which matters only to 64-bit downstream consumers or to clients of an untrusted JSON-RPC server.
-
-**Risks**:
-- Of the bug: different tools can parse the same JSON log or proof differently. The parser does not do what its own error message says, and similar copy-paste gaps may hide elsewhere.
-- Of the fix: minimal. Previously accepted malformed inputs with wrapped sizes will now be rejected, which is the intended behavior. No well-formed log or proof is affected.
-
-**Proof of concept**: `bugs/api-12-access-log2-size-truncation/test.lua` and its helper `bugs/api-12-access-log2-size-truncation/proxy.py` (a JSON-RPC proxy that tampers with `machine.get_proof` results; needs `python3` and `cartesi-jsonrpc-machine` on PATH). Run from the repo root with `eval $(make -s env); lua5.4 bugs/api-12-access-log2-size-truncation/test.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and prints `OK: no bug` once it is fixed.
-
-**ID**: `api-12-access-log2-size-truncation`
 
 ### B45. ABI decoder amplifies memory use through aliased dynamic offsets
 

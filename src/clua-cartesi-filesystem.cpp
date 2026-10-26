@@ -59,6 +59,14 @@ static int filesystem_core_mod_create_directory(lua_State *L) try {
     return 1;
 }
 
+static int filesystem_core_mod_remove_directory(lua_State *L) try {
+    os::remove_directory(luaL_checkstring(L, 1));
+    return 0;
+} catch (const std::exception &e) {
+    luaL_error(L, "%s", e.what());
+    return 1;
+}
+
 static int filesystem_core_mod_list_directory(lua_State *L) try {
     const auto names = os::list_directory(luaL_checkstring(L, 1));
     lua_createtable(L, static_cast<int>(names.size()), 0);
@@ -77,6 +85,14 @@ static int filesystem_core_mod_list_directory(lua_State *L) try {
 // falling back to a copy.
 static int filesystem_core_mod_clone_file(lua_State *L) try {
     os::clone_file(luaL_checkstring(L, 1), luaL_checkstring(L, 2));
+    return 0;
+} catch (const std::exception &e) {
+    luaL_error(L, "%s", e.what());
+    return 1;
+}
+
+static int filesystem_core_mod_remove_file(lua_State *L) try {
+    os::remove_file(luaL_checkstring(L, 1));
     return 0;
 } catch (const std::exception &e) {
     luaL_error(L, "%s", e.what());
@@ -148,8 +164,10 @@ static const auto filesystem_core_mod = clua_make_luaL_Reg_array({
     {.name = "exists", .func = filesystem_core_mod_exists},
     {.name = "file_size", .func = filesystem_core_mod_file_size},
     {.name = "create_directory", .func = filesystem_core_mod_create_directory},
+    {.name = "remove_directory", .func = filesystem_core_mod_remove_directory},
     {.name = "list_directory", .func = filesystem_core_mod_list_directory},
     {.name = "clone_file", .func = filesystem_core_mod_clone_file},
+    {.name = "remove_file", .func = filesystem_core_mod_remove_file},
     {.name = "truncate_file", .func = filesystem_core_mod_truncate_file},
     {.name = "create_temporary_file", .func = filesystem_core_mod_create_temporary_file},
     {.name = "sync_file", .func = filesystem_core_mod_sync_file},

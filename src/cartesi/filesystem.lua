@@ -119,12 +119,12 @@ function filesystem.write_scope_temp_file(data)
 end
 
 -- Removes a file.
-function filesystem.remove_file(filename) assert(os.remove(filename)) end
+filesystem.remove_file = core.remove_file
 
 -- Renames a file, atomically replacing the destination if it exists.
 function filesystem.rename_file(from, to) assert(os.rename(from, to)) end
 
 -- Removes an empty directory.
-function filesystem.remove_directory(dirname) assert(os.remove(dirname)) end
+filesystem.remove_directory = core.remove_directory
 
 return filesystem

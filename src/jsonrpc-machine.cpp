@@ -977,6 +977,10 @@ machine_cmio_request jsonrpc_machine::do_receive_cmio_request(std::span<uint8_t>
 void jsonrpc_machine::do_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     std::optional<const_machine_hash_view> revert_root_hash) {
     bool result = false;
+    // The protocol carries the response data itself, so a missing buffer cannot be sent.
+    if (data == nullptr && length > 0) {
+        throw std::invalid_argument{"invalid data buffer"};
+    }
     std::string b64 = cartesi::encode_base64(std::span<const unsigned char>{data, length});
     if (revert_root_hash.has_value()) {
         auto b64_revert_root_hash = encode_base64(*revert_root_hash);
@@ -989,6 +993,10 @@ void jsonrpc_machine::do_send_cmio_response(uint16_t reason, const unsigned char
 access_log jsonrpc_machine::do_log_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     const_machine_hash_view revert_root_hash, const access_log::type &log_type) {
     not_default_constructible<access_log> result;
+    // The protocol carries the response data itself, so a missing buffer cannot be sent.
+    if (data == nullptr && length > 0) {
+        throw std::invalid_argument{"invalid data buffer"};
+    }
     auto b64_revert_root_hash = encode_base64(revert_root_hash);
     std::string b64 = cartesi::encode_base64(std::span<const unsigned char>{data, length});
     request("machine.log_send_cmio_response", std::tie(reason, b64, b64_revert_root_hash, log_type), result);
@@ -1049,6 +1057,10 @@ machine_hash jsonrpc_machine::do_verify_reset_uarch(const_machine_hash_view root
 machine_hash jsonrpc_machine::do_verify_send_cmio_response(uint16_t reason, const unsigned char *data, uint32_t length,
     const_machine_hash_view root_hash_before, const access_log &log, const_machine_hash_view revert_root_hash) const {
     machine_hash result;
+    // The protocol carries the response data itself, so a missing buffer cannot be sent.
+    if (data == nullptr && length > 0) {
+        throw std::invalid_argument{"invalid data buffer"};
+    }
     std::string b64_data = cartesi::encode_base64(std::span<const unsigned char>{data, length});
     auto b64_root_hash_before = encode_base64(root_hash_before);
     auto b64_revert_root_hash = encode_base64(revert_root_hash);

@@ -1657,10 +1657,6 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(send_cmio_response_oversized_length_test, cmio_re
 }
 
 BOOST_FIXTURE_TEST_CASE_NOLINT(send_cmio_response_null_data_test, cmio_request_machine_fixture) {
-    if (g_server != nullptr) {
-        BOOST_TEST_MESSAGE("Null response buffers can only be tested locally");
-        return;
-    }
     for (const bool logged : {false, true}) {
         for (const uint32_t length : {uint32_t{1}, uint32_t{CM_AR_CMIO_RX_BUFFER_LENGTH}}) {
             cm_hash before{};
@@ -1689,6 +1685,18 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(send_cmio_response_null_data_test, cmio_request_m
             cm_send_cmio_response(_machine, CM_HTIF_YIELD_REASON_ADVANCE_STATE, nullptr, 0, &before);
         BOOST_CHECK_EQUAL(error, CM_ERROR_OK);
     }
+    BOOST_REQUIRE_EQUAL(cm_write_reg(_machine, CM_REG_IFLAGS_Y, 1), CM_ERROR_OK);
+    cm_hash before{};
+    BOOST_REQUIRE_EQUAL(cm_get_root_hash(_machine, &before), CM_ERROR_OK);
+    const char *log{};
+    BOOST_REQUIRE_EQUAL(cm_log_send_cmio_response(_machine, CM_HTIF_YIELD_REASON_ADVANCE_STATE, _expected_data.data(),
+                            _expected_data.size(), &before, CM_ACCESS_LOG_TYPE_ANNOTATIONS, &log),
+        CM_ERROR_OK);
+    const std::string saved_log(log);
+    cm_hash after{};
+    BOOST_CHECK_EQUAL(cm_verify_send_cmio_response(_machine, CM_HTIF_YIELD_REASON_ADVANCE_STATE, nullptr,
+                          _expected_data.size(), &before, saved_log.c_str(), &before, &after),
+        CM_ERROR_INVALID_ARGUMENT);
 }
 
 BOOST_FIXTURE_TEST_CASE_NOLINT(receive_cmio_request_length_query_test, cmio_request_machine_fixture) {

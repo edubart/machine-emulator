@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-78 confirmed issues: 5 high, 16 medium, 57 low.
+77 confirmed issues: 5 high, 16 medium, 56 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -68,7 +68,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree) | low | pre-existing | Machine API (uarch cycle collection) | Over-long revert_uarch_tail aborts on an assert or yields an invalid mcycle subtree | `bugs/api-10-collect-uarch-revert-tail-length-unvalidated/` |
 | [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
 | [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
-| [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder's trailing-data check uses only the last dynamic tail | `bugs/lua-29-evmu-end-offset-last-dynamic-only/` |
 | [B44](#b44-json-parsers-truncate-64-bit-log2-sizes-in-access-logs-and-proofs-without-range-checks) | low | pre-existing | JSON parsing (json-util) | JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks | `bugs/api-12-access-log2-size-truncation/` |
 | [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
@@ -2157,70 +2156,6 @@ It needs `lua5.4` and `wine` (or `wine64`). It also needs either `WIN_LUA=<path 
 
 **ID**: `lua-26-rename-not-replacing-on-windows`
 
-### B43. ABI decoder's trailing-data check uses only the last dynamic tail
-
-**Title**: evmu ABI decoder's "no trailing data" check uses only the end of the last-decoded dynamic tail, so it rejects valid data (out-of-order tails, empty dynamic-element arrays) and accepts aliased tails and gaps
-
-**Problem:** `decode_abi` and `decode_calldata` assert that the end offset returned by the top-level `decode_value` equals `#data`, which is meant to check that no data is left over. That end offset does not measure how much data was used:
-- `decode_tuple` starts `new_offset` at `tuple_start + static_size` and then replaces it with the end of *each* dynamic component it decodes. It returns the end of the **last** component in declaration order, not the furthest byte read.
-- For dynamic element types, `decode_array` returns `last_offset`, the end of the last element only. That value is `nil` when `size == 0`. This nil case is reported on its own as `lua-09`; this entry covers the general root cause.
-
-As a result:
-1. **Valid encodings are rejected.** The ABI spec lets tails appear in any order, and Solidity's decoder accepts such layouts. When tails are not in component order (for example `(bytes,bytes)` with the second tail stored first), the last component's end falls before `#data`, and the decoder raises `ABI data too long` / `calldata too long`.
-2. **The decoder's own canonical output is rejected** whenever an empty `bytes[]`, `string[]` or dynamic-tuple `[]` is the last dynamic component (the `lua-09` case).
-3. **Non-canonical data is accepted.** Two heads can point at one tail (aliasing), and garbage can sit between the head and the first tail, so the assert never actually checks that all data was consumed. The values returned are still the ones the offsets point to, and Solidity is just as lenient, so this part is a strictness gap rather than a wrong-value bug.
-
-**Origin:** Pre-existing. On `origin/main`, `decode_calldata` already rejects reversed tails (`evmu.lua:821: calldata too long`) and accepts aliased tails. This branch (commit `44f37ea`) adds the public `decode_abi`, which reuses the same `decode_tuple`/`decode_array` logic for `eth_call` return data and event log data, giving callers a new way to hit the bug.
-
-**Area:** Lua library `cartesi.evmu` (ABI decoder: `decode_abi`, `decode_calldata`, `decode_calldata_hex`).
-
-**Category:** Correctness (ABI decoding: wrong end-offset / trailing-data check).
-
-**Location:**
-- `src/cartesi/evmu.lua:726-755`: `decode_array`, which returns `last_offset` (end of the last element; `nil` for `size == 0`).
-- `src/cartesi/evmu.lua:757-783`: `decode_tuple`, where `new_offset` is replaced by each dynamic component's end (lines 767-773).
-- `src/cartesi/evmu.lua:831`: `decode_calldata`, `assert(offset == #calldata_raw, "calldata too long")`.
-- `src/cartesi/evmu.lua:846`: `decode_abi`, `assert(offset == #data, "ABI data too long")`.
-
-**Evidence:** The test builds raw ABI words by hand (`w(n)` is a 32-byte big-endian word, and `bytes(s)` is a length word followed by padded data) and checks six cases. Run from the repo root with `eval $(make -s env); lua5.4 bugs/lua-29-evmu-end-offset-last-dynamic-only/test_end_offset_last_dynamic.lua`:
-```
-BUG: aliased tails accepted: {0xcd,0xcd} (128 bytes, only one tail)
-BUG: 32-byte garbage gap before tail accepted: 0xcd
-BUG: valid out-of-order tails rejected: .../src/cartesi/evmu.lua:846: ABI data too long
-BUG: canonical empty string[] rejected: .../src/cartesi/evmu.lua:846: ABI data too long
-BUG: decode_calldata rejects its own encode_calldata output for empty bytes[]: .../src/cartesi/evmu.lua:831: calldata too long
-BUG: decode_abi rejects encode_abi output for empty string[]: .../src/cartesi/evmu.lua:846: ABI data too long
-exit=1
-```
-The inputs were:
-- Aliased: `w(0x40)..w(0x40)..bytes("\xcd")` as `(bytes,bytes)`.
-- Gap: `w(0x40)..<32 x 0xff>..bytes("\xcd")` as `(bytes)`.
-- Reversed: `w(0x80)..w(0x40)..bytes("\xef")..bytes("\xcd")` as `(bytes,bytes)`, which decodes to `{0xcd,0xef}` under the ABI spec.
-
-Running the same reversed and aliased inputs through `origin/main`'s `decode_calldata` gives `false  evmu.lua:821: calldata too long` and `true` respectively.
-
-**Scenario:**
-- A validator or Rollups/Dave component written in Lua uses `cartesi.evmu.decode_abi` to decode an `eth_call` result or event log. If a contract getter returns, or an event emits, an empty `string[]`/`bytes[]`/dynamic-tuple array as its last dynamic field, the call throws on legitimate chain data. The node cannot process that response or event until the code is patched. The same happens with any producer (a hand-written or non-Solidity encoder, or a precompile or proxy) that lays tails out in a different order.
-- An application inside the machine that decodes input calldata with `decode_calldata` (for example `bytes[]` batches) rejects valid inputs, such as an empty batch, and may reject or revert legitimate user transactions.
-- Code that relies on `decode_abi`/`decode_calldata` to reject non-canonical encodings (for example, for replay or uniqueness, or for hashing the raw bytes it accepted) gets two different byte strings that decode to the same value.
-- The in-tree PRT node's current ABI types (uint, `bytes32[]`, static tuples, `bytes`) do not include arrays of dynamic elements as the last dynamic field, so the PRT path is unlikely to hit this in practice. No machine hash, proof or step log is involved.
-
-**Possible solution:**
-- Track the furthest extent read instead of the last-decoded tail. In `decode_tuple`, start with `end = tuple_start + static_size` and set `end = max(end, tail_end)` for each dynamic component. In `decode_array`, start with `end = array_data_start + 32*size` for dynamic elements, which also fixes the `size == 0` nil, and take the max over elements.
-- For a strict decoder, also check that the tails cover `[head_end, end)` exactly with no overlap or gap: sort the tails by offset and require each one to start where the previous one ended. This rejects aliasing and gaps while still accepting any order. Alternatively, keep lenient Solidity-like behaviour and use the max-extent check only.
-
-**Severity:** Low. Both reviewers rated it low. The decoder only *throws* on some valid inputs (out-of-order tails, empty dynamic-element arrays in the last dynamic position), never returns wrong values for canonical data, and does not affect hashes, proofs or the C API. The PRT contract types in use do not trigger it. Accepting aliased or gapped data matches Solidity's own leniency. One could argue for medium because the library fails to round-trip its own encoder's output; that case is rated medium on its own as `lua-09`.
-
-**Risks:**
-- *Of the bug:* Throwing on valid chain data can stall a Lua-based validator or indexer on one response or event until someone patches it. In-machine apps may reject legitimate inputs. Users who assume the length assert makes the decoder strict get non-unique encodings accepted.
-- *Of the fix:* The max-extent fix is local and low risk. It only changes which inputs raise, not the values decoded for accepted inputs. A strict no-overlap/no-gap check would newly reject non-canonical encodings that some producers (and Solidity's decoder) accept, so it should be optional or documented, and should not be applied to data that only needs to be interoperable.
-
-**Proof of concept:** `bugs/lua-29-evmu-end-offset-last-dynamic-only/test_end_offset_last_dynamic.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/lua-29-evmu-end-offset-last-dynamic-only/test_end_offset_last_dynamic.lua`. It needs no machine images. It exits 1 with `BUG:` lines while the bug is present and prints `PASS` once it is fixed. Under a lenient (Solidity-like) fix, the first two checks (aliasing and gap) are expected to keep reporting and can be dropped.
-
-**ID**: `lua-29-evmu-end-offset-last-dynamic-only`
-
-**Related**: B17 (fixed).
-
 ### B44. JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks
 
 **Title**: JSON parsing truncates a 64-bit access `log2_size` to `int` without a range check, and the proof parser's `log2_target_size` bound check tests `log2_root_size` instead
@@ -2321,7 +2256,7 @@ It exits 1 and prints `BUG:` lines while the amplification is present, and exits
 
 **ID**: `lua-30-evmu-aliased-offsets-quadratic-memory`
 
-**Related**: [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail).
+**Related**: B43 (fixed).
 
 ### B46. ABI integer encoders wrap values of 2^512 or more instead of rejecting them
 

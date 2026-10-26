@@ -743,7 +743,9 @@ local function decode_array(calldata, offset, parsed_type_spec, prefer)
             local offset_val = decode_uint(calldata, new_offset + (i - 1) * 32)
             -- Offsets are relative to the start of the array data section
             local element_offset = array_data_start + check_lua_uint(offset_val, "array offset", calldata)
-            result[i], last_offset = decode_value(calldata, element_offset, element_type, prefer)
+            local element_end
+            result[i], element_end = decode_value(calldata, element_offset, element_type, prefer)
+            last_offset = math.max(last_offset, element_end) -- Tails may appear in any order
         end
         return result, last_offset
     else
@@ -771,7 +773,9 @@ local function decode_tuple(calldata, offset, parsed_type_spec, prefer)
             offset_val, static_offset = decode_uint(calldata, static_offset)
             -- Offsets are relative to the start of the tuple
             local dynamic_offset = tuple_start + check_lua_uint(offset_val, "tuple offset", calldata)
-            result[i], new_offset = decode_value(calldata, dynamic_offset, comp_type, prefer)
+            local dynamic_end
+            result[i], dynamic_end = decode_value(calldata, dynamic_offset, comp_type, prefer)
+            new_offset = math.max(new_offset, dynamic_end) -- Tails may appear in any order
         else
             result[i], static_offset = decode_value(calldata, static_offset, comp_type, prefer)
         end

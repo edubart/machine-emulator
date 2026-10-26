@@ -137,6 +137,9 @@ uint64_t file_size(const std::string &filename) {
     if (S_ISDIR(st.st_mode)) { // Not a file
         throw make_path_system_error(EISDIR, "unable to get size of file"s, filename);
     }
+    if (!S_ISREG(st.st_mode)) { // FIFOs, sockets and devices have no meaningful size
+        throw make_path_system_error(EINVAL, "unable to get size of file"s, filename, "not a regular file"s);
+    }
     return static_cast<uint64_t>(st.st_size);
 }
 

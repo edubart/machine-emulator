@@ -3776,6 +3776,8 @@ local backup
 if cmdline.revert_mode == "fork" then
     backup = new_revert_fork(machine)
 elseif cmdline.revert_mode == "stored" then
+    -- Snapshot and revert reload the machine, and must not clear its hash tree again.
+    runtime_config.clear_hash_tree = false
     backup = new_revert_stored(machine, cmdline.load_dir or cmdline.create_dir, runtime_config)
 else
     backup = new_revert_none()

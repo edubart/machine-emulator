@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-14 confirmed issues: 2 high, 4 medium, 8 low.
+13 confirmed issues: 2 high, 4 medium, 7 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -31,7 +31,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
-| [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
@@ -213,48 +212,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 - `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B25. --clear-hash-tree is reapplied on every stored-mode revert
-
-**Title**: `--clear-hash-tree` is reapplied on every `--revert-mode=stored` snapshot/revert reload, forcing a full-machine rehash per input
-
-**Problem:** The help text says `--clear-hash-tree` clears cached hash-tree data once, "after creating or loading the machine". In practice the CLI puts the flag into the single shared `runtime_config` table (`clear_hash_tree = cmdline.clear_hash_tree`), and that same table goes to `new_revert_stored(machine, dir, runtime_config)`, which keeps it as `self.runtime_config`. Both `revert_stored:snapshot()` and `revert_stored:revert()` reload the machine with `m:load(self.machine_directory, self.runtime_config, cartesi.SHARING_ALL)`. The machine constructor calls `clear_hash_tree()` whenever `m_r.clear_hash_tree` is set. The result is that the tree is cleared at create/load, again in the setup snapshot inside `new_revert_stored`, and again at every per-input snapshot (advance and inspect) and every revert. Each of those clears throws away a hash tree the CLI has just synced to disk and marks every page dirty, so the next `get_root_hash` rehashes all of RAM and the flash drives.
-
-**Origin:** Introduced by this branch. `--clear-hash-tree` and the `clear_hash_tree` runtime-config field do not exist on `origin/main`.
-
-**Area:** `cartesi-machine` CLI (stored revert mode).
-
-**Category:** Correctness (option applied far more often than specified), with a performance impact. Hashes stay correct.
-
-**Location:**
-- `src/cartesi-machine.lua:2809`: `runtime_config = { ..., clear_hash_tree = cmdline.clear_hash_tree }` (one shared table)
-- `src/cartesi-machine.lua:3723-3732`: `revert_stored:snapshot()` reloads with `self.runtime_config`
-- `src/cartesi-machine.lua:3744-3751`: `revert_stored:revert()` reloads with `self.runtime_config`
-- `src/cartesi-machine.lua:3762-3770`: `new_revert_stored` keeps the table and takes a setup snapshot
-- `src/cartesi-machine.lua:3779`: `new_revert_stored(machine, ..., runtime_config)` gets the shared table
-- `src/cartesi-machine.lua:4476`, `4514`: per-input `backup:snapshot()`, advance and inspect
-- `src/machine.cpp:316-318`: the constructor clears the tree whenever `m_r.clear_hash_tree` is set
-
-**Evidence:** `wrapper.lua` patches the shared machine metatable to count `create`/`load` calls whose runtime config has `clear_hash_tree=true`. It does not change their behavior. After each `get_root_hash` it adds up `get_hash_tree_stats(true).phtc.page_changes`. It then runs the real CLI with `--ram-length=64Mi --create=DIR --revert-mode=stored --cmio-advance-state=...` and 3 inputs (`ioctl-echo-loop`), once with and once without `--clear-hash-tree`. Run with `eval $(make -s env); lua5.4 bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/test_clear_hash_tree_stored_revert.lua`:
-```
-no-clear:        creates=1(clearing 0) loads=4(clearing 0) get_root_hash=4 pages_rehashed=107791 time=10s
---clear-hash-tree: creates=1(clearing 1) loads=4(clearing 4) get_root_hash=4 pages_rehashed=323269 time=16s
-hash-tree clears: 5 (expected 1); extra pages rehashed vs no-clear: 215478
-BUG: --clear-hash-tree cleared the hash tree 5 times (4 stored-revert reloads with clear_hash_tree=true for 3 inputs), rehashing 215478 extra pages (3.0x the no-clear run)
-```
-The test exits 1. The extra cost grows linearly with the number of inputs and with machine size.
-
-**Scenario:** An operator suspects a corrupted cached tree and runs a rollup epoch through the CLI with `cartesi-machine --load=m,sharing:all --revert-mode=stored --clear-hash-tree --cmio-advance-state=...` on a GiB-sized machine. Instead of one rebuild, every input (and every rejected-input revert) pays a full-machine rehash. A long epoch can then take far longer than expected and miss tooling or operational deadlines. Validator nodes that use the C/Lua API directly (Rollups Node, Dave, the PRT node) set `clear_hash_tree` in their own runtime config, so they control when it applies. Hashes, proofs and stored state stay correct.
-
-**Possible solution:** Give `new_revert_stored` a copy of `runtime_config` with `clear_hash_tree = false`, or clear the field in the shared table right after the initial create/load. Snapshot and revert reloads should never re-apply a one-shot recovery action. The same pattern is worth keeping in mind for any future one-shot runtime flag.
-
-**Severity:** Low. Both reviewers agree: it only happens in the CLI, only when the user opts into `--clear-hash-tree` together with `--revert-mode=stored`, and the only effect is wasted rehashing. Results stay correct and deterministic, nothing crashes, and C API validator nodes are not affected.
-
-**Risks:** Bug: large slowdowns per input on big machines, and avoidable disk and CPU load during long epochs. Fix: minimal. Removing the flag from reload configs keeps the documented single clear. Any code that relies on the field still being set in `runtime_config` after setup would need to read `cmdline.clear_hash_tree` instead.
-
-**Proof of concept:** `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/test_clear_hash_tree_stored_revert.lua` (driver) and `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/wrapper.lua` (instrumented CLI launcher, used by the driver). Run from the repo root: `eval $(make -s env); lua5.4 bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/test_clear_hash_tree_stored_revert.lua`. It needs the default kernel/rootfs images (`CARTESI_IMAGES_PATH`) and takes about 30 s. It finds the CLI via `$CARTESI_MACHINE_CLI` or `cartesi-machine.lua` on `LUA_PATH`. Exit 1 with `BUG:` means the bug is present; exit 0 means it is fixed.
-
-**ID**: `rpc-08-clear-hash-tree-reapplied-every-stored-revert`
 
 ### B26. --clear-hash-tree is silently ignored for existing remote machines
 

@@ -952,6 +952,26 @@ describe("cartesi-machine CLI", function()
         expect.truthy(stderr:find(cartesi.tohex(root), 1, true))
     end)
 
+    it("clears hash-tree caches only once with --revert-mode=stored", function()
+        local jsonrpc = require("cartesi.jsonrpc")
+        local _ <close>, dirname = scope_stored_dirname()
+        local source <close> = cartesi.machine({ ram = { length = 0x3000 } })
+        source:store(dirname)
+        local server <close>, address = jsonrpc.spawn_server()
+        run_ok({
+            "--remote-address=" .. address,
+            "--load=" .. dirname .. ",sharing:all",
+            "--revert-mode=stored",
+            "--clear-hash-tree",
+            "--no-remote-destroy",
+            "--max-mcycle=0",
+            "--no-init-splash",
+            "--quiet",
+        })
+        -- The setup snapshot reloaded the machine without clearing its hash tree again
+        expect.equal(server:get_runtime_config().clear_hash_tree, false)
+    end)
+
     -- -------------------------------------------------------------------------
     -- Mcycle overflow
     --

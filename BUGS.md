@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-36 confirmed issues: 2 high, 8 medium, 26 low.
+35 confirmed issues: 2 high, 8 medium, 25 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -57,7 +57,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B78](#b78-evmu-function-signature-cache-never-evicts-entries) | low | pre-existing | Lua cartesi.evmu | evmu function-signature cache never evicts entries | `bugs/p3-12-evmu-func-sig-cache-never-evicts/` |
 | [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
 | [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
-| [B81](#b81-load-or-create-on-a-non-empty-local-machine-object-leaks-the-previous-machine-and-its-locks) | low | pre-existing | C API (local machine) | load or create on a non-empty local machine object leaks the previous machine and its locks | `bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
 | [B88](#b88-read-only-memory-ranges-longer-than-their-page-aligned-image-are-always-rejected) | low | pre-existing | Machine config (memory ranges) | Read-only memory ranges longer than their page-aligned image are always rejected | `bugs/u3-06-readonly-backing-gap-always-throws/` |
@@ -1557,59 +1556,6 @@ It exits with code 1 and prints `BUG:` lines while the defect is present, and pr
 **ID**: `p3-14-bint-new-returns-non-numeric-input`
 
 **Related**: [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264).
-
-### B81. load or create on a non-empty local machine object leaks the previous machine and its locks
-
-**Title**: Local `cm_load`/`cm_create` on a non-empty machine object leak the previous machine (fds, flocks, ~57 MiB of mappings each); `destroy()` frees only the newest one
-
-**Problem**: `local_machine::do_create` and `local_machine::do_load` run `m_machine = new machine(...)`. They do not check whether `m_machine` is already set, and they do not delete the old value. No layer above them checks either: `i_machine::create/load`, `cm_create`/`cm_load` and the Lua bindings `machine_obj_index_create`/`machine_obj_index_load` all pass the call straight through, without testing `cm_is_empty`. `cm.h` says `m` must be "an empty machine object", but nothing enforces that. So a second `create`/`load` on a loaded local object succeeds and orphans the first `machine`. The orphan keeps its mappings, its page hash-tree cache, and its open backing-file descriptors with their `flock` locks (`LOCK_EX` for `SHARING_ALL`, `LOCK_SH` otherwise). `destroy()` deletes only the newest machine and then reports `is_empty() == true`, but the leaked machine cannot be reached or released until the process exits. The JSON-RPC server rejects the same calls with `"machine exists"`, so a local machine and a remote machine behave differently under the same C API.
-
-**Origin**: pre-existing. `src/local-machine.cpp` and `cm_create`/`cm_load` in `src/cm.cpp` are the same on `origin/main` (v0.22.0).
-
-**Area**: libcartesi C API / local machine lifecycle (`cm_create`, `cm_load`, Lua `machine:create`/`machine:load`).
-
-**Category**: resource-leak (memory, file descriptors, file locks), plus an API contract that is not enforced.
-
-**Location**:
-- `src/local-machine.cpp:48-55`: `do_create`/`do_load` overwrite `m_machine` without a null check or `delete`
-- `src/cm.cpp:609-638`: `cm_create`/`cm_load` do not check that the object is empty
-- `src/clua-i-machine.cpp:1249,1334`: `machine_obj_index_create`/`machine_obj_index_load` forward the call unchecked
-- `src/cm.h:502,542`: the documented precondition, "Pointer to an empty machine object"
-- `src/jsonrpc-remote-machine.cpp:914-917,944-947`: the remote server does enforce it (`"machine exists"`)
-
-**Evidence**: The test stores a 1 MiB RAM machine as `A` and `B` and runs three scenarios:
-1. `M:load(A,nil,SHARING_ALL)`, then `M:load(B,nil,SHARING_ALL)`, then `M:destroy()`. Afterwards, `A` is still locked.
-2. `create()` called 5 more times on a non-empty object, then `destroy()`. The virtual memory is not released.
-3. `load()` called 5 more times, then `destroy()`. The fds are not closed.
-
-Run with `eval $(make -s env); lua5.4 bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/test_load_leak.lua`:
-```
-second load on non-empty object:	true	cartesi machine object: 0x55fc2ded5198
-is_empty after destroy:	true
-clone_stored(A,C) after destroy:	false	unable to clone file from '.../A/0000000000000000-8000.bin' to '.../C/0000000000000000-8000.bin': flock() failed: Resource temporarily unavailable
-fresh load(A, SHARING_ALL) after destroy:	false	unable to lock backing file '.../A/0000000000000000-8000.bin': Resource temporarily unavailable when initializing shadow state
-BUG: second load() on non-empty local machine succeeded and leaked the first machine; stored machine A remains locked after destroy(): ...
-VmSize before=81152 KiB after destroy=370620 KiB (leaked 289468 KiB)
-create() repeated on non-empty object succeeded 5 times; fds before=31 after destroy=30
-BUG: create() on non-empty local machine silently accepted (old machine leaked)
-load() repeated 5 times; fds before=30 after destroy=160
-BUG: repeated load() leaks 130 fds that destroy() never releases
-```
-The test exits 1. Each leaked machine costs about 57 MiB of VmSize and, when loaded from a directory, 26 fds. Repeated in-memory `create()` leaks no fds because it uses anonymous mappings.
-
-**Scenario**: A long-running PRT validator, Rollups Node or Dave process keeps a local machine object and calls `load`/`create` on it again without calling `destroy()` first, for example in a retry or error path, or when it reuses the object after a rollback. The call succeeds silently. The stored snapshot it loaded first is now locked for the life of the process: `clone_stored`, and any new `SHARING_ALL` load of that directory, fail with `flock() failed` or `unable to lock backing file`. Fds and about 57 MiB of mappings pile up on every repetition, and the only way out is to restart the node. The same mistake against a remote machine fails cleanly with `"machine exists"`, so code tested against the JSON-RPC backend can leak once switched to the local backend. No in-tree caller does this today: `doc/recipes/prt.lua` (`new_stored_machine`, `clone_loaded_directory`, rollback) and `src/cartesi-machine.lua` (revert_stored, main load/create) always use a fresh object or call `destroy()` before reloading.
-
-**Possible solution**: Reject the call when the object already holds a machine, as the server does. In `local_machine::do_create`/`do_load`, add `if (m_machine != nullptr) { throw std::runtime_error("machine exists"); }` (or put the check in `i_machine::create/load`, or in `cm_create`/`cm_load` through `cm_is_empty`, so every backend shares it). Do not choose "silently destroy the old machine first": that would hide caller bugs and could release locks the caller still depends on. Add a test that a second `create`/`load` on a non-empty local object fails and leaves the original machine untouched.
-
-**Severity**: low. Both reviewers rated it low (the candidate suggested medium). It fires only when a caller breaks the documented `cm.h` precondition, and no in-tree caller does (prt.lua and cartesi-machine.lua always destroy before reloading). It cannot affect hashes, proofs or dispute outcomes. When it is triggered the damage lasts until restart: a locked stored directory, plus leaked fds and memory. That makes the one-line enforcement fix worthwhile, and the severity would rise to medium if a real validator path were found that reloads without destroying first.
-
-**Risks**: Of the bug: when an application has this caller bug, memory and fds are exhausted slowly, and stored snapshots stay locked, which blocks `clone_stored` and new `SHARING_ALL` loads. The `flock` errors that result point at the wrong cause and are hard to diagnose. Of the fix: any external caller that, perhaps by accident, relies on overwriting a loaded object will now get an error instead of a silent leak. That is the intended behaviour and matches the remote backend, but it is a visible behaviour change worth a changelog note. The check must leave the existing machine intact on rejection, so throw before constructing the new one.
-
-**Proof of concept**: `bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/test_load_leak.lua`. Run it from the repo root: `eval $(make -s env); lua5.4 bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/test_load_leak.lua`. It needs no machine images, works in a temporary directory (override it with `WORKDIR`), prints `BUG:` lines and exits 1 while the defect is present, and exits 0 once a second `create`/`load` is rejected or the old machine is released.
-
-**ID**: `p1-01-local-load-create-on-nonempty-object-leaks-machine-and`
-
-**Related**: B51 (fixed).
 
 ### B82. Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot
 

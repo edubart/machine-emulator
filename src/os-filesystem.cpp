@@ -379,24 +379,30 @@ void create_file(const std::string &filename, std::span<const uint8_t> data) {
     }
 
     // Write data keeping file sparsity
-    size_t offset = 0;
-    while (offset < data.size()) {
-        auto bytes_to_write = std::min<size_t>(AR_PAGE_SIZE, data.size() - offset);
-        // Only write non-sparse blocks
-        if (!is_pristine(std::span<const unsigned char>{data.data() + offset, bytes_to_write})) {
-            const auto bytes_written = retry_on_eintr(
-                [&] { return pwrite(fd, data.data() + offset, bytes_to_write, static_cast<off_t>(offset)); });
-            if (bytes_written < 0) {
-                throw make_path_system_error(errno, "unable to create file"s, filename, "pwrite() failed"s);
+    const auto write_data = [&](size_t offset, size_t end) {
+        while (offset < end) {
+            auto bytes_to_write = std::min<size_t>(AR_PAGE_SIZE, end - offset);
+            // Only write non-sparse blocks
+            if (!is_pristine(std::span<const unsigned char>{data.data() + offset, bytes_to_write})) {
+                const auto bytes_written = retry_on_eintr(
+                    [&] { return pwrite(fd, data.data() + offset, bytes_to_write, static_cast<off_t>(offset)); });
+                if (bytes_written < 0) {
+                    throw make_path_system_error(errno, "unable to create file"s, filename, "pwrite() failed"s);
+                }
+                if (bytes_written == 0) {
+                    throw make_path_system_error(EIO, "unable to create file"s, filename, "pwrite() wrote 0 bytes"s);
+                }
+                offset += static_cast<size_t>(bytes_written);
+            } else {
+                offset += bytes_to_write;
             }
-            if (bytes_written == 0) {
-                throw make_path_system_error(EIO, "unable to create file"s, filename, "pwrite() wrote 0 bytes"s);
-            }
-            offset += static_cast<size_t>(bytes_written);
-        } else {
-            offset += bytes_to_write;
         }
-    }
+    };
+    // Write the first block last, so a process killed while writing leaves the file header zeroed
+    // (a page hash-tree cache then loads as uninitialized instead of with unwritten entries)
+    const auto first_block_end = std::min<size_t>(AR_PAGE_SIZE, data.size());
+    write_data(first_block_end, data.size());
+    write_data(0, first_block_end);
 
     // Ensure the file is closed gracefully
     failure_close.release();
@@ -457,51 +463,56 @@ void copy_file(const std::string &from, const std::string &to, uint64_t size) {
     alignas(16) std::array<uint8_t, AR_PAGE_SIZE> buffer{};
 
     // Copy data keeping file sparsity
-    size_t offset = 0;
-    while (offset < copy_size) {
-        const auto bytes_to_read = std::min<size_t>(buffer.size(), copy_size - offset);
+    const auto copy_data = [&](size_t offset, size_t end) {
+        while (offset < end) {
+            const auto bytes_to_read = std::min<size_t>(buffer.size(), end - offset);
 
-        // Read data from source
-        const auto bytes_read =
-            retry_on_eintr([&] { return pread(from_fd, buffer.data(), bytes_to_read, static_cast<off_t>(offset)); });
-        if (bytes_read < 0) {
-            throw make_copy_path_system_error(errno, "unable to copy file"s, from, to, "pread() failed"s);
-        }
-        if (bytes_read == 0) {
-            throw make_copy_path_system_error(EIO, "unable to copy file"s, from, to, "pread() read 0 bytes"s);
-        }
-
-        // Write only non-sparse blocks to destination
-        if (!is_pristine(std::span<const unsigned char>{buffer.data(), static_cast<size_t>(bytes_read)})) {
-            const auto bytes_written =
-                retry_on_eintr([&] { return pwrite(to_fd, buffer.data(), bytes_read, static_cast<off_t>(offset)); });
-            if (bytes_written < 0) {
-                throw make_copy_path_system_error(errno, "unable to copy file"s, from, to, "pwrite() failed"s);
+            // Read data from source
+            const auto bytes_read = retry_on_eintr(
+                [&] { return pread(from_fd, buffer.data(), bytes_to_read, static_cast<off_t>(offset)); });
+            if (bytes_read < 0) {
+                throw make_copy_path_system_error(errno, "unable to copy file"s, from, to, "pread() failed"s);
             }
-            if (bytes_written == 0) {
-                throw make_copy_path_system_error(EIO, "unable to copy file"s, from, to, "pwrite() wrote 0 bytes"s);
+            if (bytes_read == 0) {
+                throw make_copy_path_system_error(EIO, "unable to copy file"s, from, to, "pread() read 0 bytes"s);
             }
-            offset += static_cast<size_t>(bytes_written);
-        } else {
-            offset += bytes_read;
-        }
 
-        // Attempt to advance the offset to the next data block if SEEK_DATA is supported.
-        // This efficiently skips over holes in sparse files (supported on Linux, not on macOS).
+            // Write only non-sparse blocks to destination
+            if (!is_pristine(std::span<const unsigned char>{buffer.data(), static_cast<size_t>(bytes_read)})) {
+                const auto bytes_written = retry_on_eintr(
+                    [&] { return pwrite(to_fd, buffer.data(), bytes_read, static_cast<off_t>(offset)); });
+                if (bytes_written < 0) {
+                    throw make_copy_path_system_error(errno, "unable to copy file"s, from, to, "pwrite() failed"s);
+                }
+                if (bytes_written == 0) {
+                    throw make_copy_path_system_error(EIO, "unable to copy file"s, from, to, "pwrite() wrote 0 bytes"s);
+                }
+                offset += static_cast<size_t>(bytes_written);
+            } else {
+                offset += bytes_read;
+            }
+
+            // Attempt to advance the offset to the next data block if SEEK_DATA is supported.
+            // This efficiently skips over holes in sparse files (supported on Linux, not on macOS).
 #ifdef SEEK_DATA
-        auto next_offset = lseek(from_fd, static_cast<off_t>(offset), SEEK_DATA);
-        if (next_offset == -1) {
-            if (errno == ENXIO) { // End of file, or within a hole at the end of the file
-                break;
+            auto next_offset = lseek(from_fd, static_cast<off_t>(offset), SEEK_DATA);
+            if (next_offset == -1) {
+                if (errno == ENXIO) { // End of file, or within a hole at the end of the file
+                    break;
+                }
+                if (errno == EINVAL || errno == ENOTSUP) { // SEEK_DATA is not supported
+                    continue;
+                }
+                throw make_copy_path_system_error(errno, "unable to copy file"s, from, to, "lseek() failed"s);
             }
-            if (errno == EINVAL || errno == ENOTSUP) { // SEEK_DATA is not supported
-                continue;
-            }
-            throw make_copy_path_system_error(errno, "unable to copy file"s, from, to, "lseek() failed"s);
-        }
-        offset = static_cast<size_t>(next_offset);
+            offset = static_cast<size_t>(next_offset);
 #endif
-    }
+        }
+    };
+    // Copy the first block last, so a process killed while copying leaves the file header zeroed
+    const auto first_block_end = std::min<size_t>(AR_PAGE_SIZE, copy_size);
+    copy_data(first_block_end, copy_size);
+    copy_data(0, first_block_end);
 
 #ifdef _WIN32
     // The destination inherits the source permissions. When these are read-only, flush the

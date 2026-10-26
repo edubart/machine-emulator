@@ -21,12 +21,11 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-48 confirmed issues: 3 high, 9 medium, 36 low.
+47 confirmed issues: 2 high, 9 medium, 36 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
 | [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
-| [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
@@ -819,88 +818,6 @@ BUG: log2_root_size=2 (< word) silently returns the full-word hash
 **Reviewer note**: A separate review panel (`ht-05-verify-hash-tree-misses-inner-nodes`) reproduced the same behavior but rejected it 2 to 1, arguing that `verify_hash_tree` is meant to check dirty-page tracking rather than the whole tree. This panel confirmed it. It is listed as low so that readers can weigh both views.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree).
-
-### B32. Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes
-
-**Title**: Interrupted store or clone_stored leaves a torn hash_tree.phtc that loads silently and gives wrong hashes
-
-**Problem**: If `store()` or `clone_stored()` is killed while it writes `hash_tree.phtc`, the file is left full-size with a valid header and metadata but zeroed page payloads. A later load accepts it without error. The page hash-tree cache then treats the zeroed payloads as valid cached pages, and the machine silently computes wrong root hashes. Proofs and uarch cycle hashes that read the same payloads are also wrong.
-
-Why this happens:
-- `hash_tree.phtc` is the last file written (store) or copied (clone_stored). Every other file is already complete at that point.
-- `os::create_file` and `os::copy_file` first `ftruncate` the file to its full length, then `pwrite` 4 KiB blocks in order. `clone_file` falls back to `copy_file` when reflink is not available, as on ext4.
-- The initialized tag, the LRU and the entry metadata sit at the front of the file, so they are written first. A kill partway through leaves them valid, followed by zeros.
-- At load, the `page_hash_tree_cache` constructor checks only the tag and `check_metadata()`. It never checks the payloads.
-- `enqueue_hash_entry` rehashes only words that differ from the cached page. Zero words in RAM match the zeroed payload, so their leaves keep a zero hash instead of keccak(0). On an LRU eviction, a torn payload is also reused as the diff base for the page newly assigned to that entry, so the corruption spreads beyond the original hits.
-
-A torn phtc is the only partial state that loads silently. An interruption at any earlier point leaves later files missing, and the load fails.
-
-**Origin**: pre-existing. The write order and payload trust are in code this branch touches (store, clone_stored, page hash-tree cache).
-
-**Area**: Hash tree persistence (page hash-tree cache, `store` / `clone_stored`, `os-filesystem`).
-
-**Category**: Correctness / crash consistency (silent wrong state hash and proofs).
-
-**Location**:
-- `src/machine.cpp:475-482`: `store()` writes `hash_tree.sht`, then `hash_tree.phtc`, last.
-- `src/machine.cpp:535-538`: `clone_stored()` clones the sht, then the phtc, last.
-- `src/os-filesystem.cpp:348-390`: `create_file` (`ftruncate` to full size, then sequential `pwrite`).
-- `src/os-filesystem.cpp:397-490`: `copy_file`.
-- `src/os-filesystem.cpp:575+`: `clone_file`, which falls back to `copy_file` without reflink.
-- `src/page-hash-tree-cache.hpp:414-455`: the constructor validates only the initialized tag and `check_metadata()`.
-- `src/page-hash-tree-cache.hpp:340-375`: `enqueue_hash_entry` diffs against the untrusted cached page.
-
-**Evidence**: The test makes no hand edits to any file. A child `lua5.4` process runs `machine:store(dir, SHARING_ALL)` or `cartesi.machine:clone_stored(src, dst)` under an `LD_PRELOAD` shim, which sends a real SIGKILL after N `pwrite()` calls to `hash_tree.phtc`. The machine has 16 MiB of RAM and the default `phtc_size` of 4096, which makes a phtc of about 50 MB. The parent then:
-1. loads the directory, which succeeds;
-2. writes one word per RAM page;
-3. compares the root with an in-memory reference machine and with the same directory loaded with `clear_hash_tree = true`.
-
-Output of `eval $(make -s env); sh bugs/api-05-torn-phtc-silent-wrong-hash/run.sh` (default kill point 4000):
-```
-child store exited: nil exit 137
-[store] load accepted; root on load matches reference: false
-[store] root after touching pages: b2117719d1c48798bf6237ce4eaf64b6a2680eea9dd26b7fb105862d35b90269
-[store] reference root           : c3b78b028e6361ae065e47902f6c753a06d8fabe221bb47a84f7f91c0767c41e
-[store] same dir, clear_hash_tree: c3b78b028e6361ae065e47902f6c753a06d8fabe221bb47a84f7f91c0767c41e
-BUG: [store] torn hash_tree.phtc accepted at load; machine computes a wrong root hash (clear_hash_tree rebuild matches reference)
-[intact-source] root after touching pages: c3b78b028e63...c41e   (control: complete store is correct)
-child clone_stored exited: nil exit 137
-[clone_stored] root after touching pages: b2117719d1c4...0269
-BUG: [clone_stored] torn hash_tree.phtc accepted at load; machine computes a wrong root hash (clear_hash_tree rebuild matches reference)
-```
-Exit status is 1.
-
-With `KILL_AFTER_PHTC=12000`, the output starts with `[store] load accepted; root on load matches reference: true`. The root after touching pages is still wrong (`60289b49...` vs `c3b78b02...`). So the usual "load, then assert root == expected" check does not catch it.
-
-With `VERIFY=1`, `verify_hash_tree()` returns false, but nothing calls it at load.
-
-**Scenario**: A Rollups Node, Dave or other validator snapshots with `cm_store`, or with `cm_clone_stored` on ext4, straight into its final snapshot directory. The process is killed (OOM killer, container stop timeout, crash) during the roughly 50 MB phtc write. On restart, the node loads that directory with no error, and the root may even match the expected state hash. Then it processes inputs or bisects a dispute, and commits wrong state hashes and proofs. An honest player can lose the dispute this way, with no error anywhere.
-
-The reference PRT node (`doc/recipes/prt.lua`) is not affected. It stores or clones into a temporary directory, then calls `sync_stored` and `rename_stored`, and deletes leftover temporary directories. However, nothing in the `cm_store` / `cm_clone_stored` API says they are not crash-atomic.
-
-**Possible solution**: Make the phtc write all-or-nothing. Either option works:
-- Write the payloads and metadata first and the initialized tag last, with an fsync before the tag write when durability is needed. A torn file then fails the tag check, or is reinitialized as empty.
-- Or write and copy to a temporary name and rename it into place.
-
-As defense in depth:
-- validate the active entries' payloads at load (re-hash each page and compare with its stored page root, dropping mismatched entries), or add per-entry checksums;
-- document that `store` / `clone_stored` are not atomic and that the temp-dir, `sync_stored`, `rename_stored` protocol is required.
-
-**Severity**: high. Both reviewers agree. The impact is silent wrong state hashes and proofs, which can lose a PRT dispute, and some kill points pass the post-load root check. It is not critical because it needs both a process kill inside the phtc write window and an integrator that does not use the documented temp-dir, sync and rename protocol.
-
-**Risks**:
-- Bug: silent divergence of a validator's state hash and proofs after a realistic process kill. The only signal is `verify_hash_tree()`, which nobody calls at load and which is very noisy on stderr.
-- Fix: writing the tag last only changes write order. Note that a reinitialized (empty) cache must still be consistent with the stored sht, or the sht must be rebuilt. Otherwise dropping the cache could expose other stale-hash issues. Payload validation at load costs about one page hash per active entry (4096 by default), which adds to load time. A temp-file-plus-rename approach needs care with `SHARING_ALL` mappings and with cleaning up leftover temporary files.
-
-**Proof of concept**: `bugs/api-05-torn-phtc-silent-wrong-hash/run.sh`, `test_torn_phtc.lua` and `killshim.c`. `run.sh` builds the `LD_PRELOAD` shim into a `mktemp -d` directory and runs `test_torn_phtc.lua` with its work directory there. It needs `gcc` and `lua5.4`, and creates two phtc files of about 50 MB. The `clone_stored` case needs the temp dir on a filesystem without reflink, such as ext4, and is skipped otherwise. Optional settings: `KILL_AFTER_PHTC=<n>` sets the kill point, and `VERIFY=1` also runs `verify_hash_tree()`. Run from the repo root:
-```
-eval $(make -s env); sh bugs/api-05-torn-phtc-silent-wrong-hash/run.sh
-```
-While the bug is present it prints `BUG:` lines and exits 1. Once fixed it prints `OK: no wrong hash` and exits 0.
-
-**ID**: `api-05-torn-phtc-silent-wrong-hash`
-
-**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
 ### B35. collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image
 
@@ -2707,7 +2624,7 @@ BUG: torn .phtc loads with correct root hash and verify_hash_tree()==true but yi
 
 **ID**: `u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr`
 
-**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes), [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash).
+**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), B32 (fixed), [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash).
 
 ### B92. Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash
 

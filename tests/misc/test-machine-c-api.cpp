@@ -53,6 +53,11 @@
 #include <sys/stat.h>
 #endif
 
+#if defined(__linux__) && defined(__GLIBC__)
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
+
 #include <cm-jsonrpc.h>
 #include <cm.h>
 #include <keccak-256-hasher.hpp>
@@ -2267,6 +2272,39 @@ BOOST_AUTO_TEST_CASE_NOLINT(clear_mapped_memory_test) {
     anonymous.clear();
     BOOST_CHECK(std::ranges::all_of(anonymous.get_storage_data(), [](auto b) { return b == 0; }));
 }
+
+#if defined(__linux__) && defined(__GLIBC__)
+// Offsets written by pwrite() while recording
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static std::optional<std::vector<off64_t>> g_pwrite_offsets;
+
+// Interposes pwrite() for the statically linked libcartesi, which glibc maps to pwrite64() for 64-bit offsets
+extern "C" ssize_t pwrite64(int fd, const void *buf, size_t count, off64_t offset) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    static auto *const next = reinterpret_cast<decltype(&pwrite64)>(dlsym(RTLD_NEXT, "pwrite64"));
+    if (g_pwrite_offsets) {
+        g_pwrite_offsets->push_back(offset);
+    }
+    return next(fd, buf, count, offset);
+}
+
+BOOST_AUTO_TEST_CASE_NOLINT(create_and_copy_file_write_first_block_last_test) {
+    // A process killed while writing a stored page hash-tree cache must leave its header tag zeroed
+    const auto from = unique_temp_path("first-block-last-from");
+    const auto to = unique_temp_path("first-block-last-to");
+    const std::vector<uint8_t> data(3 * 4096, 0x5a);
+    const std::vector<off64_t> expected{4096, 8192, 0};
+    g_pwrite_offsets.emplace();
+    cartesi::os::create_file(from, data);
+    BOOST_CHECK_EQUAL_COLLECTIONS(g_pwrite_offsets->begin(), g_pwrite_offsets->end(), expected.begin(), expected.end());
+    g_pwrite_offsets.emplace();
+    cartesi::os::copy_file(from, to);
+    BOOST_CHECK_EQUAL_COLLECTIONS(g_pwrite_offsets->begin(), g_pwrite_offsets->end(), expected.begin(), expected.end());
+    g_pwrite_offsets.reset();
+    cartesi::os::remove_file(from);
+    cartesi::os::remove_file(to);
+}
+#endif
 
 BOOST_AUTO_TEST_CASE_NOLINT(clear_hash_tree_null_machine_test) {
     BOOST_CHECK_EQUAL(cm_clear_hash_tree(nullptr), CM_ERROR_INVALID_ARGUMENT);

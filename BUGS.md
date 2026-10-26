@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-44 confirmed issues: 2 high, 8 medium, 34 low.
+43 confirmed issues: 2 high, 8 medium, 33 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -43,7 +43,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
-| [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
 | [B48](#b48-evmu-hex-decoding-accepts-sign-characters) | low | pre-existing | Lua cartesi.evmu (ABI) | evmu hex decoding accepts sign characters | `bugs/lua-33-evmu-fromhex-sign-chars/` |
@@ -773,72 +772,6 @@ Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image c
 **ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
 
 **Related**: B39 (fixed).
-
-### B38. ABI decoder accepts dirty address bits and non-zero padding
-
-**Title**: evmu ABI decoder accepts dirty upper bits in `address` and dirty padding in `bytesN`, which Solidity rejects, and non-zero padding in `bytes`/`string`
-
-**Problem**: The ABI decoder in `cartesi.evmu` does not check bits that a canonical encoding requires to be zero:
-- `decode_address` keeps the last 20 bytes of the word (`tobe(word):sub(-20)`) and ignores the upper 12 bytes.
-- `decode_bytes_sized` (`bytesN`) reads `N` bytes and skips the other `32-N` padding bytes without checking them.
-- `decode_string` and the dynamic branch of `decode_bytes` skip the padding up to `ceil32(len)` without checking it.
-
-The same file is strict elsewhere: `decode_uint` and `decode_int` check range, and `decode_bool` rejects anything other than 0 or 1. Solidity's ABI coder v2 reverts on an `address` or `bytesN` with dirty bits, so for those two types evmu accepts data that the on-chain `abi.decode` rejects. Solidity does not check trailing padding of dynamic `bytes`/`string`, so for those two types the issue is only malleability: several distinct byte strings decode to the same value.
-
-**Origin**: Pre-existing. The branch added the selectorless wrappers `encode_abi`/`decode_abi` (commit 44f37ea). `decode_abi` sends data to the same lenient decoders, which makes them reachable from one more public entry point.
-
-**Area**: `src/cartesi/evmu.lua`, the ABI decoder in the shipped Lua library (installed through `EMU_TO_LUA_PATH` in the top-level Makefile).
-
-**Category**: Correctness. The decoder is non-canonical and inconsistent with on-chain decoding.
-
-**Location**:
-- `src/cartesi/evmu.lua:670-676` (`decode_address`)
-- `src/cartesi/evmu.lua:702-709` (`decode_bytes_sized`)
-- `src/cartesi/evmu.lua:691-700` (`decode_string`)
-- `src/cartesi/evmu.lua:712-722` (`decode_bytes`, dynamic branch)
-- Reached through `_M.decode_calldata` (`:820`), `_M.decode_calldata_hex` (`:836`) and `_M.decode_abi` (`:842`).
-
-**Evidence**: The test first runs two control cases, which are rejected. It then feeds six non-canonical encodings, and all six are accepted:
-```
-$ eval $(make -s env); lua5.4 bugs/lua-28-evmu-lenient-dirty-bits-padding/test.lua
-ok: (bool) value 2 [control] rejected: .../evmu.lua:686: invalid bool value in calldata (must be 0 or 1)
-ok: (uint8) value 256 [control] rejected: .../evmu.lua:652: integer value does not fit in target type
-BUG: (address) with 0xff upper 12 bytes accepted (decoded "0x1111111111111111111111111111111111111111")
-BUG: (bytes4) with non-zero padding accepted (decoded "0xdeadbeef")
-BUG: (string) with non-zero padding accepted (decoded "a")
-BUG: (bytes) with non-zero padding accepted (decoded "0x61")
-BUG: decode_calldata Notice(bytes) dirty padding accepted (decoded "a")
-BUG: two distinct encodings decode to the same bytes value "a"
-BUG: decoder accepted 6 non-canonical encodings
-```
-The test exits with status 1.
-
-**Scenario**: The decoder is used by a Lua validator, indexer or tool that decodes untrusted ABI data with evmu, such as `decode_calldata` on Notice/Voucher outputs or `decode_abi` on `eth_call` results. Two things can go wrong:
-- An `address` or `bytesN` with dirty bits is treated as valid, even though a contract's `abi.decode` of the same bytes would revert. For example, a voucher destination or payload field shows as well formed off-chain but fails on-chain.
-- Distinct encodings collapse to the same decoded value. Code that deduplicates or keys on decoded values can then disagree with code that works on the raw bytes.
-
-None of the following uses evmu: the C API, the JSON-RPC machine or the `cartesi-machine` CLI. Machine state hashes, output Merkle roots, proofs and step logs are all computed over raw bytes. So this bug cannot change a PRT commitment or make an honest player lose a dispute.
-
-**Possible solution**:
-- In `decode_address`, assert that the upper 12 bytes of the word are zero (`tobe(word):sub(1, 12) == ("\0"):rep(12)`).
-- In `decode_bytes_sized`, assert that `calldata:sub(offset + size + 1, offset + padded_len)` is all zero.
-- Optionally, for strict canonical decoding, check the same zero padding in `decode_string` and `decode_bytes`. Also optionally reject non-canonical head offsets, since aliasing or overlapping offsets are also accepted today.
-
-**Severity**: Low. Both reviewers agree. The defect is real and reachable through the public Lua API, but it is pre-existing and limited to a Lua helper library. It never affects machine hashes, proofs, step logs, the C API or the CLI, so it cannot crash a validator or decide a dispute.
-
-**Risks**:
-- Of the bug: off-chain Lua consumers may accept malformed or malleable ABI data that the on-chain decoder rejects, and so diverge from contract behaviour on what counts as a valid output or input.
-- Of the fix: stricter checks may start rejecting inputs that callers currently accept, such as sloppy hand-built calldata in scripts or tests. Making the padding checks on `bytes`/`string` strict goes beyond what Solidity enforces, so it should be a deliberate choice, or be made optional.
-
-**Proof of concept**: `bugs/lua-28-evmu-lenient-dirty-bits-padding/test.lua`. Run it from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/lua-28-evmu-lenient-dirty-bits-padding/test.lua
-```
-The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is fixed.
-
-**ID**: `lua-28-evmu-lenient-dirty-bits-padding`
-
-**Related**: B18 (fixed).
 
 ### B46. ABI integer encoders wrap values of 2^512 or more instead of rejecting them
 

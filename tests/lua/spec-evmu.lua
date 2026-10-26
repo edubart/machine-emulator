@@ -920,6 +920,15 @@ describe("selectorless ABI", function()
         end
         check(word(0x20) .. word(256) .. table.concat(heads) .. table.concat(words))
     end)
+    it("rejects dirty bits in address and bytesN values", function()
+        local addr, b4 = string.rep("\x11", 20), "\xde\xad\xbe\xef"
+        assert(evmu.decode_abi("(address)", string.rep("\0", 12) .. addr, "raw")[1] == addr)
+        assert(evmu.decode_abi("(bytes4)", b4 .. string.rep("\0", 28), "raw")[1] == b4)
+        local ok, err = pcall(evmu.decode_abi, "(address)", "\1" .. string.rep("\0", 11) .. addr)
+        assert(not ok and err:find("dirty upper bits in address value"), tostring(err))
+        ok, err = pcall(evmu.decode_abi, "(bytes4)", b4 .. string.rep("\0", 27) .. "\1")
+        assert(not ok and err:find("dirty padding in bytes4 value"), tostring(err))
+    end)
 end)
 
 lester.report()

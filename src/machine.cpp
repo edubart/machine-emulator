@@ -617,8 +617,18 @@ static void for_each_stored_filename(const std::string &dir, const F &func) {
 }
 
 void machine::remove_stored(const std::string &dir) {
-    // Remove all files
-    for_each_stored_filename(dir, os::remove_file);
+    if (dir.empty()) {
+        throw std::invalid_argument{"directory name cannot be empty"};
+    }
+    // Remove all files, skipping those already removed by an interrupted removal.
+    // The config file is removed last, so without it at most an empty directory remains.
+    if (os::exists(machine_config::get_config_filename(dir))) {
+        for_each_stored_filename(dir, [](const std::string &filename) {
+            if (os::exists(filename)) {
+                os::remove_file(filename);
+            }
+        });
+    }
 
     // Remove directory
     os::remove_directory(dir);

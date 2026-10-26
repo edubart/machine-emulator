@@ -1035,6 +1035,23 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(remove_stored_null_machine_test, ordinary_machine
     BOOST_CHECK(!std::filesystem::exists(_machine_dir_path));
 }
 
+BOOST_FIXTURE_TEST_CASE_NOLINT(remove_stored_interrupted_test, ordinary_machine_fixture) {
+    cm_error error_code = cm_store(_machine, _machine_dir_path.c_str(), CM_SHARING_ALL);
+    BOOST_REQUIRE_EQUAL(error_code, CM_ERROR_OK);
+
+    // A removal interrupted before all files were removed
+    BOOST_REQUIRE(std::filesystem::remove(_machine_dir_path + "/hash_tree.sht"));
+    error_code = cm_remove_stored(_machine, _machine_dir_path.c_str());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_OK);
+    BOOST_CHECK(!std::filesystem::exists(_machine_dir_path));
+
+    // A removal interrupted after all files were removed
+    BOOST_REQUIRE(std::filesystem::create_directory(_machine_dir_path));
+    error_code = cm_remove_stored(_machine, _machine_dir_path.c_str());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_OK);
+    BOOST_CHECK(!std::filesystem::exists(_machine_dir_path));
+}
+
 BOOST_FIXTURE_TEST_CASE_NOLINT(sync_stored_null_machine_test, ordinary_machine_fixture) {
     cm_error error_code = cm_store(_machine, _machine_dir_path.c_str(), CM_SHARING_ALL);
     BOOST_REQUIRE_EQUAL(error_code, CM_ERROR_OK);

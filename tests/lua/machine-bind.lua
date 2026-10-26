@@ -1354,6 +1354,25 @@ tests_util.make_do_test(build_machine, machine_type, {
     check_error_find(err, "illegal instruction")
 end)
 
+for _, insn in ipairs({
+    0x00300513, -- li a0,3 (set_index out of range)
+    0x10000593, -- li a1,256 (slot_index out of range)
+}) do
+    local program = {
+        (cartesi.UARCH_ECALL_FN_WRITE_TLB << 20) | 0x00893, -- li a7,write_tlb
+        insn,
+        0x00000073, -- ecall
+    }
+    tests_util.make_do_test(build_machine, machine_type, {
+        uarch = { ram = { backing_store = { data_filename = tests_util.create_test_uarch_program(program) } } },
+    })("Detect out-of-range WRITE_TLB index", function(machine)
+        machine:run_uarch(2)
+        local success, err = pcall(machine.log_step_uarch, machine)
+        assert(success == false)
+        check_error_find(err, "invalid TLB index")
+    end)
+end
+
 do_test("uarch ecall putchar should print char to console", function()
     local lua_code = [[ "
                                  local cartesi = require 'cartesi'

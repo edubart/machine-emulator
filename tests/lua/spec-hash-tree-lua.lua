@@ -1264,6 +1264,29 @@ describe("hash-tree.lua", function()
                 expect.equal(hash_tree.frontier_forest_get_node_hash(reopened, 15, 0), leaves[16])
             end)
 
+            it("leaves the leaf opaque when storing its expansion fails", function()
+                local _ <close>, directory = new_scope_directory()
+                local frontier_path = directory .. "/frontier.json"
+                local forest = fixtures.opaque()
+                hash_tree.frontier_forest_store(forest, directory, frontier_path)
+                local bundle = new_bundle(13)
+                local sync_file = fs.sync_file
+                fs.sync_file = function()
+                    error("injected sync failure")
+                end
+                local ok, err = pcall(hash_tree.frontier_forest_expand_leaf, forest, 12, bundle)
+                fs.sync_file = sync_file
+                expect.falsy(ok)
+                expect.truthy(err:find("injected sync failure", 1, true))
+                expect.equal(hash_tree.frontier_forest_get_node_hash(forest, 12, 0), nil)
+                -- A retry stores the expansion, and the next snapshot keeps it.
+                hash_tree.frontier_forest_expand_leaf(forest, 12, bundle)
+                hash_tree.frontier_forest_store(forest, directory, frontier_path)
+                local reopened = hash_tree.frontier_forest_load(directory, frontier_path)
+                expect_same_queries(forest, reopened)
+                expect.equal(hash_tree.frontier_forest_get_node_hash(reopened, 12, 0), leaves[13])
+            end)
+
             it("flushes pending values and shares trees between snapshots of a growing forest", function()
                 local _ <close>, directory = new_scope_directory()
                 local forest = hash_tree.frontier_forest(H4, "keccak256")

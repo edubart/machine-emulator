@@ -922,7 +922,8 @@ end
 -- root hash. Position is a logical leaf address. Repeated entries share the expansion,
 -- including when the selected position lies in an implicit suffix. Coverage and cached
 -- ancestor hashes do not change. Stored trees on the path load as in a query. All checks
--- precede the expansion, which a forest with a directory also stores.
+-- precede the expansion, which a forest with a directory stores before applying, so a failed
+-- store leaves the leaf opaque.
 -- docs:begin frontier_forest_expand_leaf
 local function frontier_forest_expand_leaf(forest, position, subtree)
     local tree = assert(forest[forest.height + 1], "the forest is not full")
@@ -952,8 +953,8 @@ local function frontier_forest_expand_leaf(forest, position, subtree)
                 if not value then
                     assert(tree.base_height == height, "leaf height mismatch")
                     assert(values[index] == replacement.hash, "leaf hash mismatch")
-                    values[index] = replacement
                     if forest.directory then store_expansion(forest, replacement) end
+                    values[index] = replacement
                     return
                 end
                 values[index] = value

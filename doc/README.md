@@ -9164,8 +9164,8 @@ local function frontier_forest_expand_leaf(forest, position, subtree)
                 if not value then
                     assert(tree.base_height == height, "leaf height mismatch")
                     assert(values[index] == replacement.hash, "leaf hash mismatch")
-                    values[index] = replacement
                     if forest.directory then store_expansion(forest, replacement) end
+                    values[index] = replacement
                     return
                 end
                 values[index] = value

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-47 confirmed issues: 2 high, 9 medium, 36 low.
+46 confirmed issues: 2 high, 8 medium, 36 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -29,7 +29,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
-| [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
@@ -246,56 +245,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 - `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B08. clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN)
-
-**Title**: `clone_stored` fails with EMLINK ("Too many links") instead of copying once about 65000 stored clones share one hard-linked read-only file
-
-**Problem:** `os::clone_file` handles a source with no write bits by hard-linking it with a plain `link()`. It falls back to `copy_file` only when the error is `ENOTSUP`, `EXDEV` or `EPERM`, and rethrows every other errno. `machine::store` always writes the PMAs backing file (`0000000000010000-1000.bin`) read-only, and it does the same for read-only flash drives and NVRAM. As a result, `machine::clone_stored` (`cm_clone_stored`) hard-links that file on every clone, and the template, its clones and their clones all share one inode. ext4 allows at most 65000 links per inode. At that point `link()` returns `EMLINK`, the error is rethrown as `std::system_error("Too many links")`, and `clone_stored` fails. A plain copy would have worked. The failure then hits every clone from the template or from any of its descendants, not just one source, for as long as that many links exist. The Lua `cartesi.filesystem.clone_file` binding calls the same function and fails the same way.
-
-**Origin:** Pre-existing. `origin/main` (v0.22.0) has the same `clone_file` with the same fallback list. This branch makes the defect easier to reach by exposing `clone_file` in the new `cartesi.filesystem` Lua module.
-
-**Area:** Stored machine API (`cm_clone_stored` / `machine:clone_stored`), `os::clone_file`, and the Lua `cartesi.filesystem.clone_file`.
-
-**Category:** Availability / unhandled recoverable error. Hashes are not affected.
-
-**Location:**
-- `src/os-filesystem.cpp:598-614`: `os::clone_file` uses `hardlink_file` for read-only sources, and its fallback list does not include `EMLINK`.
-- `src/machine.cpp:454-460`: `store` marks the PMAs backing store, plus read-only flash drives and NVRAM, read-only.
-- `src/machine.cpp:493-541`: `clone_stored` runs every backing file through `os::clone_file`.
-- `src/clua-cartesi-filesystem.cpp:70`: `filesystem.clone_file`.
-
-**Evidence:** The test stores a machine with 4 KiB of RAM and confirms that a clone shares the PMAs file's inode with the template. It then adds hard links to that inode with `os.link` until the ext4 limit is reached, which stands in for about 65000 live stored descendants. Finally it calls `clone_stored` from both the template and a descendant. Run on ext4 (`/dev/vda`), in about 1.5 s:
-```
-$ eval $(make -s env); lua5.4 bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua
-read-only files in stored dir: 0000000000010000-1000.bin
-inode template=936448 clone=936448 (shared=true)
-hit EMLINK after 64998 extra links; st_nlink= 65000
-clone_stored(c1) failed: unable to create hard link from '.../c1/0000000000010000-1000.bin' to '.../c-from-c1/0000000000010000-1000.bin': Too many links
-clone_stored(template) failed: unable to create hard link from '.../template/0000000000010000-1000.bin' to '.../c-from-template/0000000000010000-1000.bin': Too many links
-BUG: clone_stored fails with EMLINK once the shared read-only inode reaches the filesystem link limit; no fallback to copy
-```
-The exit status is 1. Once fixed, the test exits 0 and also checks that each clone's root hash matches the template's.
-
-**Scenario:** A validator (a Rollups Node, Dave, or a PRT node such as `doc/recipes/prt.lua`, which calls `clone_stored` from templates and snapshot caches) keeps stored snapshots, for example one per input or checkpoint, all cloned from one stored template or from each other. The shared inode spreads only through `clone_stored` chains: a machine that is loaded, run and then stored gets fresh files. If the node does not prune, the live directories from one lineage reach about 65000. From then on every `clone_stored` from that lineage throws, so the node can no longer snapshot, fork or revert, and it can stall during a dispute until an operator deletes old clones. Filesystems with lower per-inode link limits hit this sooner. XFS and btrfs allow far more links.
-
-**Possible solution:** In `os::clone_file`, also fall back to `copy_file` on `EMLINK`, and arguably on `EACCES` and `EOPNOTSUPP` (the same value as `ENOTSUP` on Linux, but not on every platform). Check that the copied file keeps the source's read-only mode, so that later clones of it are still hard-linked.
-
-**Severity:** Medium. This entry's own reviewers rated the EMLINK case low: it needs about 65000 unpruned clones of one lineage on ext4, and the error is clean. Two later reproductions (listed below) show the same incomplete fallback list fails for reflinks too: `FICLONE` returns `EINVAL` on btrfs with NOCOW (`chattr +C`) directories and on XFS realtime or DAX files, and `EAGAIN` with OpenZFS block cloning. On those hosts `clone_stored` fails every time, and a node that snapshots with it (as the PRT node does) cannot run at all there. Hashes and proofs are never affected and the failure is loud, so this stays below high.
-
-**Risks:** Bug: when the limit is reached, a long-running validator that depends on `clone_stored` loses the ability to snapshot or revert, which could delay its dispute moves. Fix: very low risk. Falling back to a copy only costs disk space and time for the affected file (the PMAs file is 4 KiB). If `EACCES` is added, the fallback must not hide real permission errors on the destination directory. `copy_file` would surface those itself.
-
-**Proof of concept:** `bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`. It needs `python3`, and the `bugs/` directory must be on ext4 or another filesystem with a per-inode link limit. Its temporary files go in a subdirectory next to the test and are removed afterwards. Run from the repo root:
-`eval $(make -s env); lua5.4 bugs/ht-10-clone-stored-emlink-no-fallback/test_clone_stored_emlink.lua`
-
-**ID**: `ht-10-clone-stored-emlink-no-fallback`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `lua-08-clone-file-emlink-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/lua-08-clone-file-emlink-no-fallback/test.lua`. It reaches the same failure through `cartesi.filesystem.clone_file`.
-- `u3-05-clone-file-reflink-einval-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/u3-05-clone-file-reflink-einval-no-fallback/test.lua`. It shows the same incomplete fallback list for reflinks: `ioctl(FICLONE)` returns `EINVAL` when btrfs clones a COW file into a NOCOW (`chattr +C`) directory, and `clone_stored` fails although a copy would work. The fix should fall back to `copy_file` on `EINVAL` as well as `EMLINK`.
-- `u2-03-clone-file-no-fallback-einval-eagain`: run with `eval $(make -s env); lua5.4 bugs/u2-03-clone-file-no-fallback-einval-eagain/test.lua`. It also shows the missing fallback for `EAGAIN`, which some filesystems return from `FICLONE` when a reflink cannot be made right away.
-- `u1-01-clone-file-reflink-einval-eagain-no-copy-fallback`: run with `eval $(make -s env); lua5.4 bugs/u1-01-clone-file-reflink-einval-eagain-no-copy-fallback/test.lua`.
 
 ### B15. frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof
 
@@ -2540,7 +2489,7 @@ It exits with status 1 and prints `BUG:` lines while the defect is present, and 
 
 - `u1-04-clone-file-hardlinks-symlink-instead-of-target`: run with `eval $(make -s env); lua5.4 bugs/u1-04-clone-file-hardlinks-symlink-instead-of-target/test.lua`.
 
-**Related**: [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain).
+**Related**: B08 (fixed).
 
 ### B91. Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs
 

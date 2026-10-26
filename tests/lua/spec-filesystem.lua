@@ -95,6 +95,18 @@ describe("filesystem", function()
         end, "unable to clone file")
     end)
 
+    it("copies read-only files that cannot be hard-linked anymore", function()
+        local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
+        local original = dirname .. "/original"
+        filesystem.write_file("contents", original)
+        assert(os.execute("chmod a-w " .. original))
+        -- Read-only files are hard-linked, so this exceeds the ext4 limit of 65000 links per inode
+        for i = 1, 65000 do
+            filesystem.clone_file(original, dirname .. "/" .. i)
+        end
+        expect.equal(filesystem.read_file(dirname .. "/65000"), "contents")
+    end)
+
     it("truncates and extends files", function()
         local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
         local filename = dirname .. "/log"

@@ -628,7 +628,10 @@ void clone_file(const std::string &from, const std::string &to) {
     } catch (const std::system_error &e) {
         if (e.code().value() == ENOTSUP || // Operation not supported
             e.code().value() == EXDEV ||   // Not on the same mounted filesystem
-            e.code().value() == EPERM      // Can happen if the filesystem does not support hard link
+            e.code().value() == EPERM ||   // Can happen if the filesystem does not support hard link
+            e.code().value() == EMLINK ||  // Too many hard links to the source file
+            e.code().value() == EINVAL ||  // Reference link refused for these files (e.g., btrfs NOCOW)
+            e.code().value() == EAGAIN     // Reference link cannot be made right now (e.g., OpenZFS)
         ) {
             // Fall back to regular copy
             copy_file(from, to, UINT64_MAX);

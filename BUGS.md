@@ -23,6 +23,12 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 3 confirmed issues: 1 high, 2 low.
 
+These are the issues still open. The other 89 issues were fixed on the branch `claude/emulator-0.23-bug-fixes`, one
+commit per fix (B85 and B90 share one), and their entries were removed from this file as they were fixed. Each
+commit message names the bug it fixes, and a few later commits complete earlier fixes ("Follow-up to ..."). The three
+issues below were left open because no small, safe fix exists; each entry has a **Fix status** note with the reason and
+what a proper fix needs.
+
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
@@ -32,6 +38,8 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 ## Issues
 
 ### B52. A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages
+
+**Fix status**: not fixed. Turning the SIGBUS into an error needs disk space reserved in advance (`posix_fallocate`). Doing that always would give up sparse RAM and flash images, which can cost GiBs per machine and per snapshot. Doing it only on request needs a new runtime option in the C API, JSON-RPC and Lua. Recovering from SIGBUS inside the library is fragile, and a logging handler in the JSON-RPC server would only add a diagnostic. This needs a maintainer decision. B64's fix keeps `clear_hash_tree` from punching new holes, so the branch no longer makes this more likely.
 
 **Title**: A full disk kills the process with SIGBUS when a SHARING_ALL machine writes to a sparse page
 
@@ -82,6 +90,8 @@ Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not r
 **Related**: B64 (fixed).
 
 ### B83. Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail
+
+**Fix status**: not fixed. Every safe fix needs a design change. Keeping the parent's listening socket open in the forked child holds the port for the child's whole life and breaks fixed-port setups. Rebinding before shutdown with `SO_REUSEPORT` load-balances between two live servers. Passing the socket over a Unix socket needs a new RPC. Tolerating a failed rebind in callers changes their contract and does not remove the race.
 
 **Title**: Rollback frees the working server's ephemeral port before rebinding the backup to it, so anything that binds that port in the gap makes `revert` fail with EADDRINUSE
 
@@ -141,6 +151,8 @@ It exits with status 1 and prints `BUG: ...` while the bug is present, and print
 **Related**: B58 (fixed).
 
 ### B91. Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs
+
+**Fix status**: not fixed. The fixes for B01 (cache entries are checked against the dense tree on load), B03 (borrowed entries make the cache rebuild) and B92 (`sync_stored` brings the hash tree up to date first) narrow this issue, but a torn write-back of the shared cache after a sync can still make the snapshot unloadable or, if one entry is torn internally, give wrong proofs while `get_root_hash` and `verify_hash_tree` look right. A complete fix needs a durable "clean" marker: mark the cache uninitialized and flush that page synchronously before the first change after a load or sync, and set it back after a full flush on sync or close. `os::mapped_memory` has no synchronous flush today. The other option is to verify every cached entry against memory on load, one page hash per entry.
 
 **Title**: Read-only hash-tree queries after sync_stored rewrite the shared .phtc in place; after a host crash the machine is unloadable, or gives wrong word proofs while the root hash and verify_hash_tree() look correct
 

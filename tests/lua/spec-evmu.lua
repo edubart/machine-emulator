@@ -869,6 +869,13 @@ describe("selectorless ABI", function()
         assert(not pcall(evmu.decode_abi, "bytes32", string.rep("\0", 32)))
         assert(not pcall(evmu.decode_abi, "()", string.rep("\0", 32)))
     end)
+    it("decodes empty arrays of dynamic elements", function()
+        local types = "(bytes[] a,uint256 b)"
+        local decoded = evmu.decode_abi(types, evmu.encode_abi(types, { {}, 1 }))
+        assert(#decoded.a == 0 and decoded.b == evmu.bint(1))
+        assert(#evmu.decode_abi("(string[][])", evmu.encode_abi("(string[][])", { { {} } }))[1][1] == 0)
+        assert(#evmu.decode_calldata("f(bytes[])", evmu.encode_calldata("f(bytes[])", { {} }))[1] == 0)
+    end)
 end)
 
 lester.report()

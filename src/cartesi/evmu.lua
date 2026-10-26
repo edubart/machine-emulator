@@ -739,7 +739,7 @@ local function decode_array(calldata, offset, parsed_type_spec, prefer)
     local result = {}
     local is_dynamic_element = is_dynamic_type(element_type)
     if is_dynamic_element then
-        local last_offset
+        local last_offset = new_offset -- End of data if the array is empty
         -- Dynamic elements: read offset and decode immediately
         for i = 1, size do
             local offset_val = decode_uint(calldata, new_offset + (i - 1) * 32)

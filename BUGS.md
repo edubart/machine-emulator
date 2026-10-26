@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-92 confirmed issues: 6 high, 21 medium, 65 low.
+91 confirmed issues: 6 high, 20 medium, 65 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -40,7 +40,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | frontier_forest_store drops expansions under single-value fixed-point trees | `bugs/lua-02-store-skips-expanded-single-value-tree/` |
 | [B13](#b13-lazily-loaded-forest-used-as-a-value-loses-its-unloaded-subtrees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Lazily loaded forest used as a value loses its unloaded subtrees | `bugs/lua-03-loaded-forest-as-value-loses-lazy-subtrees/` |
 | [B14](#b14-forest-tree-files-keyed-only-by-hash-collide-across-heights-and-representations) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | Forest tree files keyed only by hash collide across heights and representations | `bugs/lua-04-content-addressing-ignores-height-and-representation/` |
-| [B17](#b17-abi-decoder-rejects-canonical-empty-arrays-of-dynamic-types) | medium | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder rejects canonical empty arrays of dynamic types | `bugs/lua-09-evmu-decode-empty-dynamic-element-array/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B50](#b50-rename_stored-and-remove_stored-with-a-trailing-slash-succeed-then-fail-and-skip-the-parent-fsync) | medium | pre-existing | Stored machine API | rename_stored and remove_stored with a trailing slash succeed, then fail and skip the parent fsync | `bugs/w2b-03-rename-remove-stored-trailing-slash/` |
 | [B53](#b53-run-aborts-when-a-non-blocking-console-output-descriptor-is-briefly-full) | medium | pre-existing | Machine console (run) | run aborts when a non-blocking console output descriptor is briefly full | `bugs/w2b-05-console-eagain-fails-run/` |
@@ -1142,53 +1141,6 @@ Exit status 1 with `BUG:` lines means the bug reproduces. Exit status 0 with "al
 **ID**: `lua-06-verify-slice-noncanonical-address`
 
 **Related**: [B20](#b20-frontier_next_proofs-does-not-check-tree-capacity).
-
-### B17. ABI decoder rejects canonical empty arrays of dynamic types
-
-**Title**: evmu `decode_array` returns a nil end offset for an empty `T[]` with dynamic `T`, so `decode_abi`/`decode_calldata` reject canonical data
-
-**Problem:** In `decode_array`, when the element type is dynamic (`bytes`, `string`, `T[]`, or a tuple with dynamic members), the end offset `last_offset` is declared nil and assigned only inside `for i = 1, size`. For an empty array (`size == 0`), the function returns `result, nil` when it should return the offset just past the length word. `decode_tuple` copies that nil into its `new_offset`. If no later dynamic component overwrites it, the tuple returns nil as its end offset, and the final length checks fail on valid, canonical ABI data. The nil also passes up through enclosing arrays and tuples, so `bytes[][]` holding one empty inner array fails too. Because the encoder is correct, `encode_abi` followed by `decode_abi` is not a round trip.
-
-**Origin:** Pre-existing. The `decode_array`/`decode_tuple` code is the same on `main`, where `decode_calldata` already had the bug. This branch adds the public `decode_abi`, which reuses the same helper for event log data and `eth_call` return values. That gives callers a new way to hit the bug.
-
-**Area:** Lua library `cartesi.evmu`, the ABI decoder (`src/cartesi/evmu.lua`).
-
-**Category:** Correctness (canonical input rejected; robustness/DoS).
-
-**Location:**
-- `src/cartesi/evmu.lua:742-750`: `decode_array`, dynamic-element branch (`local last_offset` is set only inside the loop; `return result, last_offset`)
-- `src/cartesi/evmu.lua:776`: `decode_tuple` copies the nil into `new_offset`
-- `src/cartesi/evmu.lua:831`: `decode_calldata` `assert(offset == #calldata_raw, "calldata too long")`
-- `src/cartesi/evmu.lua:846`: `decode_abi` `assert(offset == #data, "ABI data too long")`
-
-**Evidence:** The test encodes values with `evmu.encode_abi`/`encode_calldata` and decodes them back. `encode_abi("(bytes[])", {{}})` produces the canonical 64 bytes (offset `0x20`, length `0`), which is the same as Solidity's `abi.encode(new bytes[](0))`. The non-empty control case passes, and every empty case fails:
-```
-$ eval $(make -s env); lua5.4 bugs/lua-09-evmu-decode-empty-dynamic-element-array/test_decode_empty_dynamic_array.lua
-ok:  abi (bytes[])
-BUG: abi (bytes[]) round trip with empty dynamic-element array fails: .../src/cartesi/evmu.lua:846: ABI data too long
-BUG: abi (string[]) ... :846: ABI data too long
-BUG: abi (uint256,string[]) ... :846: ABI data too long
-BUG: abi ((uint256,bytes)[]) ... :846: ABI data too long
-BUG: abi (bytes[][]) ... :846: ABI data too long
-BUG: calldata f(bytes[]) ... :831: calldata too long
-BUG: calldata f(string[],uint256) ... :831: calldata too long
-exit=1
-```
-Reviewers also found that `(bytes[],uint256)` fails, while `(bytes[],bytes)` decodes because the later dynamic component overwrites the nil. This matches the code path described above.
-
-**Scenario:** A Lua validator or tool built on `cartesi.evmu` decodes something that carries an empty `bytes[]`, `string[]` or tuple-with-dynamic `[]` array: a contract event, an `eth_call` return value, or an input or calldata payload. A real-world example is an empty batch. `decode_abi`/`decode_calldata` raise an error on this legitimate data. If the caller does not wrap the call in `pcall`, its event-processing loop stops, and a PRT validator could miss dispute deadlines. The in-tree experimental PRT node does not use such types today, so it is not affected. The Rollups Node and Dave use the C API, not this Lua library. Hashes, proofs and machine state are not involved.
-
-**Possible solution:** In the dynamic-element branch, initialize the end offset to the end of the offsets head: `local last_offset = new_offset + size * 32`. Equivalently, return `size == 0 and new_offset or last_offset`. A more robust fix tracks the maximum end offset over all elements, instead of assuming the last element's data comes last. The same reasoning applies to `decode_tuple`: it should use the maximum end over its dynamic components.
-
-**Severity:** Medium. A shipped public Lua API deterministically errors on valid, canonical ABI data, and encode followed by decode does not round-trip. The error is loud and catchable with `pcall`, never yields wrong decoded values, does not affect hashes or proofs, and does not hit the in-tree PRT node. Both reviewers rated it medium (arguably low).
-
-**Risks:** Bug: a Lua consumer of `decode_abi`/`decode_calldata` (validator, indexer or tool) can stall or crash on legitimate events or inputs containing empty dynamic-element arrays. Fix: low risk, a local change to the end-offset calculation. Switching to "maximum end" semantics would also change the "too long" check for non-canonical but valid layouts (for example, out-of-order element data), so add round-trip tests for nested and mixed types.
-
-**Proof of concept:** `bugs/lua-09-evmu-decode-empty-dynamic-element-array/test_decode_empty_dynamic_array.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/lua-09-evmu-decode-empty-dynamic-element-array/test_decode_empty_dynamic_array.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 once it is fixed.
-
-**ID**: `lua-09-evmu-decode-empty-dynamic-element-array`
-
-**Related**: [B43](#b43-abi-decoders-trailing-data-check-uses-only-the-last-dynamic-tail).
 
 ### B18. ABI decoder bounds checks overflow and accept out-of-bounds offsets
 
@@ -2649,7 +2601,7 @@ Running the same reversed and aliased inputs through `origin/main`'s `decode_cal
 
 **ID**: `lua-29-evmu-end-offset-last-dynamic-only`
 
-**Related**: [B17](#b17-abi-decoder-rejects-canonical-empty-arrays-of-dynamic-types).
+**Related**: B17 (fixed).
 
 ### B44. JSON parsers truncate 64-bit log2 sizes in access logs and proofs without range checks
 

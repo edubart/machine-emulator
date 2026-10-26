@@ -675,12 +675,16 @@ describe("backing stores", function()
             cartesi.machine:remove_stored(stored_dirname)
         end)
 
+        local flash = { start = 0x0080000000000000, length = 0x2000 }
+        local ram = { start = 0x80000000, length = 0x10000 }
         for _, case in ipairs({
-            { shared = true, sharing = cartesi.SHARING_CONFIG, expected_data = "XB" },
-            { shared = false, sharing = cartesi.SHARING_CONFIG, expected_data = "BB" },
-            { shared = false, sharing = cartesi.SHARING_NONE, expected_data = "BB" },
+            { range = flash, shared = true, sharing = cartesi.SHARING_CONFIG, expected_data = "XB" },
+            { range = flash, shared = false, sharing = cartesi.SHARING_CONFIG, expected_data = "BB" },
+            { range = flash, shared = false, sharing = cartesi.SHARING_NONE, expected_data = "BB" },
+            { range = ram, shared = true, sharing = cartesi.SHARING_CONFIG, expected_data = "XB" },
         }) do
-            local _ <close>, replacement_filename = filesystem.write_scope_temp_file(b_data)
+            local replacement_data = string.rep("B", case.range.length)
+            local _ <close>, replacement_filename = filesystem.write_scope_temp_file(replacement_data)
             local replaced_dirname = filesystem.temp_pathname()
             local _ <close> = tests_util.scope_exit(function()
                 cartesi.machine:remove_stored(replaced_dirname)
@@ -689,12 +693,12 @@ describe("backing stores", function()
             do -- replace memory range, modify it and store
                 local machine <close> = cartesi.machine(stored_dirname, {}, cartesi.SHARING_NONE)
                 machine:replace_memory_range({
-                    start = 0x0080000000000000,
-                    length = 0x2000,
+                    start = case.range.start,
+                    length = case.range.length,
                     backing_store = { data_filename = replacement_filename, shared = case.shared },
                 })
                 expected_root_hash = machine:get_root_hash()
-                machine:write_memory(0x0080000000000000, "X")
+                machine:write_memory(case.range.start, "X")
                 if case.shared then
                     expected_root_hash = machine:get_root_hash()
                 end
@@ -702,7 +706,7 @@ describe("backing stores", function()
             end
             do -- shared replacements keep changes, unshared ones roll back to the replacement
                 local machine <close> = cartesi.machine(replaced_dirname, {}, cartesi.SHARING_NONE)
-                expect.equal(machine:read_memory(0x0080000000000000, 2), case.expected_data)
+                expect.equal(machine:read_memory(case.range.start, 2), case.expected_data)
                 expect.equal(machine:get_root_hash(), expected_root_hash)
             end
         end

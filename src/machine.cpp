@@ -712,6 +712,16 @@ void machine::replace_memory_range(const memory_range_config &config) {
                 }
             }
         }
+        // Other replaceable ranges are identified by their fixed start, already matched by m_ars.replace()
+        if (resolved.start == AR_RAM_START) {
+            c.ram.backing_store = resolved.backing_store;
+        } else if (resolved.start == AR_DTB_START) {
+            c.dtb.backing_store = resolved.backing_store;
+        } else if (resolved.start == AR_UARCH_RAM_START) {
+            c.uarch.ram.backing_store = resolved.backing_store;
+        } else if (resolved.start == AR_CMIO_TX_BUFFER_START) {
+            c.cmio.tx_buffer.backing_store = resolved.backing_store;
+        }
     };
     update_backing_store(m_c);
     if (m_stored_c) {

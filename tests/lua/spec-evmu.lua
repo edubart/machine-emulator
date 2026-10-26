@@ -451,6 +451,13 @@ describe("cartesi evmu", function()
         check_parse_func_sig_error("_() returns (int, ", 'expected type spec at line 1, column 19 (got "")')
     end)
 
+    it("should not retain parsed function signatures after garbage collection", function()
+        local weak = setmetatable({}, { __mode = "v" })
+        weak[1] = evmu.parse_func_sig("cache_test(uint256)")
+        collectgarbage("collect")
+        assert(weak[1] == nil, "parsed function signature was not collected")
+    end)
+
     it("calldata encoding and decoding", function()
         -- check calldata encoding
         check_encode_decode_calldata_hex("_()", {}, "0xb7ba4583")

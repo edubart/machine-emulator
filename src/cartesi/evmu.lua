@@ -270,9 +270,9 @@ end
 
 -- parsed function signature cache
 -- this avoids repeated parsing of the same function signature
--- a parsed function signature will remain in cache at least as long as a string with that signature exists in Lua
--- once the string is collected, the corresponding parsed signature may be collected too
-local parsed_func_sig_cache = setmetatable({}, { __mode = "k" })
+-- entries are weak values, so they are dropped by the garbage collector and the cache does not grow without bound
+-- (weak string keys would never be collected)
+local parsed_func_sig_cache = setmetatable({}, { __mode = "v" })
 
 -- returns a parsed function signature and the corresponding canonic signature
 function _M.parse_func_sig(sig)

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-35 confirmed issues: 2 high, 8 medium, 25 low.
+34 confirmed issues: 2 high, 8 medium, 24 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -54,7 +54,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
-| [B78](#b78-evmu-function-signature-cache-never-evicts-entries) | low | pre-existing | Lua cartesi.evmu | evmu function-signature cache never evicts entries | `bugs/p3-12-evmu-func-sig-cache-never-evicts/` |
 | [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
 | [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
@@ -1390,47 +1389,6 @@ The test exits 1 while the bug is present. It exits 0 once `tojson` raises an er
 **ID**: `p3-08-tojson-uint64-written-as-negative`
 
 **Related**: [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices).
-
-### B78. evmu function-signature cache never evicts entries
-
-**Title**: evmu parse_func_sig cache is weak-keyed by strings, which Lua never evicts, so every distinct signature stays cached for the life of the process
-
-**Problem**: `parsed_func_sig_cache = setmetatable({}, { __mode = "k" })` is keyed by the raw signature string. The code comment says a cached entry "may be collected" once the string is collected. Lua 5.4 never does this. The manual (section 2.5.4) says only objects with an explicit construction are removed from weak tables, and strings are not among them. So the weak mode has no effect: each textually distinct signature passed to `encode_calldata`, `encode_calldata_hex`, `decode_calldata` or `decode_calldata_hex` leaves its parsed AST, canonical signature and 4-byte selector in the cache until the process exits. Each entry costs about 1.26 KB.
-
-**Origin**: pre-existing. The same line is at `src/cartesi/evmu.lua:277` on `origin/main`. This branch adds 19 lines to `evmu.lua`, but none of them touch the cache.
-
-**Area**: Lua `cartesi.evmu` (ABI encoding/decoding).
-
-**Category**: resource-leak.
-
-**Location**:
-- `src/cartesi/evmu.lua:273-277`: the cache declaration and its misleading comment
-- `src/cartesi/evmu.lua:280-293`: `_M.parse_func_sig`, which looks up and inserts entries
-- `src/cartesi/evmu.lua:614`: call from `encode_calldata*`
-- `src/cartesi/evmu.lua:825`: call from `decode_calldata*`
-
-**Evidence**: The test makes one warm-up call, then calls `evmu.encode_calldata` with 20,000 distinct signatures `f<i>(uint256,bytes32)` that are never referenced again, then runs a full GC. It reads the cache through `debug.getupvalue(evmu.parse_func_sig, ...)`. All 20,001 entries are still present, and about 24 MiB stays allocated:
-```
-$ eval $(make -s env); timeout 120 lua5.4 bugs/p3-12-evmu-func-sig-cache-never-evicts/test.lua
-signatures=20000 retained=24652.9 KiB (1262 bytes/sig) cache_entries=20001
-BUG: parse_func_sig cache retained 20001 entries / 24.1 MiB after full GC for 20000 no-longer-referenced signature strings (weak string keys never evict)
-```
-The test exits with 1 when the bug is present and 0 once entries are collected. A reviewer also ran it with 100,000 signatures, and about 121,459 KiB stayed allocated.
-
-**Scenario**: Memory grows with the number of distinct signature strings, not with the number of calls. The PRT node, the `cartesi-rollup-data` recipe and other validators with fixed ABIs pass a small constant set of signatures, so their growth is bounded and tiny. The leak matters for long-running generic tools built on the shipped library: an indexer, relay or ABI decoder that builds signature strings dynamically from many contracts' ABI JSON or from user-supplied ABIs, or that sees textual variants such as parameter names or whitespace. These caches grow without bound and are never reclaimed, so the process can eventually run out of memory. Hashes, proofs and machine state are not affected.
-
-**Possible solution**: Replace the weak table with a bounded cache, such as a small LRU or a size-capped table cleared when full. Optionally, key secondary lookups on the canonical signature so textual variants share one entry. At minimum, remove `__mode = "k"` and fix the comment to say the cache is permanent, so the behavior is documented and not implied to be self-cleaning.
-
-**Severity**: low. Both reviewers agree it is a real leak of about 1.2 KB per distinct signature string, with no effect on correctness, hashes, proofs or determinism. Fixed-ABI users such as the PRT node are effectively unaffected. Only unusual long-running processes that feed in unbounded distinct signatures grow without limit.
-
-**Risks**: Of the bug: slow, unbounded memory growth in long-running generic decoders, ending in an OOM crash. Of the fix: a bounded cache can re-parse signatures on cache misses, which costs some CPU for workloads that cycle through more signatures than the cap holds. Returned `parsed_func_sig` tables were previously shared across calls and lived forever, so any caller that mutates or holds them is unaffected but must not depend on getting the same table identity back after eviction.
-
-**Proof of concept**: `bugs/p3-12-evmu-func-sig-cache-never-evicts/test.lua`. Run from the repo root:
-```
-eval $(make -s env); timeout 120 lua5.4 bugs/p3-12-evmu-func-sig-cache-never-evicts/test.lua
-```
-
-**ID**: `p3-12-evmu-func-sig-cache-never-evicts`
 
 ### B79. bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64
 

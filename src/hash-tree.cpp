@@ -946,6 +946,10 @@ static int get_concurrency([[maybe_unused]] uint64_t value) {
 #endif
 }
 
+void hash_tree::set_concurrency(uint64_t concurrency) noexcept {
+    m_concurrency = get_concurrency(concurrency);
+}
+
 hash_tree::hash_tree(const hash_tree_config &config, uint64_t concurrency, const nodes_type &init_sparse_nodes) :
     m_page_cache{variant_hasher{config.hash_function}, static_cast<size_t>(config.phtc_size), config.phtc_filename,
         config.shared},

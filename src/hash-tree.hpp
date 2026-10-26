@@ -189,6 +189,9 @@ public:
 
     hash_tree_stats get_stats(bool clear = false) noexcept;
 
+    /// \brief Changes the concurrency used by subsequent updates
+    void set_concurrency(uint64_t concurrency) noexcept;
+
 private:
     using changed_address_ranges = std::pmr::vector<int>;
 

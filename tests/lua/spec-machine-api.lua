@@ -886,5 +886,29 @@ describe("move remote cleanup", function()
     end)
 end)
 
+describe("remote hash-tree concurrency", function()
+    local jsonrpc = require("cartesi.jsonrpc")
+
+    -- OpenMP spawns worker threads only when a hash-tree update uses a concurrency above 1
+    local function count_threads_after_update(create_runtime, set_runtime)
+        local server <close>, _, pid = jsonrpc.spawn_server()
+        server:set_cleanup_call(jsonrpc.SHUTDOWN):create({ ram = { length = 0x100000 } }, create_runtime)
+        if set_runtime then
+            server:set_runtime_config(set_runtime)
+        end
+        server:write_memory(cartesi.AR_RAM_START, string.rep("\1", 0x100000))
+        server:get_root_hash()
+        local tasks <close> = assert(io.popen("ls /proc/" .. pid .. "/task"))
+        local _, count = tasks:read("a"):gsub("\n", "")
+        return count
+    end
+
+    it("should apply update_hash_tree changed by set_runtime_config", function()
+        local one = { concurrency = { update_hash_tree = 1 } }
+        local two = { concurrency = { update_hash_tree = 2 } }
+        expect.equal(count_threads_after_update(one, two), count_threads_after_update(two))
+    end)
+end)
+
 lester.report()
 lester.exit()

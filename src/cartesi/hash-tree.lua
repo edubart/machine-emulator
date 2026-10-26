@@ -513,7 +513,11 @@ local function get_tree_path(directory, hash, height)
     return directory .. "/" .. cartesi.tohex(hash) .. "-" .. height .. ".json"
 end
 
-local function get_parent_directory(path) return path:match("^(.*)/[^/]*$") or "." end
+-- Like std::filesystem::path::parent_path(), a name directly under the root has the root as parent.
+local function get_parent_directory(path)
+    local parent = path:match("^(.*)/[^/]*$") or "."
+    return parent == "" and "/" or parent
+end
 
 -- Writes through a temporary file in the same directory, synced before the rename, so the name
 -- never appears with incomplete contents. Making the name itself durable is left to the caller.

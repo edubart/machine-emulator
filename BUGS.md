@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-62 confirmed issues: 4 high, 12 medium, 46 low.
+61 confirmed issues: 4 high, 12 medium, 45 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -52,7 +52,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
-| [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for files directly under the filesystem root | `bugs/lua-24-hash-tree-root-parent-directory/` |
 | [B36](#b36-temporary-files-from-killed-stores-are-never-cleaned-up) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Temporary files from killed stores are never cleaned up | `bugs/lua-25-leftover-temp-files/` |
 | [B37](#b37-filesystemtemp_pathname-returns-a-deleted-tmp-name-that-another-user-can-claim) | low | introduced by branch | Lua cartesi.filesystem | filesystem.temp_pathname returns a deleted /tmp name that another user can claim | `bugs/lua-27-temp-pathname-toctou/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
@@ -1155,68 +1154,6 @@ eval $(make -s env); timeout 300 lua5.4 bugs/lua-22-lual-error-in-catch-leaks-ex
 It exits with 1 and prints `BUG:` lines while the leak is present. It exits with 0 and prints `OK: no per-call leak detected` once the leak is fixed.
 
 **ID**: `lua-22-lual-error-in-catch-leaks-exceptions`
-
-### B34. Frontier stores fail for files directly under the filesystem root
-
-**Title**: hash-tree `frontier_store` / `frontier_forest_store` raise "unable to sync directory ''" for a file directly under `/`, after the file has already been replaced
-
-**Problem**: `get_parent_directory(path)` is `path:match("^(.*)/[^/]*$") or "."`. For a path directly under the root, such as `/frontier.json`, the capture is `""`, not `"/"`. In Lua `""` is truthy, so the `"."` fallback never applies.
-- `write_file` calls `fs.new_temporary_file("", ...)`. That still works, because the template becomes `/<prefix>.XXXXXX`. The temporary file is synced and renamed onto the target, so the new frontier is committed.
-- `frontier_store` and `frontier_forest_store` then call `fs.sync_directory("")`. `open("", O_DIRECTORY)` fails with ENOENT, so the store raises.
-
-Result: the public store APIs report failure even though the new file is already in place, and the rename is never made durable by a directory fsync. The C++ counterpart (`parent_directory` in machine.cpp, which uses `std::filesystem::path::parent_path()`) correctly returns `/`. Paths with repeated leading slashes, such as `//x`, behave the same way.
-
-**Origin**: introduced by this branch. `get_parent_directory`, `write_file` and the `sync_directory` calls do not exist in `main`'s hash-tree.lua.
-
-**Area**: Lua library `cartesi.hash-tree` (frontier and frontier-forest persistence); `cartesi-machine` CLI (`frontier:<filename>` / `outputs_frontier:<filename>` options).
-
-**Category**: correctness / durability (wrong error reporting after a commit; missing fsync).
-
-**Location**:
-- `src/cartesi/hash-tree.lua:505`: `get_parent_directory`
-- `src/cartesi/hash-tree.lua:510`: `write_file` (temporary file directory)
-- `src/cartesi/hash-tree.lua:937`: `frontier_store` → `fs.sync_directory(get_parent_directory(path))`
-- `src/cartesi/hash-tree.lua:989`: `frontier_forest_store` → `fs.sync_directory(get_parent_directory(frontier_path))`
-- `src/cartesi-machine.lua:3276`: the CLI's `store_frontier` passes the user-given filename to `hash_tree.frontier_store`
-
-**Evidence**: the test runs as root. It re-executes itself in a private mount namespace, chrooted into a tmpfs-backed overlay of `/`, so the real root is never written. Inside, it stores a frontier at `/frontier-<t>.json` and a forest frontier at `/forest-frontier-<t>.json`. Both calls raise, yet both files exist with the new contents. `sync_directory("/")` succeeds and `sync_directory("")` fails. Run command: `eval $(make -s env); lua5.4 bugs/lua-24-hash-tree-root-parent-directory/test-root-parent-directory.lua`
-```
-frontier_store(/frontier-1792962320.json): ok=false err=.../hash-tree.lua:937: unable to sync directory '': open() failed: No such file or directory file_exists=true
-frontier_forest_store(/forest-trees-1792962320, /forest-frontier-1792962320.json): ok=false err=.../hash-tree.lua:989: unable to sync directory '': open() failed: No such file or directory file_exists=true
-sync_directory('/') ok=true
-sync_directory('')  -> unable to sync directory '': open() failed: No such file or directory
-rc=1
-```
-
-**Scenario**:
-- A validator node or tool running in a container keeps its frontier at a root-level path such as `/state.json` or `/frontier.json`. Every `frontier_store` / `frontier_forest_store` raises, and every `cartesi-machine ... frontier:/frontier.json` run fails the same way.
-- A caller that treats the error as "store failed, old state still current" is wrong: the frontier has already been replaced. With `frontier_forest_store`, the trees are already written and `forest.directory` is already updated.
-- Because the directory is never fsynced, a crash shortly afterwards can lose the rename.
-- Hashes, proofs and dispute outcomes are not affected.
-
-**Possible solution**: map an empty capture to `/`, matching `std::filesystem::path::parent_path()`. For example:
-```lua
-local function get_parent_directory(path)
-    local d = path:match("^(.*)/[^/]*$")
-    if d == nil then return "." end
-    if d:match("^/*$") then return "/" end
-    return d
-end
-```
-
-**Severity**: low. Both reviewers rated it low, and the prover agrees. It only triggers for frontier files stored directly in the filesystem root, which is rare outside containers. When it triggers it fails reliably and visibly: there is a spurious error after a successful commit, plus one skipped directory fsync. It never corrupts stored data, hashes or proofs, and it does not hang.
-
-**Risks**:
-- Of the bug: callers may misjudge whether the persisted state changed, or abort at a store boundary. In root-level layouts the rename is not durable after a crash.
-- Of the fix: minimal. The helper is local to hash-tree.lua and only used for the temporary-file directory and the directory sync. Returning `/` for root-level paths gives the same temporary-file location and makes the sync succeed. Relative paths and deeper absolute paths are unchanged.
-
-**Proof of concept**: `bugs/lua-24-hash-tree-root-parent-directory/test-root-parent-directory.lua`. It must run as root and needs `unshare`, overlayfs and `chroot`. It sandboxes itself in a private mount namespace over a throwaway overlay of `/`. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/lua-24-hash-tree-root-parent-directory/test-root-parent-directory.lua
-```
-Exit status 1 together with `BUG:` lines means the bug reproduced; exit status 0 means it is fixed.
-
-**ID**: `lua-24-hash-tree-root-parent-directory`
 
 ### B35. collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image
 
@@ -2498,7 +2435,7 @@ eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backsla
 
 **ID**: `w2a-07-hash-tree-lua-parent-dir-ignores-backslash`
 
-**Related**: [B34](#b34-frontier-stores-fail-for-files-directly-under-the-filesystem-root), [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows).
+**Related**: B34 (fixed), [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows).
 
 ### B67. Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable
 

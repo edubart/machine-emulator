@@ -243,6 +243,30 @@ describe("hash-tree.lua", function()
             expect.equal(table.concat(fs.list_directory(directory), ","), "frontier.json")
         end)
 
+        it("syncs the root directory for a file directly under it", function()
+            local _ <close>, directory = new_scope_directory()
+            -- Redirect the file into a scratch directory, recording the directories used for it.
+            local dirs = {}
+            local new_temporary_file, rename_file, sync_directory =
+                fs.new_temporary_file, fs.rename_file, fs.sync_directory
+            fs.new_temporary_file = function(dirname, prefix)
+                dirs[#dirs + 1] = dirname
+                return new_temporary_file(directory, prefix)
+            end
+            fs.rename_file = function(from, to)
+                rename_file(from, directory .. to)
+            end
+            fs.sync_directory = function(path)
+                dirs[#dirs + 1] = path
+                sync_directory(directory)
+            end
+            local ok, err = pcall(hash_tree.frontier_store, hash_tree.frontier(4, "keccak256"), "/frontier.json")
+            fs.new_temporary_file, fs.rename_file, fs.sync_directory = new_temporary_file, rename_file, sync_directory
+            assert(ok, err)
+            expect.equal(table.concat(dirs, ","), "/,/")
+            expect.equal(#hash_tree.frontier_load(directory .. "/frontier.json", 4, "keccak256"), 5)
+        end)
+
         it("rejects a frontier of another height, invalid entries, or a full frontier with other levels", function()
             local _ <close>, directory = new_scope_directory()
             local path = directory .. "/frontier.json"

@@ -24,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -1770,9 +1771,18 @@ void machine::write_memory(uint64_t paddr, const unsigned char *data, uint64_t l
         static_assert(AR_SHADOW_STATE_LENGTH == sizeof(m_s->shadow));
         // Make sure we marked as dirty whatever pages were in the write TLB
         mark_write_tlb_dirty_pages();
+        // Save current shadow so it can be restored if the new one is invalid
+        const auto saved_shadow = std::make_unique<shadow_state>(m_s->shadow);
         // Overwrite shadow
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         memcpy(reinterpret_cast<unsigned char *>(&m_s->shadow), data, sizeof(m_s->shadow));
+        // Reject the same inconsistencies that are rejected on load
+        try {
+            validate_processor_shadow(m_r.skip_version_check);
+        } catch (...) {
+            m_s->shadow = *saved_shadow;
+            throw;
+        }
         // Reinitialize the hot TLB to reflect changes in the shadow TLB
         init_hot_tlb_contents();
         return;

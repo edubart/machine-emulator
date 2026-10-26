@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-24 confirmed issues: 2 high, 6 medium, 16 low.
+23 confirmed issues: 2 high, 6 medium, 15 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -41,7 +41,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
-| [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
@@ -688,64 +687,6 @@ In the shared scenario the processor did not run, so the flash range is the only
 - `w2a-01-store-after-replace-memory-range-uses-stale-config`: run with `eval $(make -s env); lua5.4 bugs/w2a-01-store-after-replace-memory-range-uses-stale-config/test.lua`.
 
 **Related**: B01 (fixed).
-
-### B60. Full-shadow write_memory skips validation and never marks the TLB padding page dirty
-
-**Title**: `write_memory` full-shadow snapshot path skips shadow validation and never marks the TLB padding page dirty
-
-**Problem**: `machine::write_memory` has a special case for a write that covers the whole processor shadow (`paddr == AR_SHADOW_STATE_START && length == AR_SHADOW_STATE_LENGTH`, 32 KiB). This is the documented way to make manual snapshots with `read_memory`/`write_memory`. The path calls `mark_write_tlb_dirty_pages()`, memcpys the buffer over `m_s->shadow`, calls `init_hot_tlb_contents()` and returns. Two things are missing:
-1. **No dirty marking.** `mark_always_dirty_pages` re-hashes only the registers page (`0x0-0x1000`) and the TLB (`0x1000-0x7000`). The last shadow page (`0x7000-0x8000`, `tlb_padding_`) is in the hash tree but is never marked dirty. A non-zero byte written there leaves `get_root_hash` stale: `verify_hash_tree` returns false, and a later `clear_hash_tree` gives a different root for the same state.
-2. **No validation.** The path never calls `validate_processor_shadow()`, which the load path uses. It accepts a non-zero `x0`, an `iunrep` that does not match the config, and non-pristine padding. `store` then writes a directory that cannot be loaded.
-
-Changes to the registers and TLB are re-hashed correctly because those pages are always dirty. Garbage TLB contents are not a safety issue, because hot TLB slots are checked lazily (`shadow_tlb_verify_slot`).
-
-**Origin**: Pre-existing. `origin/main` has the same code.
-
-**Area**: C API `cm_write_memory` (and the Lua/JSON-RPC bindings that call it): `src/machine.cpp`, `src/machine-address-ranges.cpp`.
-
-**Category**: Correctness: the hash tree gets out of sync with memory, and invalid state is accepted.
-
-**Location**:
-- `src/machine.cpp:1748-1761`: the full-shadow special case in `machine::write_memory`. It has no `validate_processor_shadow()` call and marks no shadow pages dirty.
-- `src/machine-address-ranges.cpp:128-133`: `mark_always_dirty_pages` marks only `AR_SHADOW_REGISTERS_*` and `AR_SHADOW_TLB_*`, not the `tlb_padding_` page at shadow offset `0x7000`.
-- `src/machine.cpp:196-225`: `validate_processor_shadow`, the checks that run on load only (x0 at 211, iunrep at 215, padding at 223).
-
-**Evidence**: `test.lua` builds a 1 MiB RAM machine and reads the 32 KiB shadow with `read_memory`. It then runs three cases:
-- puts `'X'` at offset `0x7000` and writes the buffer back with `write_memory`, then checks the root hash, `verify_hash_tree`, `clear_hash_tree`, and `store` followed by a load;
-- sets `x0 = 0x1234`;
-- flips bit 0 of `iunrep`.
-
-It exits 1. Run it with `eval $(make -s env); lua5.4 bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/test.lua`:
-```
-page 0x7000 (in shadow state) is not marked dirty but is dirty
-root before: 0xebef6477...710f27ad
-root after : 0xebef6477...710f27ad
-verify_hash_tree: false
-BUG: root hash unchanged after writing 'X' at shadow offset 0x7000 (page not marked dirty)
-root after clear_hash_tree: 0x066ca414...ba4e7620
-BUG: root hash changes after clear_hash_tree (stale hash tree)
-BUG: stored machine cannot be loaded: shadow padding bytes are corrupt
-BUG: x0 accepted by write_memory, stored machine unloadable: x0 register is corrupt
-BUG: iunrep accepted by write_memory, stored machine unloadable: iunrep mismatch between shadow state and config
-```
-
-**Scenario**: An application or tool snapshots and restores machine state with the `read_memory`/`write_memory` shadow path, for example to share a layout between machines. It writes back a buffer that is corrupted, truncated and re-padded, or assembled by hand. `write_memory` succeeds. The machine reports a root hash that does not commit to its real state, `verify_hash_tree` fails, and the directory written by `store` fails to load. A buffer that came straight from `read_memory` is always clean, and none of the in-scope callers use this path (the PRT recipes, the Rollups Node, Dave, the `cartesi-machine` CLI). `tests/lua/pre-thrash-tlb.lua` writes only the TLB region. So an honest validator does not hit this.
-
-**Possible solution**: In the full-shadow branch, check the incoming buffer before the memcpy: `x0 == 0`, `iunrep` matches the config, and both padding areas are pristine. Throw `std::invalid_argument` on a failure. One way is to factor the checks out of `validate_processor_shadow` into a function that takes a `processor_state` and leaves the old state untouched on error. Also mark the whole shadow range dirty after the copy (`mark_dirty_pages_and_up(0, AR_SHADOW_STATE_LENGTH)` on the shadow address range), or add the `tlb_padding_` page to `mark_always_dirty_pages`. Validation alone keeps the padding pristine, so the hash cannot go stale; explicit dirty marking adds a second line of defence.
-
-**Severity**: Low. Both reviewers agree. Triggering it takes a malformed or crafted buffer passed to a niche public API path that no PRT, Rollups or CLI flow uses. An honest player cannot lose a dispute through it. The impact is a stale root hash, a failing `verify_hash_tree` and an unloadable store, all of which follow from bad input that should have been rejected. There is no memory corruption.
-
-**Risks**:
-- *Bug*: an API user gets a root hash and proofs that do not match the machine's memory, plus a stored snapshot that cannot be loaded. The problem shows up later and far from its cause.
-- *Fix*: rejecting invalid buffers may break callers that relied on loose acceptance. A test or tool that deliberately writes non-zero `x0` or padding would now get an exception. Validating before the copy keeps the machine unchanged on failure. Marking the padding page dirty costs one extra page hash per snapshot write, which is negligible.
-
-**Proof of concept**: `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/test.lua`. It writes its temporary stored directories next to itself and removes them. Run from the repo root with `eval $(make -s env); lua5.4 bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/test.lua`. Exit 1 means the bug is present. Exit 0 with `OK: no defect`, or a "write_memory rejected ... (fixed?)" line, means it is fixed.
-
-**ID**: `w2b-12-shadow-snapshot-write-unvalidated-not-dirty`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `w2a-03-write-memory-full-shadow-skips-padding-page-dirty`: run with `eval $(make -s env); lua5.4 bugs/w2a-03-write-memory-full-shadow-skips-padding-page-dirty/test.lua`.
 
 ### B64. clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS
 

@@ -691,6 +691,25 @@ for _, variant in ipairs(variants) do
                 m:write_memory(cartesi.AR_SHADOW_STATE_START, shadow)
                 expect.equal(m:get_root_hash(), tests_util.calculate_emulator_hash(m))
             end)
+
+            it("should reject an inconsistent shadow and keep the machine unchanged", function()
+                local m <close> = variant.create({ ram = { length = 1 << 20 } })
+                local shadow = m:read_memory(cartesi.AR_SHADOW_STATE_START, cartesi.AR_SHADOW_STATE_LENGTH)
+                local root = m:get_root_hash()
+                -- Non-zero byte in the TLB padding page, which is not always dirty
+                local padding = shadow:sub(1, 0x7000) .. "X" .. shadow:sub(0x7002)
+                expect.fail(function()
+                    m:write_memory(cartesi.AR_SHADOW_STATE_START, padding)
+                end, "shadow padding bytes are corrupt")
+                local x0 = m:get_reg_address("x0") - cartesi.AR_SHADOW_STATE_START
+                local nonzero_x0 = shadow:sub(1, x0) .. string.pack("<I8", 1) .. shadow:sub(x0 + 9)
+                expect.fail(function()
+                    m:write_memory(cartesi.AR_SHADOW_STATE_START, nonzero_x0)
+                end, "x0 register is corrupt")
+                expect.equal(m:read_memory(cartesi.AR_SHADOW_STATE_START, cartesi.AR_SHADOW_STATE_LENGTH), shadow)
+                expect.equal(m:get_root_hash(), root)
+                expect.truthy(m:verify_hash_tree())
+            end)
         end)
     end)
 end

@@ -342,8 +342,8 @@ bool hash_tree::return_updated_dirty_pages(address_ranges ars, dirty_pages &batc
         auto &ar = ars[ar_index];
         auto offset = br.get_paddr_page() - ar.get_start();
         if (page_hash_tree_cache::return_entry(br)) {
-            // If page hash was changed during update
-            if (changed) {
+            // If page hash was changed during update, or a previous update may have stopped after changing it
+            if (changed || m_bubble_up_unchanged_pages) {
                 // If we haven't already done so, add changed address range to list
                 try_push_back(changed_ars, ar_index);
                 // If page was marked dirty but was not in fact dirty
@@ -779,6 +779,9 @@ bool hash_tree::update(address_ranges ars) {
             ars[ar_index].get_dirty_page_tree().clean();
         }
     }
+    // A failed update, like an interrupted update that left stored hash trees behind, may have changed page hashes
+    // without updating their ancestors. Until an update succeeds, it cannot skip ancestors of unchanged dirty pages.
+    m_bubble_up_unchanged_pages = !update_succeeded;
     return update_succeeded;
 }
 

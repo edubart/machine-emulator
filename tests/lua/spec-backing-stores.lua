@@ -804,12 +804,6 @@ describe("backing stores", function()
                 end,
             },
             {
-                "borrowed entry",
-                function(data)
-                    return write_word(data, entries_offset + 24, 1)
-                end,
-            },
-            {
                 "out-of-range payload",
                 function(data)
                     return write_word(data, entries_offset + 32, capacity)
@@ -921,6 +915,36 @@ describe("backing stores", function()
             end
         end)
 
+        it("should discard a cache with borrowed entries left by an interrupted update", function()
+            local directory = filesystem.temp_pathname()
+            do
+                local machine <close> = cartesi.machine({
+                    ram = { length = 2 * capacity * 4096 },
+                    hash_tree = { phtc_size = capacity },
+                })
+                machine:write_memory(cartesi.AR_RAM_START, string.rep("A", 2 * capacity * 4096))
+                machine:get_root_hash()
+                machine:store(directory)
+            end
+            local _ <close> = tests_util.scope_exit(function()
+                cartesi.machine:remove_stored(directory)
+            end)
+            local filename = directory .. "/hash_tree.phtc"
+            local data = filesystem.read_file(filename)
+            -- The interrupted entry already holds the new page contents, but not their hashes yet.
+            local paddr_page = string.unpack("<I8", data, entries_offset + 17)
+            local payload_index = string.unpack("<I8", data, entries_offset + 33)
+            local page_offset = payloads_offset + payload_index * ((#data - payloads_offset) // capacity)
+            data = write_word(data, entries_offset + 24, 1)
+            data = data:sub(1, page_offset) .. string.rep("B", 4096) .. data:sub(page_offset + 4097)
+            filesystem.write_file(data, filename)
+            for _, sharing in ipairs({ cartesi.SHARING_NONE, cartesi.SHARING_ALL }) do
+                local machine <close> = cartesi.machine(directory, {}, sharing)
+                machine:write_memory(paddr_page, string.rep("B", 4096))
+                expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
+            end
+        end)
+
         it("should evict loaded entries without changing cached payloads", function()
             local directory = filesystem.temp_pathname()
             do
@@ -954,6 +978,34 @@ describe("backing stores", function()
             machine:write_memory(0xa0000000, string.rep("C", 4096))
             expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
         end)
+    end)
+
+    it("should rehash ancestors of page hashes stored by an interrupted update", function()
+        local ram_length = 0x10000
+        local page = string.rep("B", 4096)
+        local page_hash
+        do
+            local machine <close> = cartesi.machine({ ram = { length = ram_length } })
+            machine:write_memory(cartesi.AR_RAM_START, page)
+            page_hash = machine:get_node_hash(cartesi.AR_RAM_START, cartesi.HASH_TREE_LOG2_PAGE_SIZE)
+        end
+        local directory = filesystem.temp_pathname()
+        do
+            local machine <close> = cartesi.machine({ ram = { length = ram_length } }, {}, directory)
+            machine:get_root_hash()
+            -- Leave the page dirty in the stored dirty-page tree.
+            machine:write_memory(cartesi.AR_RAM_START, page)
+        end
+        local _ <close> = tests_util.scope_exit(function()
+            cartesi.machine:remove_stored(directory)
+        end)
+        -- Store the new page hash in its dense-tree leaf, as an update interrupted before its ancestors would.
+        local filename = string.format("%s/%016x-%x.dht", directory, cartesi.AR_RAM_START, ram_length)
+        local data = filesystem.read_file(filename)
+        local leaf_offset = (ram_length // 4096) * #page_hash
+        filesystem.write_file(data:sub(1, leaf_offset) .. page_hash .. data:sub(leaf_offset + #page_hash + 1), filename)
+        local machine <close> = cartesi.machine(directory, {}, cartesi.SHARING_NONE)
+        expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
     end)
 
     describe("page hash-tree cache eviction", function()

@@ -233,6 +233,7 @@ private:
     std::pmr::unsynchronized_pool_resource m_memory_pool;
     uint64_t m_sparse_node_hashes{0};
     std::array<uint64_t, HASH_TREE_LOG2_ROOT_SIZE> m_dense_node_hashes{};
+    bool m_bubble_up_unchanged_pages{true}; ///< Whether no update succeeded since construction or the last failure
 };
 
 } // namespace cartesi

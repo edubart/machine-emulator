@@ -428,6 +428,13 @@ public:
         m_pristine_page_hash_tree{entry_payload::get_pristine_page_hash_tree(std::forward<H>(h))} {
         m_map.reserve(num_entries);
 
+        // Entries stay borrowed only while being updated, so a borrowed entry in a stored cache means the process
+        // stopped during an update and left entries half-updated. The cache can be rebuilt, so initialize it anew.
+        if (m_initialized == initialized_tag::initialized &&
+            std::ranges::any_of(m_entries, [](const auto &e) { return e.get_borrowed(); })) {
+            m_initialized = initialized_tag::uninitialized;
+        }
+
         // Initialize mapped memory if needed
         if (m_initialized == initialized_tag::uninitialized) {
             // Use placement new to initialize the mapped list, entries, and payloads.
@@ -698,9 +705,6 @@ private:
                 throw std::runtime_error{"corrupted page hash-tree cache: invalid payload index"};
             }
             used_payloads[e.m_payload_index] = true;
-            if (e.get_borrowed()) {
-                throw std::runtime_error{"corrupted page hash-tree cache: borrowed entry"};
-            }
             if (i >= m_lru.size()) {
                 const auto node = lru::value_traits::to_node_ptr(m_entries[i]);
                 if (lru::node_traits::get_next(node) || lru::node_traits::get_previous(node)) {

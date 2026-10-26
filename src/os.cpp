@@ -520,13 +520,28 @@ static constexpr auto retry_on_eintr(const F &func) {
     }
 }
 
+/// \brief Retry a write call on EINTR error, and on EAGAIN error after a short sleep.
+/// \param func Write function to be retried.
+/// \details Writing to a full non-blocking file descriptor fails with EAGAIN,
+/// this helper waits for it to drain, as a write to a blocking file descriptor would.
+template <typename F>
+static auto retry_write(const F &func) {
+    while (true) {
+        auto result = retry_on_eintr(func);
+        if (!(result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+            return result;
+        }
+        sleep_us(1000);
+    }
+}
+
 ptrdiff_t putchars(std::span<const uint8_t> buf, tty_output output) noexcept {
     if (buf.empty()) {
         return 0;
     }
 #ifdef HAVE_TTY
     const int fd = (output == tty_output::to_stdout) ? STDOUT_FILENO : STDERR_FILENO;
-    return retry_on_eintr([&] { return write(fd, buf.data(), buf.size()); });
+    return retry_write([&] { return write(fd, buf.data(), buf.size()); });
 #else
     auto *fp = (output == tty_output::to_stdout) ? stdout : stderr;
     errno = 0;
@@ -571,7 +586,7 @@ ptrdiff_t write_fd(int fd, std::span<const uint8_t> buf) noexcept {
     if (buf.empty()) {
         return 0;
     }
-    const auto result = retry_on_eintr([&] { return write(fd, buf.data(), buf.size()); });
+    const auto result = retry_write([&] { return write(fd, buf.data(), buf.size()); });
     return static_cast<ptrdiff_t>(result);
 }
 

@@ -236,6 +236,35 @@ describe("runtime console io", function()
                     expect.equal(unistd.read(out_r, 1024), "CTSI\n")
                 end)
 
+                it("should wait for a full non-blocking console output file descriptor", function()
+                    local fcntl = require("posix.fcntl")
+                    local out_r, out_w = assert(unistd.pipe())
+                    local _ <close> = tests_util.scope_exit(function()
+                        unistd.close(out_r)
+                        unistd.close(out_w)
+                    end)
+                    -- Fill the non-blocking pipe, so the next write fails with EAGAIN
+                    fcntl.fcntl(out_w, fcntl.F_SETFL, fcntl.fcntl(out_w, fcntl.F_GETFL) | fcntl.O_NONBLOCK)
+                    local filled = 0
+                    while unistd.write(out_w, string.rep("x", 4096)) do
+                        filled = filled + 4096
+                    end
+                    -- Drain the pipe in a child process shortly after the machine starts running
+                    local pid = assert(unistd.fork())
+                    if pid == 0 then
+                        require("posix.time").nanosleep({ tv_sec = 0, tv_nsec = 100000000 })
+                        unistd.read(out_r, filled)
+                        unistd._exit(0)
+                    end
+                    local machine <close> = create_machine(
+                        base_machine_config,
+                        { console = { output_destination = "to_fd", output_fd = out_w } }
+                    )
+                    expect.equal(machine:run(), cartesi.BREAK_REASON_HALTED)
+                    require("posix.sys.wait").wait(pid)
+                    expect.equal(unistd.read(out_r, 1024), "CTSI\n")
+                end)
+
                 it("should fail when redirecting console output to a read-only pipe", function()
                     local out_r, out_w = assert(unistd.pipe())
                     local _ <close> = tests_util.scope_exit(function()

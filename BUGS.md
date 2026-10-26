@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-53 confirmed issues: 3 high, 10 medium, 40 low.
+52 confirmed issues: 3 high, 10 medium, 39 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -62,7 +62,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
 | [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays) | low | pre-existing | Lua bindings (JSON conversion) | Lua-to-JSON conversion fails on numeric keys and expands sparse integer keys into huge arrays | `bugs/w2b-13-clua-json-numeric-keys-lua-next/` |
-| [B63](#b63-cartesifilesystemlua-collides-with-the-v022-tests-package-breaking-upgrades) | low | introduced by branch | Packaging (Lua modules) | cartesi/filesystem.lua collides with the v0.22 tests package, breaking upgrades | `bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B65](#b65-frontier-stores-fail-for-native-windows-paths-because-hash-treelua-splits-paths-only-on-slashes) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Frontier stores fail for native Windows paths because hash-tree.lua splits paths only on slashes | `bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backslash/` |
 | [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
@@ -1865,66 +1864,6 @@ eval $(make -s env); lua5.4 bugs/w2b-13-clua-json-numeric-keys-lua-next/test.lua
 It needs the built `cartesi.so` and `lua5.4` on `PATH`, because the sparse cases run in `lua5.4` child processes. Expect about 30 s, mostly the 20 s timeout on the `1<<40` case. It prints `BUG:` lines and exits 1 while the bug is present, and prints `OK` and exits 0 once fixed.
 
 **ID**: `w2b-13-clua-json-numeric-keys-lua-next`
-
-### B63. cartesi/filesystem.lua collides with the v0.22 tests package, breaking upgrades
-
-**Title**: Emulator 0.23 ships `cartesi/filesystem.lua` at the path the v0.22 tests package already owns: dpkg upgrade aborts, and a mixed install crashes `cartesi-machine` and `cartesi.hash-tree` at load time
-
-**Problem**: This branch moves the `cartesi.filesystem` module out of the tests tree (`tests/lua/cartesi/filesystem.lua`) and into the emulator package (`src/cartesi/filesystem.lua`). Both versions install to `$(LUA_INSTALL_PATH)/cartesi/filesystem.lua`. The two modules have incompatible APIs. The v0.22 helper has `write_file(filename, data)` and does `require("cartesi.tests.util")`. The new module has `write_file(data, filename)` and adds `new_temporary_file`, `sync_file`, `sync_directory` and others. Neither Debian control template handles the move. `control.template` declares no `Breaks`/`Replaces`, and `tests-control.template` keeps `Depends: cartesi-machine-emulator (>= ARG_VERSION)`. That dependency means the published 0.22 tests deb still accepts emulator 0.23, so both packages claim the same file.
-- With dpkg, upgrading the emulator to 0.23 is refused because of the file conflict.
-- With a source or overlay install where the old helper is installed last, the old `filesystem.lua` requires `cartesi.tests.util`, which requires `cartesi.hash-tree`, which requires `cartesi.filesystem` again. This circular require overflows the C stack ("C stack overflow") while modules are loading. Every `cartesi-machine` invocation then dies at startup, even `--help`, and so does any program that loads `cartesi.hash-tree`.
-- The candidate expected a garbage-named file from the swapped `write_file` arguments and nil `new_temporary_file`/`sync_directory` calls. Neither happens, because the crash comes before that code runs.
-
-**Origin**: Introduced by this branch (commit 956a179). On v0.22.0 (f9e4f82) and origin/main, the file belongs only to the tests package.
-
-**Area**: Lua libraries / packaging (`src/cartesi/filesystem.lua`, Makefile `install-lua-libs`/`install-tests`, Debian control templates).
-
-**Category**: api-contract (packaging / install-path ownership).
-
-**Location**:
-- `Makefile:80`: `EMU_TO_LUA_PATH` now includes `src/cartesi/filesystem.lua`.
-- v0.22 `Makefile:88` and `Makefile:435`: `TESTS_LUA_TO_LUA_PATH=tests/lua/cartesi` is copied into `$(LUA_INSTALL_PATH)`. That tree contains `cartesi/filesystem.lua`.
-- `tools/template/control.template`: no `Breaks`/`Replaces: cartesi-machine-tests`.
-- `tools/template/tests-control.template:8`: `Depends: cartesi-machine-emulator (>= ARG_VERSION)`.
-- `src/cartesi/filesystem.lua:91`: `write_file(data, filename)`. The v0.22 helper's `tests/lua/cartesi/filesystem.lua:41` has `write_file(filename, data)`, and its line 17 has `require("cartesi.tests.util")`.
-- `src/cartesi/hash-tree.lua:2` and `src/cartesi-machine.lua:2677`: `require("cartesi.filesystem")`.
-- `.github/workflows/build.yml:933-935`: the tests debs are published as release assets.
-
-**Evidence**: The test has two parts.
-- Part A builds real debs from the real control templates and file lists: emulator 0.22, tests 0.22, and emulator 0.23 from this branch. It installs them with dpkg into a private root.
-- Part B simulates a source install: this branch's `install-lua-libs`, then a v0.22 `install-tests` (`cp -RP`) over it. It then runs the shipped CLI and `hash-tree`.
-
-Run from the repo root: `eval $(make -s env); lua5.4 bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/test.lua`
-```
-[A] dpkg -i emulator 0.23 over emulator 0.22 + tests 0.22: rc=1
-    dpkg: error processing archive /tmp/w2a-05-fs-collision.XXXX/emu-0.23.0.deb (--install):
-     trying to overwrite '/usr/share/lua/5.4/cartesi/filesystem.lua', which is also in package cartesi-machine-tests 0.22.0
-BUG: dpkg upgrade of cartesi-machine-emulator to 0.23 aborts: file conflict with installed cartesi-machine-tests 0.22 (no Replaces/Breaks declared)
-[B1] cartesi-machine --final-hash rc=1 hash file exists=false size=nil
-    lua5.4: error loading module 'cartesi.hash-tree' from file '.../cartesi/hash-tree.lua':
-[B2] hash-tree frontier_store rc=1
-3 defect(s) found
-(cartesi-machine.lua --help: "C stack overflow ... cartesi/tests/util.lua:18 ... cartesi/filesystem.lua:17 ...")
-```
-
-**Scenario**: A host (CI runner, developer box, or validator/node image) has the published 0.22 `cartesi-machine-emulator` and `cartesi-machine-tests` debs installed and upgrades only the emulator to 0.23. `dpkg -i` aborts on the file conflict, and `apt` may fail too, depending on the order it unpacks the two packages. On a source-built host, an `install-tests` from an older checkout that runs after `make install` of 0.23 overwrites the new module. After that, `cartesi-machine` (used by PRT/Dave tooling and app developers' CLI workflows) and any Lua program that loads `cartesi.hash-tree` crash at load time.
-
-**Possible solution**: Pick one or more of these:
-- Add `Breaks: cartesi-machine-tests (<< 0.23.0)` and `Replaces: cartesi-machine-tests (<< 0.23.0)` to `tools/template/control.template`.
-- Make the tests package depend on the exact emulator version (`Depends: cartesi-machine-emulator (= ARG_VERSION)`).
-- Rename the new shipped module (for example `cartesi.fs`) so it does not share a path with the old helper.
-
-**Severity**: low. Both reviewers rated it low, and the prover rated it low to medium. It is packaging and upgrade breakage only. dpkg refuses the upgrade loudly instead of leaving a corrupted install. Only hosts that have the 0.22 tests deb installed are affected, which production validators rarely have. No hash, proof or stored state is affected. The load-time crash needs a hand-mixed install.
-
-**Risks**:
-- Of the bug: upgrades are blocked, and CI or provisioning scripts fail. In a mixed source install, the CLI and `cartesi.hash-tree` are completely unusable until the stale file is removed.
-- Of the fix: `Breaks`/`Replaces` are low risk. They make apt remove or upgrade the old tests package, and the version bounds must match the release that moves the file. An exact `=` dependency forces the two packages to upgrade in lockstep. Renaming the module changes the public Lua module name that new callers (`hash-tree.lua`, `cartesi-machine.lua`, tests) use, so all of them must be updated together.
-
-**Proof of concept**: `bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/test.lua`. It needs `git` with tag commit f9e4f82 (v0.22.0) reachable, plus `dpkg-deb`/`dpkg` and built `src/cartesi.so`. Run it from the repo root:
-`eval $(make -s env); lua5.4 bugs/w2a-05-filesystem-module-collides-with-v022-tests-package/test.lua`
-It exits 1 with `BUG:` lines while the defect is present and 0 once it is fixed. `REPO` and `WORK` environment variables can override the repo root and the scratch dir (a fresh `mktemp -d` by default).
-
-**ID**: `w2a-05-filesystem-module-collides-with-v022-tests-package`
 
 ### B64. clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS
 

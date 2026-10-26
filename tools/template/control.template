@@ -6,6 +6,8 @@ Architecture: ARG_ARCH
 Maintainer: Cartesi Machine Reference Unit
 Provides: cartesi-machine-emulator
 Depends: lua5.4, lua-lpeg, libslirp0, libgomp1
+Breaks: cartesi-machine-tests (<< ARG_VERSION)
+Replaces: cartesi-machine-tests (<< ARG_VERSION)
 Section: devel
 Priority: optional
 Multi-Arch: foreign

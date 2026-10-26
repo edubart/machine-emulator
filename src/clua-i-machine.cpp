@@ -250,6 +250,7 @@ static int64_t clua_get_array_table_len(lua_State *L, int tabidx) {
         return -1;
     }
     int64_t len = 0;
+    int64_t count = 0;
     lua_pushvalue(L, tabidx);            // push table
     lua_pushnil(L);                      // push key
     while (lua_next(L, -2) != 0) {       // replace key, push value
@@ -263,10 +264,12 @@ static int64_t clua_get_array_table_len(lua_State *L, int tabidx) {
             return -1;
         }
         len = std::max(i, len);
+        ++count;
         lua_pop(L, 1); // pop value
     }
     lua_pop(L, 1); // pop key
-    return len;
+    // holes become nulls, so a table with more holes than entries is not an array
+    return len <= 2 * count ? len : -1;
 }
 
 static const nlohmann::json &clua_get_machine_schema_dict(lua_State *L);
@@ -393,11 +396,12 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
                     if (lua_isstring(L, -2) == 0) {
                         luaL_error(L, "table maps cannot contain keys of type %s", lua_typename(L, lua_type(L, -2)));
                     }
-                    const char *field_name = lua_tostring(L, -2);
+                    lua_pushvalue(L, -2); // push key copy, so lua_tostring cannot convert the key lua_next uses
+                    const char *field_name = lua_tostring(L, -1);
                     const auto &field_schema = clua_get_field_schema(L, field_name, schema, user_schema_dict);
                     j[field_name] =
-                        clua_push_managed_toclose_json_ref(L, -1, field_schema, user_schema_dict, ctxidx, depth + 1);
-                    lua_pop(L, 2); // pop value, child j reference
+                        clua_push_managed_toclose_json_ref(L, -2, field_schema, user_schema_dict, ctxidx, depth + 1);
+                    lua_pop(L, 3); // pop value, key copy, child j reference
                 }
                 lua_pop(L, 1); // pop table
             }

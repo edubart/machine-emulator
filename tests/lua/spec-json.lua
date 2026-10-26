@@ -84,6 +84,13 @@ describe("tojson / fromjson schema dictionary", function()
         expect.equal(cartesi.fromjson(cartesi.tojson(t)), t)
     end)
 
+    it("should serialize numeric keys of maps and sparse tables as object keys", function()
+        expect.equal(cartesi.tojson({ 1, x = 2 }), '{"1":1,"x":2}')
+        expect.equal(cartesi.tojson({ [1.5] = 1, [-1] = 2 }), '{"-1":2,"1.5":1}')
+        expect.equal(cartesi.tojson({ [1 << 40] = 1 }), '{"1099511627776":1}')
+        expect.equal(cartesi.tojson({ 1, nil, 3 }), "[1,null,3]")
+    end)
+
     it("should serialize bare scalars with no schema", function()
         expect.equal(cartesi.tojson(42), "42")
         expect.equal(cartesi.tojson("str"), '"str"')

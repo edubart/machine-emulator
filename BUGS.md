@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-45 confirmed issues: 2 high, 8 medium, 35 low.
+44 confirmed issues: 2 high, 8 medium, 34 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -55,7 +55,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B57](#b57-readwrite_virtual_memory-silently-do-nothing-for-ranges-that-reach-264) | low | pre-existing | C API (virtual memory access) | read/write_virtual_memory silently do nothing for ranges that reach 2^64 | `bugs/w2b-09-virtual-memory-range-wraparound/` |
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
-| [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays) | low | pre-existing | Lua bindings (JSON conversion) | Lua-to-JSON conversion fails on numeric keys and expands sparse integer keys into huge arrays | `bugs/w2b-13-clua-json-numeric-keys-lua-next/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
 | [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema) | low | pre-existing | Lua bindings (JSON with schemas) | fromjson rewrites strings that match a key of a struct, array or tuple schema | `bugs/p3-01-fromjson-object-schema-string-enum-rewrite/` |
@@ -1462,59 +1461,6 @@ OK: cm_jsonrpc_rebind_server(address=NULL) returned an error code
 
 **ID**: `w2b-14-capi-null-output-crashes`
 
-### B62. Lua-to-JSON conversion fails on numeric keys and expands sparse integer keys into huge arrays
-
-**Title**: Lua-to-JSON conversion fails with "invalid key to 'next'" on numeric keys and expands sparse integer keys into huge null arrays
-
-**Problem**: `clua_push_managed_toclose_json_ref`, which converts Lua values to JSON for `cartesi.tojson` and every Lua config path, has two defects in its table handling:
-1. *Traversal corruption.* If a table is not classified as an array, the code walks it with `lua_next`. It accepts any key for which `lua_isstring` is true, and numbers pass that check. It then calls `lua_tostring(L, -2)` on the live key slot. For a numeric key this converts the slot to a string in place, which the Lua manual forbids during traversal. The next `lua_next` call raises `invalid key to 'next'`. So numeric keys can never be stringified as JSON object keys, which is what the code clearly means to do, and the error message gives the caller no hint of the cause. Affected tables include mixed keys (`{1, x=2}`), float keys (`{[1.5]=1}`), and zero or negative integer keys (`{[0]=1,[1]=2}`, `{[-1]=7,a=1}`).
-2. *Sparse expansion.* `clua_get_array_table_len` classifies any table whose keys are all positive integers as an array of length `max(key)`. The array branch then calls `lua_geti` for every index from 1 to `len`, and each missing index becomes `null`. `{[1<<24]=1}` produces an 83,886,078-byte JSON string. `{[1<<40]=1}` hangs and eventually runs out of memory.
-
-**Origin**: Pre-existing. The code is identical on `origin/main`, with `clua_get_array_table_len` at line 254 and `lua_tostring(L, -2)` at line 402. This branch only changed nearby schema code.
-
-**Area**: Lua bindings, specifically Lua-to-JSON conversion in `src/clua-i-machine.cpp`. The converter backs `cartesi.tojson`, machine and runtime config conversion, range configs, and every other `clua_tojson` caller (e.g. lines 711, 1142 and 1252).
-
-**Category**: crash (spurious Lua error; CPU and memory exhaustion / DoS)
-
-**Location**:
-- `src/clua-i-machine.cpp:254-276`: `clua_get_array_table_len` uses the largest key as the array length and never checks density.
-- `src/clua-i-machine.cpp:381-393`: the array branch loops `lua_geti` from 1 to `len`, emitting a null for every hole.
-- `src/clua-i-machine.cpp:395-405`: in the object branch, `lua_isstring(L, -2)` accepts numbers and `lua_tostring(L, -2)` at line 402 rewrites the `lua_next` key in place.
-
-**Evidence**: The test calls `cartesi.tojson` on four tables with numeric keys that are not a valid sequence. It then runs the sparse cases in child processes, each limited by `ulimit -v 2000000` and `timeout 20`. Run with `eval $(make -s env); lua5.4 bugs/w2b-13-clua-json-numeric-keys-lua-next/test.lua`. Output:
-```
-{1, x=2}	false	invalid key to 'next'
-BUG: cartesi.tojson({1, x=2}) failed with traversal corruption: invalid key to 'next'
-BUG: cartesi.tojson({[1.5]=1, x=2}) failed with traversal corruption: invalid key to 'next'
-BUG: cartesi.tojson({[0]=1, [1]=2, [2]=3}) failed with traversal corruption: invalid key to 'next'
-BUG: cartesi.tojson({[-1]=7, a=1}) failed with traversal corruption: invalid key to 'next'
-sparse {[1<<24]=1} -> json length / rc:	83886078 rc=0
-BUG: cartesi.tojson({[1<<24]=1}) produced a 83886078-byte JSON array of nulls (2^24 entries)
-sparse {[1<<40]=1} ->	 rc=124
-BUG: cartesi.tojson({[1<<40]=1}) hangs or exhausts memory:  rc=124
-```
-The test exits with code 1. Reviewers saw the same behaviour independently: `{[1]=1,[3]=3}` gives `[1,null,3]`, `{[100000]=1}` gives a 499,998-byte string, and `{[1<<20]=1}` gives about 5 MB.
-
-**Scenario**: Lua tooling, such as a Lua-based node, test harness, or CLI helper script, serializes its own integer-keyed bookkeeping with `cartesi.tojson`. Examples are `{[mcycle]=root_hash}` or `{[input_index]=status}`. With a few entries this fails with a puzzling `invalid key to 'next'` error. With a single large key such as an mcycle near 2^40, the process spins and runs out of memory instead of returning an error. The same can happen when a caller builds a machine or runtime config table and accidentally puts an integer key next to string keys. Emulator-produced configs, logs, proofs and hashes are pure arrays or string-keyed maps. C API and JSON-RPC users (PRT validators, Dave, Rollups Node) never take this path.
-
-**Possible solution**:
-- In the object branch, convert a copy of the key: `lua_pushvalue(L, -2); const char *field_name = lua_tostring(L, -1); ...; lua_pop(L, 1);`. Alternatively, accept only `lua_type(L, -2) == LUA_TSTRING` and give numeric keys a clear error such as "table maps cannot contain keys of type number". Pick deliberately between stringifying integer keys and rejecting them, and either way decide what happens to float keys.
-- In `clua_get_array_table_len`, count the keys and treat the table as an array only if `count == max_key`. Equivalently, require `max_key == lua_rawlen` and allow no holes. Otherwise fall back to the object branch or raise an error. As a backstop, check `len` against `clua_check_array_schema_size` or a sane cap before the loop.
-
-**Severity**: low. Both reviewers and the prover agree. Only Lua callers that pass their own non-sequence numeric-keyed tables to the JSON conversion are affected. The numeric-key case is a clean, catchable Lua error with no memory corruption. The sparse case can hang or OOM the process, but only on tables the caller builds itself. Emulator-produced data, hashes, proofs, step logs and the C/JSON-RPC APIs are unaffected.
-
-**Risks**:
-- *Of the bug:* Lua-side tools fail to serialize legitimate integer-keyed maps. A single large integer key in an untrusted or careless table can hang a Lua-based process or exhaust its memory (local DoS). Sparse arrays also round-trip silently as dense arrays full of nulls, which changes the data.
-- *Of the fix:* Treating sparse tables as objects changes the output for tables like `{[1]=a,[3]=b}`, which go from `[a,null,b]` to `{"1":a,"3":b}` or to an error. Any caller that relies on holes becoming nulls would break. Stringifying numeric keys has its own catch: JSON-to-Lua conversion would bring those keys back as strings, so integer-keyed tables would not round-trip exactly. Config paths whose schemas expect arrays must keep accepting dense arrays unchanged.
-
-**Proof of concept**: `bugs/w2b-13-clua-json-numeric-keys-lua-next/test.lua`. Run it from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/w2b-13-clua-json-numeric-keys-lua-next/test.lua
-```
-It needs the built `cartesi.so` and `lua5.4` on `PATH`, because the sparse cases run in `lua5.4` child processes. Expect about 30 s, mostly the 20 s timeout on the `1<<40` case. It prints `BUG:` lines and exits 1 while the bug is present, and prints `OK` and exits 0 once fixed.
-
-**ID**: `w2b-13-clua-json-numeric-keys-lua-next`
-
 ### B64. clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS
 
 **Title**: mapped_memory::clear punches holes in shared .dht backing files, so after cm_clear_hash_tree on a full filesystem the next get_root_hash dies with SIGBUS instead of returning an error
@@ -1681,7 +1627,7 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 
 - `p3-03-arrayindex-signed-overflow`: run with `eval $(make -s env); lua5.4 bugs/p3-03-arrayindex-signed-overflow/test.lua`.
 
-**Related**: [B62](#b62-lua-to-json-conversion-fails-on-numeric-keys-and-expands-sparse-integer-keys-into-huge-arrays).
+**Related**: B62 (fixed).
 
 ### B71. fromjson rewrites strings that match a key of a struct, array or tuple schema
 

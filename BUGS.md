@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-86 confirmed issues: 5 high, 17 medium, 64 low.
+87 confirmed issues: 5 high, 18 medium, 64 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -47,8 +47,9 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B66](#b66-verifying-through-a-json-rpc-machine-object-crashes-on-short-sibling-lists-and-accepts-logs-the-local-verifier-rejects) | medium | pre-existing | JSON-RPC client (verify_*), access-log JSON | Verifying through a JSON-RPC machine object crashes on short sibling lists and accepts logs the local verifier rejects | `bugs/p2-01-jsonrpc-client-verify-reserializes-unvalidated-access-/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
+| [B87](#b87-hash-tree-updates-start-a-full-openmp-team-for-tiny-batches-slowing-collection-100-500x-under-cpu-contention) | medium | pre-existing | Hash tree (parallel page hashing) | Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention | `bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
-| [B08](#b08-clone_stored-fails-with-emlink-instead-of-falling-back-to-a-copy) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails with EMLINK instead of falling back to a copy | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
+| [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
 | [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
@@ -545,7 +546,7 @@ exit=1
 
 - `api-13-remove-stored-fails-on-incomplete-dir`: run with `eval $(make -s env); lua5.4 bugs/api-13-remove-stored-fails-on-incomplete-dir/test_remove_stored_incomplete_dir.lua`.
 
-### B08. clone_stored fails with EMLINK instead of falling back to a copy
+### B08. clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL)
 
 **Title**: `clone_stored` fails with EMLINK ("Too many links") instead of copying once about 65000 stored clones share one hard-linked read-only file
 
@@ -591,6 +592,7 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 **Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
 
 - `lua-08-clone-file-emlink-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/lua-08-clone-file-emlink-no-fallback/test.lua`. It reaches the same failure through `cartesi.filesystem.clone_file`.
+- `u3-05-clone-file-reflink-einval-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/u3-05-clone-file-reflink-einval-no-fallback/test.lua`. It shows the same incomplete fallback list for reflinks: `ioctl(FICLONE)` returns `EINVAL` when btrfs clones a COW file into a NOCOW (`chattr +C`) directory, and `clone_stored` fails although a copy would work. The fix should fall back to `copy_file` on `EINVAL` as well as `EMLINK`.
 
 ### B09. JSON-RPC server exits when an error message contains invalid UTF-8
 
@@ -4956,6 +4958,79 @@ Exit code 1 means the bug reproduced. Exit code 0 means the setting took effect,
 **ID**: `u3-02-set-runtime-config-ignores-hash-tree-concurrency`
 
 **Related**: [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw).
+
+### B87. Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention
+
+**Title**: Hash-tree update starts a full OpenMP team for batches of only about ncores+1 dirty pages, so under CPU contention each collect_mcycle_root_hashes sample is 100-500x slower
+
+**Problem**: `hash_tree::return_updated_dirty_pages` sets `threads = m_concurrency` whenever `batch_size > m_concurrency && batch_size > block_size`. It then runs `#pragma omp parallel for schedule(dynamic) if (threads > 1) num_threads(threads)`. With the default runtime config (`concurrency.update_hash_tree = 0`), `get_concurrency` maps the concurrency to `omp_get_max_threads()`, which is every CPU in the affinity mask. As a result, any update with more than about max(ncores, SIMD lane count) dirty pages (about 9 pages on a 4-CPU host) forks and joins a full OpenMP team. `collect_mcycle_root_hashes` calls `m_ht.update(m_ars)` once per period sample, and with `log2_period=10` a running Linux guest dirties enough pages per sample to cross the threshold almost every time. libgomp spin-waits by default. When the host CPUs are contended, the main thread stalls in `GOMP_parallel` waiting for workers that have been descheduled, while the spinning workers take CPU away from it. A sample then costs 30-90 ms instead of about 0.1-0.4 ms. The code's own comment admits the threshold was never tuned (`//??D The batch size past which we switch to parallel updates needs to be tuned empirically`). Hashes stay correct and deterministic, so this is purely a performance problem.
+
+**Origin**: Pre-existing. The branch did not change the threshold, the pragma, or `get_concurrency`; its changes to `hash-tree.cpp` touch only payload accessors and signposts.
+
+**Area**: Hash tree update, as used by `collect_mcycle_root_hashes`, `collect_mcycle_bundle` and `get_root_hash`, both locally and through `cartesi-jsonrpc-machine`, whose server runs the same code.
+
+**Category**: Performance. Under contention it degrades toward an effective hang: at that rate, millions of samples take hours.
+
+**Location**:
+- `src/hash-tree.cpp:279-286`: the untuned threshold that picks `threads` in `return_updated_dirty_pages`.
+- `src/hash-tree.cpp:294`: the `#pragma omp parallel for ... if (threads > 1) num_threads(threads)`.
+- `src/hash-tree.cpp:939-942`: `get_concurrency`, where a value of 0 becomes `omp_get_max_threads()`.
+- `src/machine.cpp:2430`: `m_ht.update(m_ars)`, called once per sample inside `collect_mcycle_root_hashes`.
+- `src/machine.cpp:2552`: `collect_mcycle_bundle` loops over `collect_mcycle_root_hashes`.
+
+**Evidence**:
+- **Setup.** The test builds a 64 MiB Linux machine, runs it for 1e7 cycles and stores it. It starts `nproc` busy-loop processes (`LOAD`, default `nproc`).
+- **What it times.** `collect_mcycle_root_hashes(mcycle + 300*2^10, 10, 0, 0)`, run twice from the same stored state: once with the default runtime `{}`, and once with `{concurrency={update_hash_tree=1}}`.
+- **Pass and fail.** It asserts that both runs return identical hashes. It prints `BUG:` and exits 1 if the default runtime is more than 10x slower.
+- **Re-run on the 4-CPU review host** (load average about 18):
+  ```
+  default runtime (all cores)  300 samples in 27.540s (91.800 ms/sample)
+  update_hash_tree=1           300 samples in 0.130s (0.433 ms/sample)
+  ratio default/serial = 211.8x (ncpu=4)
+  BUG: default hash-tree concurrency makes collect_mcycle_root_hashes 212x slower than serial under CPU load (OpenMP region for tiny batches)
+  exit=1
+  ```
+- **Other runs.**
+  - The prover measured 459x with LOAD=4.
+  - The prover measured 126x with LOAD=0, because the shared host was already at load average about 8.
+  - The reviewers measured 385x and 433x with LOAD=0.
+- **Control.** With `OMP_WAIT_POLICY=passive` the ratio drops to 1.3x (exit 0). That confirms the mechanism: libgomp spin-waiting at the fork/join of tiny parallel regions under CPU contention.
+- **Command:** `eval $(make -s env); timeout 300 lua5.4 bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/test.lua`
+
+**Scenario**: The PRT node, Dave and the Rollups Node pass no runtime config, so they get `update_hash_tree=0`, which means all cores. Collecting the hashes for an input claim of 2^30 mcycles at period 2^10 takes 2^20 samples. At 20-90 ms per sample that is 6-25 hours instead of minutes.
+
+Contention is common in real deployments:
+- **Shared or busy hosts.** Other jobs on the same host compete for the CPUs.
+- **Validators that run several machines or forked JSON-RPC servers at once.** They create the contention themselves.
+- **Containers.** libgomp sizes its team from the CPU affinity mask, not from the cgroup CPU quota. A container limited to a few CPUs on a many-core host therefore spawns a full-width team of spinning threads, which burns the quota and gets throttled.
+
+The candidate also measured the remote path with a 128 MiB machine. 512 samples over `cartesi-jsonrpc-machine` took 16.3 s with the default runtime against 0.12 s with `update_hash_tree=1`, and `collect_mcycle_bundle(0,10,4)` took 0.42 s against 0.01 s. A validator in any of these settings can miss a claim or bundle deadline, and the honest player then loses on time.
+
+**Possible solution**:
+- Raise the threshold for going parallel to a tuned value, for example hundreds of pages, or base it on a cost estimate.
+- Cap the team at `min(m_concurrency, batch_size / (block_size * k))`, so that a small batch never wakes every core.
+- Optionally, pick the default concurrency from the cgroup CPU quota, or default to a passive or bounded wait policy (for example, set `OMP_WAIT_POLICY` / `GOMP_SPINCOUNT` low, or use a persistent worker pool).
+- Apply the same review to the other threshold at `src/hash-tree.cpp:439-444`.
+
+**Severity**: Medium. The prover suggested high, and both reviewers rated it medium. Medium is the reconciled rating, for these reasons:
+- The slowdown is extreme (100-500x) in the default configuration that validators use, and it can push long collections past dispute time budgets.
+- But results stay correct and deterministic, and nothing crashes or corrupts state.
+- It only shows up when the host CPUs are contended.
+- Simple workarounds exist: `concurrency.update_hash_tree=1`, `OMP_WAIT_POLICY=passive`, or CPU affinity.
+
+**Risks**:
+- **Of the bug.** On busy or containerized hosts, validators running the default config can take hours instead of minutes to compute claims or bundles. The spinning threads also waste the CPU budget of other workloads on the host. An honest player can lose a dispute on time.
+- **Of the fix.** A threshold that is too high gives up parallel speedup on large updates, such as the first hash of a big machine or runs that dirty many pages, on idle many-core hosts. The threshold should therefore be tuned with a benchmark across batch sizes. Root hashes must remain identical regardless of the thread count; the test checks this.
+
+**Proof of concept**: `bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/test.lua`. It is self-contained Lua and uses the local machine. It needs `linux.bin` and `rootfs.ext2` under `$CARTESI_IMAGES_PATH` (default `/usr/share/cartesi-machine/images`). It stores the machine in `$WORKDIR`, or in a fresh `mktemp -d` directory that it removes on exit.
+- Optional environment variables: `LOAD` sets the number of busy processes to add (default `nproc`), and `SAMPLES` sets the sample count (default 300).
+- Run from the repo root:
+  `eval $(make -s env); timeout 300 lua5.4 bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/test.lua`
+- It exits 1 and prints `BUG:` while the defect is present, and exits 0 once the default runtime is within 10x of the serial one.
+
+**ID**: `u3-01-hash-tree-omp-tiny-batch-slowdown`
+
+**Related**: [B86](#b86-set_runtime_config-reports-a-new-hash-tree-concurrency-that-is-never-applied).
 
 ## Candidates that were not confirmed
 

@@ -1045,6 +1045,29 @@ describe("backing stores", function()
             end
         end
 
+        it("should evict loaded pages that differ from their range after a mixed-sharing session", function()
+            local stored_dir = filesystem.temp_pathname()
+            do
+                local config = make_config("keccak256", 256)
+                config.hash_tree.shared = true
+                config.flash_drive[1].backing_store = { shared = false }
+                local machine <close> = cartesi.machine(config, {}, stored_dir)
+                initialize(machine, "A")
+                machine:get_root_hash()
+            end
+            local _ <close> = tests_util.scope_exit(function()
+                cartesi.machine:remove_stored(stored_dir)
+            end)
+            do -- The shared cache receives hashes for data that never reaches the private drive file.
+                local machine <close> = cartesi.machine(stored_dir, {}, cartesi.SHARING_CONFIG)
+                machine:write_memory(drive_start, string.rep("B", page_size))
+                machine:get_node_hash(drive_start, cartesi.HASH_TREE_LOG2_WORD_SIZE)
+            end
+            local machine <close> = cartesi.machine(stored_dir, {}, cartesi.SHARING_NONE)
+            expect_word(machine, drive_start, "A", "keccak256")
+            expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
+        end)
+
         it("should collect correct uarch hashes after clean range replacement", function()
             local original_dir = filesystem.temp_pathname()
             local replacement_dir = filesystem.temp_pathname()

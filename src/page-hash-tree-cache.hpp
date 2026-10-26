@@ -576,13 +576,13 @@ public:
         return m_entries.size();
     }
 
-    /// \brief Evicts entries whose page addresses satisfy a predicate
-    /// \param predicate Predicate over physical page addresses
+    /// \brief Evicts entries whose page addresses and payloads satisfy a predicate
+    /// \param predicate Predicate over physical page addresses and entry payloads
     template <typename Predicate>
     void evict_entries_if(Predicate predicate) {
         for (size_t i = 0; i < m_lru.size();) {
             auto &e = m_entries[i];
-            if (!predicate(e.get_paddr_page())) {
+            if (!predicate(e.get_paddr_page(), std::as_const(get_payload(e)))) {
                 ++i;
                 continue;
             }

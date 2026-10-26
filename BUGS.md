@@ -21,11 +21,10 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-60 confirmed issues: 4 high, 12 medium, 44 low.
+59 confirmed issues: 3 high, 12 medium, 44 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
-| [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs) | high | pre-existing | Hash tree (page cache, store/load) | Persisted page cache is not checked against memory, so a reload yields wrong proofs | `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/` |
 | [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
 | [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
@@ -87,79 +86,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B88](#b88-read-only-memory-ranges-longer-than-their-page-aligned-image-are-always-rejected) | low | pre-existing | Machine config (memory ranges) | Read-only memory ranges longer than their page-aligned image are always rejected | `bugs/u3-06-readonly-backing-gap-always-throws/` |
 
 ## Issues
-
-### B01. Persisted page cache is not checked against memory, so a reload yields wrong proofs
-
-**Title**: Persisted page hash-tree cache keeps stale entries after a mixed-sharing session, so get_proof and uarch-cycle root hashes come out wrong while get_root_hash and verify_hash_tree pass
-
-**Problem**: The page hash-tree cache (phtc) is reused across store/load with no check that its entries still match the memory of the range they describe. The only guard is in the `hash_tree` constructor. It evicts an entry only when the range's `shared` flag *in the session now loading* differs from the cache's `shared` flag. Entries go stale in an earlier session, one where the phtc and a range were persisted differently. Two cases:
-- RAM shared, hash tree private: writes reach the RAM `.bin/.dht/.dpt` files, but the phtc on disk keeps the old page hashes.
-- Hash tree shared, RAM private: the phtc gets hashes for content that is never written to the RAM file.
-
-On disk, the range's dirty-page tree still says the page is clean. A later load whose flags match (`SHARING_NONE`, or `SHARING_ALL`) evicts nothing. The cache-hit paths then trust the stale entry:
-- `get_page_proof`, used by `get_proof`, reads the target and sibling hashes from the entry.
-- `update_words`, used by `collect_uarch_cycle_root_hashes` and by other uarch/step paths, rehashes only the written words on top of the stale cached page.
-- `get_dense_node_hash` has the same exposure. It was read in the code but not exercised by a test.
-
-`get_root_hash` stays correct because it comes from the dense hash tree. `verify_hash_tree` returns true because it inspects the cache only for pages that are not marked dirty but differ from the `.dht`, and never compares the cache entries of clean pages against memory.
-
-**Origin**: Pre-existing. The same eviction logic and the same hit paths are on `origin/main`.
-
-**Area**: Page hash-tree cache / hash-tree load and store (C++ core, reached through the C and Lua APIs and the `cartesi-machine` CLI `--load`/`--store`).
-
-**Category**: Correctness. The proofs and state commitments are wrong, and nothing reports a problem.
-
-**Location**:
-- `src/hash-tree.cpp:1003-1008`: `evict_entries_if` in the `hash_tree` constructor compares only the current session's `ar.has_shared_backing_store()` with the cache's `shared` flag.
-- `src/machine.cpp:476-487`: `machine::store` writes the phtc separately from each range's persistence.
-- `src/page-hash-tree-cache.hpp:440-455`: loading a persisted cache marks every stored entry as valid.
-- `src/hash-tree.cpp:99-133`: the `get_page_proof` cache-hit path.
-- `src/hash-tree.cpp:810-830`: the `update_words` cache-hit path, which hashes only the changed words.
-- `src/hash-tree.cpp:649-713`: `hash_tree::verify` does not check cached entries of clean pages.
-
-**Evidence**: Both tests compare the machine against a reference loaded from the same directory with `clear_hash_tree = true`, which recomputes everything from memory.
-
-In `test-proof.lua`, all three cases (two routes, three final loads) give the correct root hash and `verify_hash_tree=true`. In every case, the `get_proof(RAM, 5)` target and sibling hashes differ from the reference proof, and the proof does not even roll up to its own `root_hash`. The reference proof does roll up.
-```
-[A(ram shared, cache private) SHARING_NONE] mem=BBBB root_ok=true verify_hash_tree=true proof_target_ok=false proof_siblings_ok=false proof_rolls_to_root=false
-[B(cache shared, ram private) SHARING_NONE] mem=AAAA root_ok=true verify_hash_tree=true proof_target_ok=false proof_siblings_ok=false proof_rolls_to_root=false
-[B(cache shared, ram private) SHARING_ALL] mem=AAAA root_ok=true verify_hash_tree=true proof_target_ok=false proof_siblings_ok=false proof_rolls_to_root=false
-```
-In `test-uarch-cycle.lua`, the machine is created in a directory with `ram.backing_store.shared=true`, which is the default hash-tree config. A host write follows, in a `SHARING_CONFIG` session. The final load runs a three-instruction program whose `sd` writes into the stale page. In the run, 688 of the 2109 uarch-cycle root hashes differ, starting at index 1422, where the store happens. The initial and final roots match, and `verify_hash_tree` is true before and after. Two reference runs give identical hashes, so the results are deterministic.
-```
-[SHARING_NONE] initial_root_ok=true verify_before=true uarch_hashes=2109/2109 differing=688 first_differing=1422 final_root_ok=true verify_after=true
-[SHARING_ALL] initial_root_ok=true verify_before=true uarch_hashes=2109/2109 differing=688 first_differing=1422 final_root_ok=true verify_after=true
-```
-Run command: `eval $(make -s env); lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua; lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua`. Each test exits 1 while the bug is present.
-
-**Scenario**: A validator or an operator keeps snapshot directories made with per-range sharing that differs from `hash_tree.shared`. Examples:
-- A machine created in a directory with a shared RAM or flash drive while the hash tree keeps its default `shared=false`.
-- A shared hash tree with private ranges.
-
-The directory is opened once with `SHARING_CONFIG`, which is the CLI `--load` default, and modified. Examples: `send_cmio_response`, `write_memory`, or running the machine. Later the same directory, or a copy of it, is loaded with `SHARING_ALL` (as `prt.lua` does) or `SHARING_NONE`. From then on:
-- `get_proof` returns Merkle proofs that fail on-chain verification.
-- `collect_uarch_cycle_root_hashes` produces wrong leaf-level commitments.
-
-The honest player then commits to, or tries to prove, a state that does not match the real execution, and loses the PRT dispute. Every integrity check passes: the root hash matches and `verify_hash_tree` returns true. The bundled PRT node always uses `SHARING_ALL` with `clone_stored`, so it does not trigger this by itself. Other nodes, and mixed workflows through the CLI, can.
-
-**Possible solution**: Make cache validity independent of the sharing mode of the session that is loading now. Options:
-- Record per-range persistence or a generation id, for example a hash of the `.dht` root, in the phtc header. On load, evict the entries of any range whose recorded value does not match.
-- In `machine::store`, and when loading, evict the entries of every range whose persistence differs from the cache's, so a mixed session can never leave a phtc that disagrees with the range files.
-- As a cheap safety net, on load check each cached clean page's root against the `.dht` page hash and evict on mismatch. Also make `verify_hash_tree` check the cache entries of clean pages against memory.
-
-**Severity**: High. When it triggers, the impact is critical in kind: Merkle proofs and uarch-cycle commitments are silently wrong, and an honest player can lose a dispute. Both reviewers rated it high rather than critical because it needs a mixed-sharing session followed by a load with matching flags, which the default flows (uniform `SHARING_ALL`, or everything private) do not do.
-
-**Risks**:
-- Of the bug: it fails silently. No API detects it, it persists in the directory and every copy of it, and it corrupts proofs and step or uarch commitments, not the root hash.
-- Of the fix: evicting more often only costs rehashing time. A header or format change to the phtc needs a version bump and invalidates existing cache files, which is acceptable. A check on load that compares cached roots with the `.dht` adds O(cached pages) work when loading.
-
-**Proof of concept**: `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua` (get_proof, both routes) and `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua` (collect_uarch_cycle_root_hashes). Run them from the repo root with `eval $(make -s env); lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-proof.lua && lua5.4 bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/test-uarch-cycle.lua`. Both use temporary directories under the system temp dir, create a phtc file of about 50 MB, and print `BUG:` lines and exit 1 while the bug is present.
-
-**ID**: `ht-02-phtc-stale-entries-after-mixed-sharing-session`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `api-06-persisted-phtc-not-validated-against-backing`: run with `eval $(make -s env); lua5.4 bugs/api-06-persisted-phtc-not-validated-against-backing/test-replace-memory-range.lua; lua5.4 bugs/api-06-persisted-phtc-not-validated-against-backing/test-mixed-sharing.lua`. It adds a second, more common trigger: `replace_memory_range` on a machine loaded with `SHARING_ALL` writes the new image's page entries into the shared `hash_tree.phtc` while the stored range files still describe the old image. Reloading the directory with `SHARING_ALL` then gives wrong `get_proof`, `get_node_hash` and uarch-cycle root hashes, with a correct `get_root_hash`. No mixed-sharing session is needed.
 
 ### B02. Crash in sparse-tree update freezes the root hash of a shared hash tree
 
@@ -1087,7 +1013,7 @@ While the bug is present it prints `BUG:` lines and exits 1. Once fixed it print
 
 **ID**: `api-05-torn-phtc-silent-wrong-hash`
 
-**Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
+**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
 ### B33. Lua bindings call luaL_error inside C++ catch handlers and leak the exception
 
@@ -2054,7 +1980,7 @@ In the shared scenario the processor did not run, so the flash range is the only
 
 - `w2a-01-store-after-replace-memory-range-uses-stale-config`: run with `eval $(make -s env); lua5.4 bugs/w2a-01-store-after-replace-memory-range-uses-stale-config/test.lua`.
 
-**Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs).
+**Related**: B01 (fixed).
 
 ### B60. Full-shadow write_memory skips validation and never marks the TLB padding page dirty
 
@@ -3031,7 +2957,7 @@ BUG: SHARING_CONFIG load + run modified the stored snapshot S in place (mcycle 2
 
 **ID**: `p1-02-store-persists-load-time-sharing-all-as-config-shared-`
 
-**Related**: [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image), [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs).
+**Related**: [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image), B01 (fixed).
 
 ### B83. Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail
 
@@ -3417,7 +3343,7 @@ BUG: torn .phtc loads with correct root hash and verify_hash_tree()==true but yi
 
 **ID**: `u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr`
 
-**Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes), [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash).
+**Related**: B01 (fixed), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes), [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash).
 
 ### B92. Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash
 

@@ -1033,6 +1033,36 @@ describe("backing stores", function()
         expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
     end)
 
+    it("should mark pages dirty before clearing their stored hashes", function()
+        local ram_length = 0x10000
+        local directory = filesystem.temp_pathname()
+        do
+            local machine <close> = cartesi.machine({ ram = { length = ram_length } }, {}, directory)
+            machine:get_root_hash()
+        end
+        local _ <close> = tests_util.scope_exit(function()
+            cartesi.machine:remove_stored(directory)
+        end)
+        local prefix = string.format("%s/%016x-%x", directory, cartesi.AR_RAM_START, ram_length)
+        local dense_hashes = filesystem.read_file(prefix .. ".dht")
+        -- Truncate the RAM dirty-page tree under a loaded machine, so the process dies when clear_hash_tree writes it.
+        local _ <close>, script = filesystem.write_scope_temp_file(string.format(
+            [[
+local cartesi = require("cartesi")
+local machine = cartesi.machine(%q, {}, cartesi.SHARING_ALL)
+assert(io.open(%q, "w")):close()
+io.write("clearing"):flush()
+machine:clear_hash_tree()
+]],
+            directory,
+            prefix .. ".dpt"
+        ))
+        local child = assert(io.popen(arg[-1] .. " " .. script .. " 2>/dev/null"))
+        expect.equal(child:read("a"), "clearing")
+        expect.falsy(child:close())
+        expect.truthy(filesystem.read_file(prefix .. ".dht") == dense_hashes)
+    end)
+
     describe("page hash-tree cache eviction", function()
         local drive_start = 0x90000000
         local retained_start = 0xa0000000

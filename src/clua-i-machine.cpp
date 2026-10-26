@@ -397,7 +397,9 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
                         luaL_error(L, "table maps cannot contain keys of type %s", lua_typename(L, lua_type(L, -2)));
                     }
                     lua_pushvalue(L, -2); // push key copy, so lua_tostring cannot convert the key lua_next uses
-                    const char *field_name = lua_tostring(L, -1);
+                    size_t field_name_len = 0;
+                    const char *field_name_ptr = lua_tolstring(L, -1, &field_name_len);
+                    const std::string_view field_name(field_name_ptr, field_name_len);
                     const auto &field_schema = clua_get_field_schema(L, field_name, schema, user_schema_dict);
                     j[field_name] =
                         clua_push_managed_toclose_json_ref(L, -2, field_schema, user_schema_dict, ctxidx, depth + 1);
@@ -472,8 +474,9 @@ static void clua_push_json_value(lua_State *L, const nlohmann::json &j, const nl
             for (const auto &el : j.items()) {
                 const auto &field_name = el.key();
                 const auto &field_schema = clua_get_field_schema(L, field_name, schema, user_schema_dict);
+                lua_pushlstring(L, field_name.data(), field_name.length());
                 clua_push_json_value(L, el.value(), field_schema, user_schema_dict, ctxidx, depth + 1);
-                lua_setfield(L, -2, field_name.c_str());
+                lua_rawset(L, -3);
             }
             break;
         }

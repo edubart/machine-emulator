@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-27 confirmed issues: 2 high, 6 medium, 19 low.
+26 confirmed issues: 2 high, 6 medium, 18 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -45,7 +45,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B57](#b57-readwrite_virtual_memory-silently-do-nothing-for-ranges-that-reach-264) | low | pre-existing | C API (virtual memory access) | read/write_virtual_memory silently do nothing for ranges that reach 2^64 | `bugs/w2b-09-virtual-memory-range-wraparound/` |
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
-| [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys) | low | pre-existing | Lua bindings (JSON conversion) | tojson and fromjson truncate object keys at NUL bytes, merging distinct keys | `bugs/p3-06-json-nul-in-keys-truncated-merged/` |
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
@@ -971,56 +970,6 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 
 **Related**: B35 (fixed).
 
-### B72. tojson and fromjson truncate object keys at NUL bytes, merging distinct keys
-
-**Title**: cartesi.tojson/fromjson truncate object keys at the first NUL byte, so distinct keys silently merge and data is lost
-
-**Problem**: Lua strings and JSON strings can both contain NUL bytes, but the object-key paths of the Lua JSON bindings treat keys as C strings. In `tojson`, the key `"a\0b"` is read with `lua_tostring` and passed to `j[field_name]` as a `const char *`, so nlohmann builds the key with `strlen` and gets `"a"`. In `fromjson`, `lua_setfield(L, -2, field_name.c_str())` stores `"a\u0000b"` as `"a"`. Distinct keys therefore collapse into one, one value is dropped, and no error is raised. The schema lookup in `tojson` also uses the truncated key, so a key like `"hash\0x"` picks up the schema of field `hash`. String *values* are handled correctly, because that path uses `lua_tolstring` with its length (src/clua-i-machine.cpp:426), so keys and values are handled inconsistently. Which value survives a collision is not deterministic in `tojson`: it is whichever key `lua_next` visits last, and that order depends on Lua's per-run randomized string hash seed. One run gave `{"a":1}` and another gave `{"a":2}`.
-
-**Origin**: pre-existing. origin/main has the same code at src/clua-i-machine.cpp:402 and :475, and this branch does not touch these lines.
-
-**Area**: Lua JSON (`cartesi.tojson` / `cartesi.fromjson` in the Lua bindings)
-
-**Category**: correctness (silent data loss)
-
-**Location**:
-- src/clua-i-machine.cpp:402-405, in the object branch of `clua_push_managed_toclose_json_ref`: `const char *field_name = lua_tostring(L, -2);`, which is then used for `clua_get_field_schema(...)` and `j[field_name] = ...`
-- src/clua-i-machine.cpp:471-475, in the object branch of `clua_push_json_value`: `lua_setfield(L, -2, field_name.c_str());`
-
-**Evidence**: The test round-trips keys that contain NUL in both directions, and every check fails without raising an error.
-```
-$ eval $(make -s env); lua5.4 bugs/p3-06-json-nul-in-keys-truncated-merged/test_json_nul_keys.lua
-tojson:	true	{"a":1}
-BUG: tojson truncated key 'a\0b' at NUL, merged with key 'a' (got {"a":1})
-tojson single:	true	{"a":1}
-BUG: tojson({['a\0b']=1}) dropped the bytes after NUL in key: {"a":1}
-fromjson keys:	"a"=1
-BUG: fromjson truncated key "a\u0000b" at NUL; t['a\0b']=nil t.a=1
-(exit status 1)
-```
-- `tojson({["a\0b"]=1, a=2})` returns a single key, and which value survives changes from run to run.
-- `tojson({["a\0b"]=1})` returns `{"a":1}` even though no key collides.
-- `fromjson('{"a\u0000b":1,"a":2}')` returns a table that holds only `a=1`.
-
-**Scenario**: A PRT validator, Dave component or app uses `cartesi.tojson`/`cartesi.fromjson` as a general serializer for a table keyed by binary data. For example, it persists state keyed by raw 32-byte hashes, which can contain 0x00 bytes, or keyed by labels that came from the wire. Entries whose keys share a prefix before a NUL overwrite each other. The state restored from JSON is missing entries or attaches them to the wrong key, and nothing reports an error. A peer-supplied JSON line given to `cartesi.fromjson` (as in the game-transport recipes) can also use a key like `"operation\u0000x"` that is read as `"operation"`. That peer already controls its whole message, though, so this gives it no extra power. Machine configs, the JSON-RPC schemas and the runtime config use only fixed ASCII field names, and the remote machine's C++ JSON path does not go through this code. Hashes, proofs, step logs and machine configs are therefore unaffected.
-
-**Possible solution**:
-- In `tojson`, read the key with `size_t len; const char *p = lua_tolstring(L, -2, &len);` and use `std::string key(p, len)` for both `clua_get_field_schema` and `j[key]`.
-- In `fromjson`, push the key with `lua_pushlstring(L, key.data(), key.size())`, then use `lua_insert` and `lua_rawset` (or push the key before the value and call `lua_rawset`) instead of `lua_setfield`.
-- Optionally, make `cartesi_mod_fromjson` read its input with `luaL_checklstring` so that any content after a raw NUL byte is parsed (and rejected) instead of being silently ignored.
-
-**Severity**: low. Both reviewers agree. It is a real silent-data-loss defect whose outcome varies between runs, but it only affects generic tables whose keys contain NUL bytes. Validator-critical data (configs, RPC payloads, hashes, proofs) uses fixed ASCII keys, and the bug cannot cause a crash or memory corruption.
-
-**Risks**:
-- *Of the bug*: callers that serialize tables with binary keys can lose or misattribute data without noticing. Because `tojson`'s result depends on the hash seed, two nodes serializing the same table can produce different JSON.
-- *Of the fix*: very small. Keys without NUL behave exactly as before. Keys with NUL now round-trip as `\u0000` escapes, which could surprise a consumer that relied on the truncation, but none is known. Using `lua_rawset` instead of `lua_setfield` skips `__newindex`; this does not matter here because the target table was just created with `lua_createtable`.
-
-**Proof of concept**: `bugs/p3-06-json-nul-in-keys-truncated-merged/test_json_nul_keys.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/p3-06-json-nul-in-keys-truncated-merged/test_json_nul_keys.lua`. It exits with status 1 and prints `BUG:` lines while the bug is present, and exits with status 0 once it is fixed.
-
-**ID**: `p3-06-json-nul-in-keys-truncated-merged`
-
-**Related**: B71 (fixed), [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data).
-
 ### B73. fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data
 
 **Title**: `cartesi.fromjson` (and the JSON-RPC server's request parsing) stops at the first NUL byte and accepts JSON followed by NUL plus any trailing data
@@ -1076,7 +1025,7 @@ It exits with 1 and prints `BUG:` lines while the bug is present. It prints `PAS
 
 **ID**: `p3-05-fromjson-truncates-at-nul`
 
-**Related**: [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys).
+**Related**: B72 (fixed).
 
 ### B74. tojson silently writes NaN and infinities as null
 

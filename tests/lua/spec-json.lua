@@ -91,6 +91,11 @@ describe("tojson / fromjson schema dictionary", function()
         expect.equal(cartesi.tojson({ 1, nil, 3 }), "[1,null,3]")
     end)
 
+    it("should keep NUL bytes in object keys", function()
+        expect.equal(cartesi.tojson({ ["a\0b"] = 1, a = 2 }), '{"a":2,"a\\u0000b":1}')
+        expect.equal(cartesi.fromjson('{"a\\u0000b":1,"a":2}'), { ["a\0b"] = 1, a = 2 })
+    end)
+
     it("should serialize bare scalars with no schema", function()
         expect.equal(cartesi.tojson(42), "42")
         expect.equal(cartesi.tojson("str"), '"str"')

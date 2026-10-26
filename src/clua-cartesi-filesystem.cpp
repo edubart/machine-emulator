@@ -43,6 +43,14 @@ static int filesystem_core_mod_exists(lua_State *L) try {
     return 1;
 }
 
+static int filesystem_core_mod_file_size(lua_State *L) try {
+    lua_pushinteger(L, static_cast<lua_Integer>(os::file_size(luaL_checkstring(L, 1))));
+    return 1;
+} catch (const std::exception &e) {
+    luaL_error(L, "%s", e.what());
+    return 1;
+}
+
 static int filesystem_core_mod_create_directory(lua_State *L) try {
     os::create_directory(luaL_checkstring(L, 1));
     return 0;
@@ -138,6 +146,7 @@ static int filesystem_core_mod_sync_directory(lua_State *L) try {
 /// \brief Contents of the cartesi.filesystem.core module table.
 static const auto filesystem_core_mod = clua_make_luaL_Reg_array({
     {.name = "exists", .func = filesystem_core_mod_exists},
+    {.name = "file_size", .func = filesystem_core_mod_file_size},
     {.name = "create_directory", .func = filesystem_core_mod_create_directory},
     {.name = "list_directory", .func = filesystem_core_mod_list_directory},
     {.name = "clone_file", .func = filesystem_core_mod_clone_file},

@@ -95,10 +95,7 @@ function filesystem.write_file(data, filename)
 end
 
 -- Returns the size of a file in bytes.
-function filesystem.get_file_size(filename)
-    local f <close> = assert(io.open(filename, "rb"))
-    return (assert(f:seek("end")))
-end
+filesystem.get_file_size = core.file_size
 
 -- Writes a binary data to a temporary file.
 function filesystem.write_temp_file(data)

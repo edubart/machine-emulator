@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-87 confirmed issues: 6 high, 19 medium, 62 low.
+86 confirmed issues: 6 high, 19 medium, 61 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -101,7 +101,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
-| [B76](#b76-filesystemget_file_size-returns-263-1-for-directories-and-blocks-on-fifos) | low | introduced by branch | Lua cartesi.filesystem | filesystem.get_file_size returns 2^63-1 for directories and blocks on FIFOs | `bugs/p3-09-fs-get-file-size-directory-fifo/` |
 | [B77](#b77-filesystemremove_directory-deletes-files-and-remove_file-deletes-empty-directories) | low | introduced by branch | Lua cartesi.filesystem | filesystem.remove_directory deletes files and remove_file deletes empty directories | `bugs/p3-10-fs-remove-directory-removes-files/` |
 | [B78](#b78-evmu-function-signature-cache-never-evicts-entries) | low | pre-existing | Lua cartesi.evmu | evmu function-signature cache never evicts entries | `bugs/p3-12-evmu-func-sig-cache-never-evicts/` |
 | [B79](#b79-bint-shifts-by-a-bint-count-of-263-or-more-wrap-the-count-modulo-264) | low | pre-existing | Lua bint (cartesi.third-party.bint) | bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64 | `bugs/p3-13-bint-shift-count-wraps-mod-2-64/` |
@@ -4068,53 +4067,6 @@ The test exits 1 while the bug is present. It exits 0 once `tojson` raises an er
 
 **Related**: [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices).
 
-### B76. filesystem.get_file_size returns 2^63-1 for directories and blocks on FIFOs
-
-**Title**: `cartesi.filesystem.get_file_size` returns 2^63-1 for directories and blocks forever on FIFOs
-
-**Problem**: `filesystem.get_file_size` uses `io.open(filename, "rb")` followed by `f:seek("end")` and never calls `stat`, so it does not check that the path is a regular file. On Linux, `fopen` in read mode succeeds on a directory, and `lseek(SEEK_END)` on an ext4 (htree) directory returns `LLONG_MAX`. The function therefore returns `9223372036854775807` where it should raise an error. On a FIFO, a read-mode `fopen` blocks until a writer appears, so the call hangs forever. A file without read permission also fails, even though `stat` could still read its size. The documented contract is "Returns the size of a file in bytes".
-
-**Origin**: Introduced by this branch. `src/cartesi/filesystem.lua` was added in commit 956a179 ("feat: add the cartesi.filesystem Lua module") and does not exist on `origin/main`.
-
-**Area**: `cartesi.filesystem` Lua module, used by the PRT node recipe.
-
-**Category**: Correctness (missing file-type validation; possible hang).
-
-**Location**:
-- `src/cartesi/filesystem.lua:96-100`: `filesystem.get_file_size`
-- `doc/recipes/prt.lua:2734`: `assert(fs.get_file_size(outputs_log_path) >= outputs_log_size, "outputs.log lost committed records")`
-- `src/os-filesystem.cpp:130-139`: `os::file_size`, a `stat`-based version that rejects directories but is not exposed to Lua
-
-**Evidence**: The test creates a fresh directory under `/tmp` (ext4) and calls `pcall(fs.get_file_size, dir)`. It then creates a FIFO and calls `get_file_size` on it in a child process under a 3-second `timeout`.
-```
-$ eval $(make -s env); lua5.4 bugs/p3-09-fs-get-file-size-directory-fifo/test.lua
-get_file_size(directory) ->	true	9223372036854775807
-BUG: get_file_size on a directory returned 9223372036854775807 instead of failing
-BUG: assert(fs.get_file_size(dir) >= outputs_log_size) would pass for any size
-get_file_size(fifo) child output:	rc=124
-BUG: get_file_size on a FIFO blocked (killed by 3s timeout)
-exit=1
-```
-The test exits 1 while the bug is present and 0 once it is fixed. Both reviewers reproduced the directory result independently.
-
-**Scenario**: During recovery, the PRT node runs the `outputs.log lost committed records` guard before it truncates `outputs.log`. If `outputs.log` in the node's data directory is a directory, for example from a bad layout, a leftover, or an operator mistake, the guard passes with a bogus size instead of reporting the problem. The next call, `fs.truncate_file`, then fails with "open() failed: Is a directory". The node stops with a misleading error and no state is corrupted. If a FIFO is planted at that path, or at any path a tool size-checks with this helper, the process hangs forever instead of failing. Hashes, proofs and step logs are not affected.
-
-**Possible solution**: Expose a `stat`-based size function through `cartesi.filesystem`'s C core (`os::file_size`) and have it require `S_ISREG`. Note that `os::file_size` today rejects only `S_ISDIR`, so it should be tightened to reject FIFOs, sockets and devices too. An alternative is to open with `O_RDONLY|O_NONBLOCK`, `fstat`, require `S_ISREG`, and return `st_size`.
-
-**Severity**: Low. Both reviewers agree. The trigger needs a malformed or hostile local data directory (an attacker with write access there can already disrupt the node in simpler ways). In the only real caller, the very next truncate fails anyway, so the visible effect is a different error message or a hang. No hashes, proofs or stored state are affected.
-
-**Risks**:
-- Of the bug: the guard passes for the wrong reason and the node reports a misleading error; a FIFO at a checked path causes an indefinite hang (local DoS); readable-size checks fail on files without read permission.
-- Of the fix: low. Callers that relied on `get_file_size` working on non-regular files, such as block devices, which `seek("end")` sizes correctly while `stat` reports `st_size == 0`, would now get an error. If block devices must be supported, handle them explicitly (for example with `BLKGETSIZE64` or by keeping the seek path for `S_ISBLK`).
-
-**Proof of concept**: `bugs/p3-09-fs-get-file-size-directory-fifo/test.lua`. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/p3-09-fs-get-file-size-directory-fifo/test.lua
-```
-Requires `mkfifo` and `timeout` (coreutils). Exit code 1 means the bug reproduces; 0 means it is fixed.
-
-**ID**: `p3-09-fs-get-file-size-directory-fifo`
-
 ### B77. filesystem.remove_directory deletes files and remove_file deletes empty directories
 
 **Title**: cartesi.filesystem: remove_directory deletes regular files and remove_file deletes empty directories (both call os.remove)
@@ -4160,7 +4112,7 @@ It exits 1 and prints the two `BUG:` lines while the bug is present. It prints `
 
 **ID**: `p3-10-fs-remove-directory-removes-files`
 
-**Related**: [B76](#b76-filesystemget_file_size-returns-263-1-for-directories-and-blocks-on-fifos).
+**Related**: B76 (fixed).
 
 ### B78. evmu function-signature cache never evicts entries
 

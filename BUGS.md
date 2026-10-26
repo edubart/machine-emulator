@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-56 confirmed issues: 3 high, 11 medium, 42 low.
+55 confirmed issues: 3 high, 11 medium, 41 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -51,7 +51,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
-| [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
 | [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
@@ -1195,59 +1194,6 @@ The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is 
 
 **Related**: B18 (fixed).
 
-### B42. filesystem.rename_file does not replace existing files on Windows
-
-**Title**: `cartesi.filesystem.rename_file` does not replace an existing destination on Windows, so every hash-tree durable rewrite after the first fails (`frontier_store`, `frontier_forest_store`, StoredTree)
-
-**Problem**: `filesystem.rename_file(from, to)` says it renames "atomically replacing the destination if it exists", but its body is just `assert(os.rename(from, to))`. Lua's `os.rename` is plain ISO C `rename()`. POSIX `rename()` replaces the destination. The Windows CRT `rename()` (msvcrt/UCRT, and so MinGW builds too) fails with `EEXIST`/`EACCES` when the destination exists. `temporary_file:rename` calls `rename_file`. `hash-tree.lua`'s `write_file` uses `temporary_file:rename` for every durable write, and its callers rewrite a fixed path on each commit:
-- StoredTree persistence
-- `frontier_store`
-- `frontier_forest_store`
-
-On Windows, the first write of each file succeeds and every later write raises. The destination keeps its stale contents. Nothing removes the destination first or falls back to another way of replacing it, and the C core has no Windows-aware rename helper.
-
-**Origin**: Introduced by this branch. `src/cartesi/filesystem.lua` and the hash-tree persistence code do not exist on `main`.
-
-**Area**: Lua library `cartesi.filesystem` (`src/cartesi/filesystem.lua`) and its users in `cartesi.hash-tree` (`src/cartesi/hash-tree.lua`). Validator nodes use these to persist output and epoch frontiers and stored trees.
-
-**Category**: API contract / portability. Availability: persisting state raises an error.
-
-**Location**:
-- `src/cartesi/filesystem.lua:127`: `function filesystem.rename_file(from, to) assert(os.rename(from, to)) end`
-- `src/cartesi/filesystem.lua:45-49`: `temporary_file:rename` calls `filesystem.rename_file`
-- `src/cartesi/hash-tree.lua:509-514`: local `write_file` (temporary file, sync, then rename)
-- `src/cartesi/hash-tree.lua:592` (StoredTree), `:936` (`frontier_store`), `:988` (`frontier_forest_store`): callers that rewrite a fixed path
-- Windows is an intended target. `src/os-filesystem.cpp` has new `_WIN32` branches (for example `create_temporary_file` at :667, plus `sync_file` and `sync_directory`), and `README.md:45` lists Windows support.
-
-**Evidence**: `test.lua` loads the repo's unmodified `src/cartesi/filesystem.lua`. It stubs only the C core functions `create_temporary_file`, `sync_file` and `sync_directory`, because the native core is not built for Windows here and the rename path does not use them. It then runs the same temporary-file, sync and rename sequence as `hash-tree.lua` `write_file` twice on one path. `run.sh` runs the test once with native Linux Lua and once with a Windows `lua.exe` (Lua 5.4.6, cross-built with mingw-w64) under Wine. Run it with `eval $(make -s env); sh bugs/lua-26-rename-not-replacing-on-windows/run.sh`. It exits 1:
-```
-== native lua5.4 (Linux) ==
-second store:	true	nil
-destination contents:	commit-2
-OK: destination replaced
-== Windows lua.exe under wine ==
-first store:	true	nil
-second store:	false	Z:/home/user/machine-emulator/src/cartesi\filesystem.lua:127: File exists
-destination contents:	commit-1
-BUG: rename_file did not replace existing destination (second frontier store failed): ...filesystem.lua:127: File exists
-```
-
-**Scenario**: A validator node built for Windows (or any tool using `cartesi.hash-tree` persistence there) persists the outputs frontier or the epoch-builder forest after each input or epoch. The first commit creates the file. The second commit raises `File exists`, and the node stops persisting state or crashes. After a restart it reloads the stale commit-1 frontier, if it reloads at all. Re-persisting a StoredTree to the same path fails the same way. Hashes and proofs are never silently wrong, because the failure is loud. Rollups Node and Dave do not deploy on Windows today, and the repo has no Windows build or CI, so the realistic reach is limited to people porting a node or tools to Windows.
-
-**Possible solution**: Implement the rename in the C core and expose it as `core.rename_file`. Use `rename()` on POSIX. On Windows, use `MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` (or `ReplaceFileW`), or use `std::filesystem::rename`, which replaces on both. Make `filesystem.rename_file` use it. Do not "remove the destination, then rename" in Lua: that breaks atomicity, because a crash between the two steps loses the file.
-
-**Severity**: Low. Both reviewers agree. The failure is loud, affects availability only, and occurs only on Windows builds, which have no build or CI support in the repo and are not used by Rollups Node or Dave. No data is corrupted, and no hashes or proofs come out wrong.
-
-**Risks**:
-- **Of the bug**: a Windows-hosted node cannot persist state after its first commit. A recovery path that writes the same file twice also fails.
-- **Of the fix**: a careless fallback (remove, then rename) opens a crash window in which neither the old file nor the new one exists. `MoveFileExW` can still fail with sharing violations while another handle holds the destination open, for example a concurrent reader or an antivirus scanner, so callers should expect it to fail occasionally.
-
-**Proof of concept**: `bugs/lua-26-rename-not-replacing-on-windows/test.lua` and `bugs/lua-26-rename-not-replacing-on-windows/run.sh`. From the repo root, run `eval $(make -s env); sh bugs/lua-26-rename-not-replacing-on-windows/run.sh`.
-
-It needs `lua5.4` and `wine` (or `wine64`). It also needs either `WIN_LUA=<path to a Windows lua.exe>`, or `x86_64-w64-mingw32-gcc` so the script can cross-build Lua 5.4.6. The script builds it from `LUA_TARBALL`, or downloads it from lua.org, and caches it in `${TMPDIR:-/tmp}/bugs-lua-26-winlua`. Exit status 1 together with a `BUG:` line means the bug reproduced.
-
-**ID**: `lua-26-rename-not-replacing-on-windows`
-
 ### B45. ABI decoder amplifies memory use through aliased dynamic offsets
 
 **Title**: evmu ABI decoder: aliased dynamic-element offsets cause quadratic (nested: exponential) memory/CPU amplification
@@ -2213,7 +2159,7 @@ eval $(make -s env); lua5.4 bugs/w2a-07-hash-tree-lua-parent-dir-ignores-backsla
 
 **ID**: `w2a-07-hash-tree-lua-parent-dir-ignores-backslash`
 
-**Related**: B34 (fixed), [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows).
+**Related**: B34 (fixed), B42 (fixed).
 
 ### B67. Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable
 

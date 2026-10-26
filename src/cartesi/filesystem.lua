@@ -139,7 +139,7 @@ end
 filesystem.remove_file = core.remove_file
 
 -- Renames a file, atomically replacing the destination if it exists.
-function filesystem.rename_file(from, to) assert(os.rename(from, to)) end
+filesystem.rename_file = core.rename_file
 
 -- Removes an empty directory.
 filesystem.remove_directory = core.remove_directory

@@ -64,6 +64,12 @@ void remove_directory(const std::string &dirname);
 /// \details The operation fails when the directories are on different filesystems.
 void rename_directory(const std::string &from, const std::string &to);
 
+/// \brief Renames a file, atomically replacing the destination if it exists.
+/// \param from Source file, must exist.
+/// \param to Destination file.
+/// \throw std::system_error on error.
+void rename_file(const std::string &from, const std::string &to);
+
 /// \brief Removes a file.
 /// \param filename Path to the file, must exist.
 /// \throw std::system_error on error.

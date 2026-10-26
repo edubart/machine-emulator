@@ -99,6 +99,14 @@ static int filesystem_core_mod_remove_file(lua_State *L) try {
     return 1;
 }
 
+static int filesystem_core_mod_rename_file(lua_State *L) try {
+    os::rename_file(luaL_checkstring(L, 1), luaL_checkstring(L, 2));
+    return 0;
+} catch (const std::exception &e) {
+    luaL_error(L, "%s", e.what());
+    return 1;
+}
+
 // Truncates or extends a file to a size, filling an extension with zeros.
 static int filesystem_core_mod_truncate_file(lua_State *L) try {
     const lua_Integer size = luaL_checkinteger(L, 2);
@@ -171,6 +179,7 @@ static const auto filesystem_core_mod = clua_make_luaL_Reg_array({
     {.name = "list_directory", .func = filesystem_core_mod_list_directory},
     {.name = "clone_file", .func = filesystem_core_mod_clone_file},
     {.name = "remove_file", .func = filesystem_core_mod_remove_file},
+    {.name = "rename_file", .func = filesystem_core_mod_rename_file},
     {.name = "truncate_file", .func = filesystem_core_mod_truncate_file},
     {.name = "create_temporary_file", .func = filesystem_core_mod_create_temporary_file},
     {.name = "sync_file", .func = filesystem_core_mod_sync_file},

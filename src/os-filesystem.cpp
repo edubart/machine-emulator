@@ -192,6 +192,15 @@ void rename_directory(const std::string &from, const std::string &to) {
     }
 }
 
+void rename_file(const std::string &from, const std::string &to) {
+    // Unlike rename() on Windows, std::filesystem::rename() replaces an existing destination
+    std::error_code ec;
+    std::filesystem::rename(from, to, ec);
+    if (ec) {
+        throw make_copy_path_system_error(ec.value(), "unable to rename file"s, from, to);
+    }
+}
+
 void remove_file(const std::string &filename) {
     if (unlink(filename.c_str()) != 0) {
         throw make_path_system_error(errno, "unable to remove file"s, filename);

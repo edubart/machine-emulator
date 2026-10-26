@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-90 confirmed issues: 5 high, 20 medium, 65 low.
+91 confirmed issues: 6 high, 20 medium, 65 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -30,6 +30,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files) | high | introduced by branch | Lua cartesi.hash-tree and cartesi.filesystem (durable writes) | frontier_forest_store and fs.sync_file ignore write errors and commit truncated files | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
 | [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
 | [B85](#b85-uarch-write_tlb-never-range-checks-set_index-so-a-crafted-template-writes-host-memory-out-of-bounds) | high | pre-existing | uarch (shadow TLB ECALL) | uarch WRITE_TLB never range-checks set_index, so a crafted template writes host memory out of bounds | `bugs/c1-01-uarch-write-tlb-set-index-oob-host-write/` |
+| [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
@@ -5211,6 +5212,90 @@ The on-chain step, like `verify_step_uarch`, accepts the transition. A dishonest
 **Reviewer note**: An earlier panel (`c1-02-uarch-record-replay-asymmetry-tlb-slot-and-protected-w`) reproduced the same record and replay asymmetry, also for writes to protected or read-only shadow words, and rejected it 2 to 1 because it needs a uarch RAM image other than the built-in one. This panel confirmed it. Both agree it needs a custom uarch image in the template.
 
 **Related**: [B85](#b85-uarch-write_tlb-never-range-checks-set_index-so-a-crafted-template-writes-host-memory-out-of-bounds).
+
+### B91. Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs
+
+**Title**: Read-only hash-tree queries after sync_stored rewrite the shared .phtc in place; after a host crash the machine is unloadable, or gives wrong word proofs while the root hash and verify_hash_tree() look correct
+
+**Problem.** On a machine loaded with `SHARING_ALL`, `hash_tree.phtc` is mapped shared, so every change to the page hash-tree cache goes straight into the stored file. This includes the header, the entry metadata (the intrusive `offset_ptr` LRU links, `paddr_page`, the `borrowed` flag and `payload_index`) and the cached page payloads and trees. Queries a caller would treat as read-only still mutate this file:
+- Each `get_root_hash`/`get_proof` runs `update_hash_tree`, which re-marks up to 256 write-TLB pages and the always-dirty pages as dirty. Their cache entries are then borrowed and returned again.
+- Each `get_proof` borrows an entry. A hit splices it to the LRU front. A miss evicts the LRU tail, sets a new `paddr_page` and recomputes the payload in place.
+
+None of these writes is ordered or journaled, and the file carries no clean/valid marker. A single `get_root_hash` after `sync_stored` already changes 25 .phtc pages, and a batch of proofs changes every page of the file.
+
+If the host crashes while the kernel is writing those dirty pages back (in any order, any subset), the .phtc on disk is a mix of synced and later pages. On load there are two outcomes:
+- (a) The structural checks throw ("duplicate page address" or "inconsistent LRU links"). Nothing discards or rebuilds what is only a cache, so the machine cannot be loaded.
+- (b) The structure is valid, but some entries claim pages whose payload holds another page's tree. `get_page_proof` trusts a cache hit, so word proofs are wrong. `get_root_hash` and `verify_hash_tree()` use the dense tree and the page data, so they still report a correct state.
+
+**Origin.** Pre-existing. On origin/main the .phtc was already persisted through a mapped LRU. This branch reworked the layout in `page-hash-tree-cache.hpp`/`hash-tree.cpp` but kept the behavior.
+
+**Area.** Page hash-tree cache persistence (`hash_tree.phtc`) and proof generation.
+
+**Category.** Durability / crash consistency (silent proof corruption).
+
+**Location.**
+- `src/page-hash-tree-cache.hpp:515-555`: `borrow_entry` does the LRU `splice`, `push_front`, `pop_back`, `set_paddr_page` and `set_borrowed` in the mapped file.
+- `src/page-hash-tree-cache.hpp:566-572`: `return_entry` clears the borrowed flag in place.
+- `src/page-hash-tree-cache.hpp:443-455` and `689-723`: the load-time checks (`check_metadata`, the duplicate-address map build) throw on inconsistency and otherwise trust every entry.
+- `src/hash-tree.cpp:100-134`: `get_page_proof` uses a cache-hit payload without checking it against the dense tree or the page data.
+- `src/machine.cpp:1549-1560`: `update_hash_tree` re-marks the TLB and always-dirty pages on every `get_root_hash`/`get_proof`.
+
+**Evidence.** The test builds a 4 MiB RAM image with distinct content in every page and a cache of `phtc_size=256` (771 .phtc pages, 3 of them metadata), and stores it. A child process then:
+1. clones the stored machine and loads it `SHARING_ALL`, calls `get_root_hash`, then `sync_stored`, and snapshots the directory as S (the durable state);
+2. calls `get_root_hash` again and snapshots R, then calls `get_proof` on N pages, snapshots U and kills itself with SIGKILL.
+
+The parent rebuilds .phtc files page by page from S and U, as a torn writeback would leave them, loads each one and compares 1024 word proofs with a fresh reference machine.
+
+Run: `eval $(make -s env); timeout 600 lua5.4 bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/phtc_torn.lua` (about 8 s, exits 1). Output excerpt:
+```
+pages changed by one get_root_hash after sync_stored: 25
+pages changed by get_root_hash+get_proof after sync_stored: 771 (metadata 3)
+all pages from S (synced image)        loads; root ok=true verify_hash_tree=true ... bad proofs=0/1024
+first 1 metadata page(s) from U        LOAD FAILED: corrupted page hash-tree cache: duplicate page address
+all metadata from U, payloads from S   loads; root ok=true verify_hash_tree=true proofs-call=true bad proofs=248/1024 first=776 proof.root_hash ok=true, target_hash==keccak(actual word): false, proof recomputes to root: false
+=== scenario: ... get_proof on 300 pages ...
+first 1 metadata page(s) from U        loads; root ok=true verify_hash_tree=true ... bad proofs=62/1024 ...
+BUG: 4 torn .phtc mixtures (...) make the stored machine unloadable
+BUG: torn .phtc loads with correct root hash and verify_hash_tree()==true but yields wrong word proofs
+```
+- With N=1024 queried pages, every mix that takes some metadata pages from U fails to load.
+- With N=300, every metadata mix loads and gives 52 to 144 bad proofs.
+- "Metadata from U, payloads from S" (an ascending writeback cut short) loads in both cases and gives 248 bad proofs.
+- The bad proofs carry the correct `root_hash` field, but their `target_hash` is not the keccak of the word and they do not recompute to the root.
+
+**Scenario.**
+- A validator node (for example `doc/recipes/prt.lua`) keeps an epoch machine loaded `SHARING_ALL`, commits with `sync_stored`, and then keeps serving `get_root_hash` and outputs or dispute proofs from it.
+- `recover_epoch_machine` assumes the directory "was synced at that boundary and is unchanged since" (`doc/recipes/prt.lua:2673`). Reopening it with `new_stored_machine` and calling `get_root_hash` rewrites the .phtc again.
+- If the power fails or the kernel panics during the writeback, there are two outcomes:
+  - (a) `cartesi.machine(dir)` throws, `get_stored_root_hash` returns nil, the assert fires and the node crash-loops with no recovery path.
+  - (b) The directory loads with the recorded root hash, so recovery accepts it. The bad cache then spreads through `clone_stored`, and later word proofs, uarch step logs and `send_cmio` logs for the affected pages are wrong. These all go through `get_proof`/`get_page_proof` (`uarch-record-state-access.hpp:103`, `record-send-cmio-state-access.hpp`). The on-chain verifier rejects the honest player's moves and the player loses the dispute. `verify_hash_tree()` cannot detect it.
+- Any Rollups Node, Dave or app integration that loads `SHARING_ALL`, syncs, then queries is exposed in the same way.
+
+**Possible solution.** Use one or more of these:
+- Keep a clean/valid flag in the .phtc header. Clear it (and flush it) before the first change after a sync or load, and set it again in `sync_stored`/`store`. On load, a cache that is not clean is discarded and rebuilt from the page data.
+- When `check_metadata` or the duplicate check fails, reset the cache instead of throwing.
+- Check a cache hit's payload root against the page hash in the dense tree before trusting it, and recompute on a mismatch.
+- Map the .phtc privately (or in anonymous memory) and write it out only at `store`/`sync_stored`, so read-only queries never change the stored directory.
+
+**Severity.** High. Both reviewers rate it high:
+- After a power loss, a node that only queried its synced machine either cannot reopen it (a permanent crash loop) or reopens a directory that passes the root-hash and `verify_hash_tree` checks and then produces wrong proofs and step logs.
+- Outcome (b) can make an honest player lose a dispute, which taken alone would be critical. It is not rated critical because it needs a host-level crash during the writeback window plus a particular partial writeback. A process crash (SIGKILL) alone does not trigger it, because the page cache survives.
+
+**Risks.**
+- Of the bug: permanent unavailability of a stored machine, or undetectable wrong proofs that cause disputes to be lost. The writeback window recurs every time the machine is queried after a sync, and the cm.h contract that changes before a sync are durable is broken in practice.
+- Of the fix:
+  - A clean flag adds a flush on the first change after each load or sync, which costs some latency.
+  - Discarding the cache on load costs a cold-cache rebuild after a crash.
+  - Checking cache hits against the dense tree adds hashing to `get_proof`.
+  - Moving the cache to a private mapping changes the cost of `sync_stored`/`store` and the meaning of `SHARING_ALL` for the .phtc.
+  - Any change to the header layout or load path must stay compatible with existing stored machines, or reject them cleanly.
+
+**Proof of concept.** `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/phtc_torn.lua`. It is self-contained, re-invokes itself as the child process, and writes its scratch files to a `run/` directory next to itself, which it removes on exit. The host crash is simulated by splicing pages of the S and U snapshots, which is a fair model since writeback of a `MAP_SHARED` mapping has no ordering guarantee. Run it from the repo root:
+`eval $(make -s env); timeout 600 lua5.4 bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/phtc_torn.lua`. Exit code 1 and the `BUG:` lines mean the bug reproduces.
+
+**ID**: `u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr`
+
+**Related**: [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs), [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes).
 
 ## Candidates that were not confirmed
 

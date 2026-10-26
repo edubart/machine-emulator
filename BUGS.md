@@ -5034,6 +5034,10 @@ The candidate also measured the remote path with a 128 MiB machine. 512 samples 
 
 **ID**: `u3-01-hash-tree-omp-tiny-batch-slowdown`
 
+**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
+
+- `c2-01-omp-parallel-threshold-tiny-batches-contention-meltdow`: run with `eval $(make -s env); lua5.4 bugs/c2-01-omp-parallel-threshold-tiny-batches-contention-meltdow/test.lua`. It shows that 8 of the 9 pages in a typical batch are the always-dirty shadow and TLB pages, so the threshold is crossed on almost every update.
+
 **Related**: [B86](#b86-set_runtime_config-reports-a-new-hash-tree-concurrency-that-is-never-applied).
 
 ### B88. Read-only memory ranges longer than their page-aligned image are always rejected

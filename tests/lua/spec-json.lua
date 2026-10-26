@@ -246,6 +246,14 @@ describe("tojson / fromjson schema dictionary", function()
         end, "tuple schema")
     end)
 
+    it("should map strings to integers only for enum schemas", function()
+        expect.equal(cartesi.fromjson('"halted"', "InterpreterBreakReason"), cartesi.BREAK_REASON_HALTED)
+        local SCHEMA = { Pair = { items = { "Base64", "Default" } } }
+        expect.equal(cartesi.fromjson('"items"', "Pair", SCHEMA), "items")
+        expect.equal(cartesi.fromjson('"items"', "Base64Array"), "items")
+        expect.equal(cartesi.fromjson('"root_hash"', "Proof"), "root_hash")
+    end)
+
     it("should roundtrip a Proof through the machine schema dictionary", function()
         local proof = machine:get_proof(0, 12)
         expect.equal(#proof.root_hash, 32)

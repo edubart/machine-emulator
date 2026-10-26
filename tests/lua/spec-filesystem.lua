@@ -107,6 +107,17 @@ describe("filesystem", function()
         expect.equal(filesystem.read_file(dirname .. "/65000"), "contents")
     end)
 
+    it("clones read-only files reached through symbolic links", function()
+        local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
+        local original, link, clone = dirname .. "/original", dirname .. "/link", dirname .. "/clone"
+        filesystem.write_file("contents", original)
+        assert(os.execute("chmod a-w " .. original .. " && ln -s original " .. link))
+        filesystem.clone_file(link, clone)
+        filesystem.remove_file(link)
+        filesystem.remove_file(original)
+        expect.equal(filesystem.read_file(clone), "contents")
+    end)
+
     it("truncates and extends files", function()
         local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
         local filename = dirname .. "/log"

@@ -531,7 +531,13 @@ void copy_file(const std::string &from, const std::string &to, uint64_t size) {
 }
 
 void hardlink_file(const std::string &from, const std::string &to) {
-    if (link(from.c_str(), to.c_str()) != 0) {
+#ifdef _WIN32
+    const int failed = link(from.c_str(), to.c_str());
+#else
+    // Link the file a symbolic link points to, not the symbolic link itself (POSIX link() may do either)
+    const int failed = linkat(AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), AT_SYMLINK_FOLLOW);
+#endif
+    if (failed != 0) {
         throw make_copy_path_system_error(errno, "unable to create hard link"s, from, to);
     }
 }

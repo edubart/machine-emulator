@@ -506,5 +506,30 @@ describe("hash tree", function()
     end
 end)
 
+describe("hash tree concurrency", function()
+    it("should update small batches of dirty pages without worker threads", function()
+        local jsonrpc = require("cartesi.jsonrpc")
+        local stored_dirname = filesystem.temp_pathname()
+        local _ <close> = tests_util.scope_exit(function()
+            cartesi.machine:remove_stored(stored_dirname)
+        end)
+        do
+            local machine <close> = cartesi.machine({ ram = { length = 0x100000 } })
+            machine:get_root_hash()
+            machine:store(stored_dirname)
+        end
+        -- The stored hash tree is up to date, so the update only hashes the pages written below
+        local server <close>, _, pid = jsonrpc.spawn_server()
+        server:set_cleanup_call(jsonrpc.SHUTDOWN):load(stored_dirname, { concurrency = { update_hash_tree = 2 } })
+        for page = 0, 31 do
+            server:write_memory(cartesi.AR_RAM_START + page * PAGE_SIZE, "\1")
+        end
+        server:get_root_hash()
+        local tasks <close> = assert(io.popen("ls /proc/" .. pid .. "/task"))
+        local _, thread_count = tasks:read("a"):gsub("\n", "")
+        expect.equal(thread_count, 1)
+    end)
+end)
+
 lester.report()
 lester.exit()

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-37 confirmed issues: 2 high, 8 medium, 27 low.
+36 confirmed issues: 2 high, 8 medium, 26 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -40,7 +40,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
-| [B48](#b48-evmu-hex-decoding-accepts-sign-characters) | low | pre-existing | Lua cartesi.evmu (ABI) | evmu hex decoding accepts sign characters | `bugs/lua-33-evmu-fromhex-sign-chars/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B54](#b54-a-transient-accept-error-closes-the-json-rpc-servers-listening-socket-for-good) | low | pre-existing | JSON-RPC remote machine server | A transient accept error closes the JSON-RPC server's listening socket for good | `bugs/w2b-06-jsonrpc-accept-error-kills-server/` |
@@ -537,54 +536,6 @@ Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image c
 **ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
 
 **Related**: B39 (fixed).
-
-### B48. evmu hex decoding accepts sign characters
-
-**Title**: evmu `fromhex`/`decode_hex` accepts `+`/`-` sign characters: malformed hex is silently decoded, or raises instead of returning `nil, err`
-
-**Problem**: `fromhex` checks only for whitespace, the `0x` prefix and even length. It then decodes each 2-character group with `tonumber(c, 16)` and treats only a `nil` result as invalid. In Lua 5.4, `tonumber` with a base accepts a leading sign, so `"+f"` gives 15, `"-0"` gives 0 and `"-1"` gives -1. This has three effects:
-- `"0x+f"` decodes to `"\x0f"` and `"0x-0"` decodes to `"\0"`. Both are malformed and should be rejected.
-- `"0x-1"` through `"0x-f"` pass a negative value to `string.char`. That raises `bad argument #1 to 'char' (value out of range)` instead of returning the documented `nil, err`.
-- The function feeds every hex-typed argument of the encoders. As a result, a malformed address such as `"0x" .. ("+f"):rep(20)` is silently encoded as `0x0f0f…0f`.
-
-**Origin**: pre-existing. `origin/main` has the same `tonumber(c, 16)` line, and the branch's evmu change (selectorless ABI encode/decode) does not touch `fromhex`.
-
-**Area**: `cartesi.evmu` Lua library, hex helpers. The library ships: `evmu.lua` is in `EMU_TO_LUA_PATH`.
-
-**Category**: api-contract / input validation
-
-**Location**:
-- `src/cartesi/evmu.lua:56-76`: `fromhex`. The `tonumber(c, 16)` call is at line 64 and the `string.char(n)` that raises is at line 69.
-- `src/cartesi/evmu.lua:636`: `_M.decode_hex = fromhex`.
-- `src/cartesi/evmu.lua:389-402`: `get_raw_expect_hex` and `get_raw_expect_raw`, used by the address, `bytesN` and `bytes` encoders in `encode_calldata`/`encode_abi`. `decode_calldata_hex` also calls `fromhex`.
-
-**Evidence**: running the test from the repo root with `eval $(make -s env); lua5.4 bugs/lua-33-evmu-fromhex-sign-chars/test-fromhex-sign-chars.lua` prints:
-```
-decode_hex('0x+f') ->	true	"\15"	nil
-BUG: decode_hex accepted '0x+f' as "\15" (should return nil,err)
-decode_hex('0x-0') ->	true	"\0"	nil
-decode_hex('0x-1') ->	false	.../src/cartesi/evmu.lua:69: bad argument #1 to 'char' (value out of range)
-encode_calldata_hex('f(address)', {0x+f+f+…+f}) ->	true	0xfc68521a0000000000000000000000000f0f0f…0f
-exit=1
-```
-
-**Scenario**: a Lua caller (for example a validator node, a Rollups tooling script or a CLI wrapper) uses `evmu.decode_hex` to validate hex from an external source such as a JSON-RPC provider, a config file or user input, and expects `nil, err` on bad input. Two things can go wrong:
-- A string with `-X` groups raises an error. Without a `pcall`, that error propagates and can crash the caller.
-- A string with `+X` or `-0` groups is accepted as valid, with content different from what was apparently intended.
-
-The same happens when such a string is passed as an `address` or `bytes` argument to `encode_calldata`/`encode_abi`. Well-formed hex is always decoded correctly. Machine hashes, proofs and step logs do not depend on evmu. Within the package, no CLI or C API path feeds untrusted hex to it.
-
-**Possible solution**: reject any non-hex-digit character before decoding, for example `local bad = hex:find("[^%x]", 3); if bad then return nil, string.format("hex string cannot contain %q", hex:sub(bad, bad)) end`. Alternatively, validate each group with `c:match("^%x%x$")` before calling `tonumber`.
-
-**Severity**: low. Both reviewers rated it low. The bug cannot affect machine state, hashes, proofs or dispute outcomes, and it needs malformed external hex containing sign characters. Its effects are limited to two: malformed input is accepted, or an exception is raised (catchable with `pcall`) where `nil, err` was expected. The assert-based encoder paths raise on bad hex anyway.
-
-**Risks**:
-- Bug: hex that should be rejected is accepted with different content, which could matter for a caller that uses `decode_hex` as a validator. Callers that rely on the `nil, err` contract can also hit an unexpected error.
-- Fix: minimal. It makes only already-malformed input fail, so any caller that currently depends on `"+f"`-style strings being accepted would start getting errors. That is the intended behaviour.
-
-**Proof of concept**: `bugs/lua-33-evmu-fromhex-sign-chars/test-fromhex-sign-chars.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-33-evmu-fromhex-sign-chars/test-fromhex-sign-chars.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 once it is fixed.
-
-**ID**: `lua-33-evmu-fromhex-sign-chars`
 
 ### B49. Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes
 

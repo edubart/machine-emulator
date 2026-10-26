@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-9 confirmed issues: 2 high, 2 medium, 5 low.
+8 confirmed issues: 2 high, 2 medium, 4 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -29,7 +29,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
-| [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
@@ -208,53 +207,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 - `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B26. --clear-hash-tree is silently ignored for existing remote machines
-
-**Title**: `cartesi-machine` silently ignores `--clear-hash-tree` (and other runtime options) with `--remote-address --no-remote-create` and no `--load`
-
-**Problem**: The CLI applies `runtime_config` only by passing it to `main_machine:load(...)` or `main_machine:create(...)`. That includes `clear_hash_tree`, which this branch adds. When the CLI attaches to an existing remote machine (`--remote-address=X --no-remote-create`, with no `--load`), it calls neither one. As a result `--clear-hash-tree` is accepted with no error or warning and does nothing. The machine already has an API that would do the job (`machine:clear_hash_tree()` in Lua, C and JSON-RPC), but the CLI never calls it. The CLI already rejects a similar meaningless combination, `--create` with `--no-remote-create`, but not this one. The other runtime options (`--concurrency=update_hash_tree:N`, console options, `--skip-version-check`, `--no-reserve`) are dropped the same way on this path. That part predates the branch.
-
-**Origin**: Introduced by this branch (the `--clear-hash-tree` option and the `clear_hash_tree` runtime field). The underlying pattern of dropping runtime options on this path already existed.
-
-**Area**: `cartesi-machine` CLI
-
-**Category**: api-contract (option silently ignored)
-
-**Location**:
-- `src/cartesi-machine.lua:2802-2810`: `runtime_config` is built, including `clear_hash_tree = cmdline.clear_hash_tree`
-- `src/cartesi-machine.lua:2978-2982`: only `load` receives it, and the `elseif not (cmdline.remote_address and not cmdline.remote_create)` branch skips the existing-remote case
-- `src/cartesi-machine.lua:3111`: only `create` receives it
-- `src/cartesi-machine.lua:2819-2823`: the assert that rejects `--create` with `--no-remote-create` (there is no equivalent check for runtime-only options)
-- `src/cartesi-machine.lua:715, 2127-2129`: option help and parsing
-- `src/machine.cpp:316`: `clear_hash_tree` is honoured only while the machine is being constructed
-
-**Evidence**: The test spawns a JSON-RPC server, creates a 1 MiB machine on it, fills the hash tree and resets `get_hash_tree_stats`. It then runs the CLI against that machine with `--remote-address=X --no-remote-create --no-remote-destroy --clear-hash-tree --max-mcycle=0 --final-hash`. The CLI exits 0, yet the remote machine shows 0 page rehashes both during the CLI run and on the next `get_root_hash`. An explicit `clear_hash_tree()` causes 2058 page rehashes. Run command: `eval $(make -s env); lua5.4 bugs/rpc-09-clear-hash-tree-ignored-existing-remote/test_clear_hash_tree_existing_remote.lua`
-```
-running: timeout 60 cartesi-machine.lua --remote-address=127.0.0.1:34253 --no-remote-create --no-remote-destroy --clear-hash-tree --max-mcycle=0 --final-hash 2>&1
-Connected to JSONRPC remote cartesi machine at '127.0.0.1:34253'
-0: 0xebef64772f7de7c9adf654590cc6e7dbc055380b6f786700465cc753710f27ad
-Left alive JSONRPC remote cartesi machine at '127.0.0.1:34253'
-CLI exit:	true	exit	0
-page_misses during CLI run:	0	sparse_node_hashes:	0
-page_misses on next root hash:	0
-reference page_misses after explicit clear_hash_tree():	2058
-BUG: CLI accepted --clear-hash-tree with --no-remote-create and exited successfully, but the remote machine's hash tree was never cleared (0 page rehashes vs 2058 after a real clear)
-```
-
-**Scenario**: An operator suspects that the cached hash tree of a long-running remote machine is corrupted, for example after a crash or after some other hash-tree bug. They run `cartesi-machine --remote-address=X --no-remote-create --clear-hash-tree --final-hash` to get a hash computed from scratch. The CLI succeeds and prints the hash from the same cache they distrust, so they wrongly conclude that the cached state is sound. Validator nodes (Rollups Node, Dave, the PRT node) that use the C/Lua/JSON-RPC APIs directly are not affected, because they call `clear_hash_tree()` or pass the runtime config themselves.
-
-**Possible solution**: On the existing-remote path (`cmdline.remote_address and not cmdline.remote_create and not cmdline.load_dir`), call `main_machine:clear_hash_tree()` when `cmdline.clear_hash_tree` is set. For the runtime options that cannot be applied to an already constructed machine (console, `no_reserve`, `skip_version_check`, concurrency), either assert or print a warning, in the same way `--create` with `--no-remote-create` is already rejected.
-
-**Severity**: Low. Both reviewers agree. The defect is limited to the CLI on a narrow path. No C, Lua or JSON-RPC API is affected, honest-machine hashes and proofs do not change, and nothing crashes or hangs. The only harm is false confidence in exactly the situation where an operator suspects a corrupted cache. The help text ("after creating or loading the machine") arguably limits the scope already, but the CLI still accepts the flag without telling the user.
-
-**Risks**: *Bug*: an operator gets an unverified hash, or skips a recovery step, while believing the cache was rebuilt, and other runtime flags are silently dropped on the same path. *Fix*: calling `clear_hash_tree()` on a large remote machine makes the next root-hash computation expensive, but that is the requested behaviour. Asserting on runtime-only options could break existing scripts that pass them by habit together with `--no-remote-create`, so a warning is the safer choice for the options other than `--clear-hash-tree`.
-
-**Proof of concept**: `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/test_clear_hash_tree_existing_remote.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/rpc-09-clear-hash-tree-ignored-existing-remote/test_clear_hash_tree_existing_remote.lua`. It exits 1 and prints `BUG:` while the bug is present. It exits 0 if the CLI clears the tree or rejects the combination. It needs `cartesi-machine.lua` on `PATH`, which `make -s env` sets up.
-
-**ID**: `rpc-09-clear-hash-tree-ignored-existing-remote`
-
-**Related**: B23 (fixed).
 
 ### B27. --dump-memory-ranges runs mkdir through the shell with an unquoted path
 

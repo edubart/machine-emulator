@@ -972,6 +972,25 @@ describe("cartesi-machine CLI", function()
         expect.equal(server:get_runtime_config().clear_hash_tree, false)
     end)
 
+    it("clears hash-tree caches of an existing remote machine", function()
+        local jsonrpc = require("cartesi.jsonrpc")
+        local server <close>, address = jsonrpc.spawn_server()
+        server:create({ ram = { length = 0x3000 } })
+        server:get_root_hash()
+        server:get_hash_tree_stats(true)
+        run_ok({
+            "--remote-address=" .. address,
+            "--no-remote-create",
+            "--no-remote-destroy",
+            "--clear-hash-tree",
+            "--max-mcycle=0",
+            "--quiet",
+        })
+        -- Pages are rehashed only if the hash tree was cleared
+        server:get_root_hash()
+        expect.truthy(server:get_hash_tree_stats().phtc.page_misses > 0)
+    end)
+
     -- -------------------------------------------------------------------------
     -- Mcycle overflow
     --

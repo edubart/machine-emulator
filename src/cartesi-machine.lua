@@ -3109,6 +3109,9 @@ echo "
     end
 
     main_machine = main_machine:create(config, runtime_config, cmdline.create_dir)
+elseif cmdline.clear_hash_tree then
+    -- The existing remote machine is neither created nor loaded, so clear its hash tree here.
+    main_machine:clear_hash_tree()
 end
 
 local function serialize_config(out, config, format)

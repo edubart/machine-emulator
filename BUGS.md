@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-91 confirmed issues: 6 high, 20 medium, 65 low.
+90 confirmed issues: 6 high, 20 medium, 64 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -57,7 +57,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B18](#b18-abi-decoder-bounds-checks-overflow-and-accept-out-of-bounds-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder bounds checks overflow and accept out-of-bounds offsets | `bugs/lua-10-evmu-offset-length-overflow-accepts-oob/` |
 | [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
-| [B20](#b20-frontier_next_proofs-does-not-check-tree-capacity) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_next_proofs does not check tree capacity | `bugs/lua-12-next-proofs-no-capacity-check/` |
 | [B21](#b21-frontier_next_proofs-is-wrong-on-trees-of-height-64-or-more) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_next_proofs is wrong on trees of height 64 or more | `bugs/lua-13-next-proofs-signed-compare-ge64/` |
 | [B22](#b22-frontier_pad_back-rejects-valid-counts-and-corrupts-very-tall-frontiers) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier_pad_back rejects valid counts and corrupts very tall frontiers | `bugs/lua-14-pad-back-tall-tree-size-wrap/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
@@ -1140,7 +1139,7 @@ Exit status 1 with `BUG:` lines means the bug reproduces. Exit status 0 with "al
 
 **ID**: `lua-06-verify-slice-noncanonical-address`
 
-**Related**: [B20](#b20-frontier_next_proofs-does-not-check-tree-capacity).
+**Related**: B20 (fixed).
 
 ### B18. ABI decoder bounds checks overflow and accept out-of-bounds offsets
 
@@ -1279,64 +1278,6 @@ eval $(make -s env); lua5.4 bugs/lua-11-evmu-param-name-data-location-prefix-man
 It exits 1 and prints `BUG: ...` lines while the bug is present. It exits 0 and prints `OK: ...` once fixed.
 
 **ID**: `lua-11-evmu-param-name-data-location-prefix-mangled`
-
-### B20. frontier_next_proofs does not check tree capacity
-
-**Title**: `frontier_next_proofs` does not check tree capacity, so on overflow or a full frontier it returns out-of-tree proofs against a wrong root, while `push_back` and `append` reject the same input
-
-**Problem:** `frontier_next_proofs(frontier, next_output_hashes)` reads `leaf_count` and builds one proof per new hash. It never checks two things:
-- that `leaf_count + #next_output_hashes <= 2^log2_max_leaves`;
-- that the frontier is not already full (its top entry is unset).
-
-The sibling functions do check both. `frontier_push_back` asserts `not frontier[#frontier]`, and `frontier_append` and `frontier_pad_back` assert `frontier_padding_fits(...)`. When the check is missing, `frontier_next_proofs` returns well-formed proofs instead of raising "too many leaves":
-- **Partial overflow.** Proofs get `target_address` values outside the tree, and `root_hash` is whatever ends up in `active[1]`.
-- **Full frontier.** `frontier_get_leaf_count` wraps to 0, and `frontier[1..L]` are all `false`, because only the top entry is set. The function therefore treats the tree as empty and returns a proof whose root is the root of `{new, pristine, ...}`. The existing leaves are ignored.
-
-`verify_slice` only rolls the hash up `log2_root_size` levels and ignores the higher address bits. So some of these bogus proofs verify, including the full-frontier proof, which verifies against an unrelated root.
-
-**Origin:** Pre-existing. The function is identical on `main` (`src/cartesi/hash-tree.lua:309`).
-
-**Area:** Lua library `cartesi.hash-tree`, the frontier and output-proof API (`frontier_next_proofs`, with `verify_slice` aliasing the address).
-
-**Category:** Correctness / missing precondition check (API inconsistency).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:310-360` (`frontier_next_proofs`: no capacity or full check)
-- `src/cartesi/hash-tree.lua:144` (`frontier_padding_fits`), `:169` (`frontier_push_back`), `:191` (`frontier_append`), `:262` (`frontier_pad_back`): the checks that the sibling functions do perform
-- `src/cartesi/hash-tree.lua:28-30` (`verify_slice`: does not reject `target_address >= 2^log2_root_size`)
-- Callers: `src/cartesi-machine.lua:3474` (`save_cmio_output_proofs`), `doc/recipes/prt.lua:2302`, `doc/recipes/vg-test.lua:779`
-
-**Evidence:** The test builds a height-2 (4-leaf) keccak256 frontier using only the public API.
-- Case 1: with 3 leaves present, `frontier_append` rejects 3 more hashes, but `frontier_next_proofs` accepts them.
-- Case 2: on a full 4-leaf frontier, `frontier_next_proofs` is asked for 1 more proof.
-```
-$ eval $(make -s env); lua5.4 bugs/lua-12-next-proofs-no-capacity-check/test-next-proofs-capacity.lua
-BUG: overflow: next_proofs accepted 3 outputs into a 4-leaf tree holding 3 leaves (frontier_append rejects); target addresses {3,4,5} (tree has 4 leaves), 1 of 3 proofs pass verify_slice
-BUG: full: next_proofs on a full frontier returned target_address=4 (out of tree), root differs from the real root, verify_slice=true
-     (proof root == root of a tree holding only the new leaf; existing 4 leaves ignored)
-exit=1
-```
-In the partial-overflow case, only the first proof (address 3) passes `verify_slice`. The other two have inconsistent roots.
-
-**Scenario:** A library user, such as a validator node or tooling that serves output proofs, builds a small custom-height frontier, or by mistake feeds more leaves than fit. They get silently wrong proofs instead of an error, and a caller that does not compare `root_hash` against an independently computed root publishes them. In the full-frontier case, the proof even passes `verify_slice`.
-
-The realistic PRT and Rollups paths are not exposed:
-- Rollups outputs trees use `ROLLUP_LOG2_MAX_OUTPUT_COUNT = 63`, so an overflow would need about 2^63 outputs.
-- The CLI's `save_cmio_output_proofs` grows the live frontier with `frontier_push_back`, which rejects overflow first. It also asserts `proofs[1].root_hash == frontier_get_root_hash(outputs_frontier)`.
-
-**Possible solution:** At the top of `frontier_next_proofs`, after the empty-input early return, add `assert(frontier_padding_fits(frontier, next_output_count, 1), "too many leaves")`, mirroring `frontier_append`. This also covers the full-frontier case, because `frontier_padding_fits` fails when the top entry is set. As separate hardening, make `verify_slice` reject `target_address >= 2^log2_root_size` (and misaligned addresses), so that aliased out-of-tree proofs cannot verify.
-
-**Severity:** Low. Both reviewers confirmed the defect and rated it low. It is a real silent-garbage API inconsistency, but height-63 rollup trees make overflow infeasible, and the shipped CLI rejects overflow earlier and checks the root. Only misuse with a small tree, combined with a missing root check, reaches it, so it does not threaten realistic PRT disputes.
-
-**Risks:**
-- Of the bug: callers with small trees, or callers that skip the root check, may emit or accept invalid output proofs. The `verify_slice` address aliasing means verification alone does not catch the full-frontier case.
-- Of the fix: low. Callers that relied on the lenient behavior now get a "too many leaves" error. A `verify_slice` range check would also reject any existing proof that uses aliased high address bits. No legitimate in-tree caller produces such proofs.
-
-**Proof of concept:** `bugs/lua-12-next-proofs-no-capacity-check/test-next-proofs-capacity.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/lua-12-next-proofs-no-capacity-check/test-next-proofs-capacity.lua`. It exits with 1 and prints `BUG:` lines while the bug is present, and prints `OK: next_proofs rejects overflow` once it is fixed.
-
-**ID**: `lua-12-next-proofs-no-capacity-check`
-
-**Related**: [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs).
 
 ### B21. frontier_next_proofs is wrong on trees of height 64 or more
 
@@ -1809,7 +1750,7 @@ assert(math.type(h) == "integer" and h >= 0 and h <= #frontier - 1, "subtree hei
 
 **ID**: `lua-17-frontier-height-args-unvalidated`
 
-**Related**: [B20](#b20-frontier_next_proofs-does-not-check-tree-capacity).
+**Related**: B20 (fixed).
 
 ### B30. verify_hash_tree returns true when inner nodes or the root are corrupted
 

@@ -141,6 +141,9 @@ static int filesystem_core_mod_sync_file(lua_State *L) try {
     if (stream->closef == nullptr) {
         return luaL_error(L, "attempt to sync a closed file");
     }
+    if (ferror(stream->f) != 0) {
+        return luaL_error(L, "unable to sync file: an earlier write to it failed");
+    }
     if (fflush(stream->f) != 0) {
         return luaL_error(L, "unable to sync file: fflush() failed: %s", strerror(errno));
     }

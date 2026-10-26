@@ -45,7 +45,7 @@ local temporary_file_meta = { __index = {} }
 
 -- Moves the file to its final path, after closing it. Closing the object then leaves it in place.
 function temporary_file_meta.__index:rename(to)
-    self.file:close()
+    assert(self.file:close())
     filesystem.rename_file(self.path, to)
     self.path = nil
 end

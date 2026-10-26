@@ -21,13 +21,12 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-77 confirmed issues: 5 high, 16 medium, 56 low.
+76 confirmed issues: 4 high, 16 medium, 56 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
 | [B01](#b01-persisted-page-cache-is-not-checked-against-memory-so-a-reload-yields-wrong-proofs) | high | pre-existing | Hash tree (page cache, store/load) | Persisted page cache is not checked against memory, so a reload yields wrong proofs | `bugs/ht-02-phtc-stale-entries-after-mixed-sharing-session/` |
 | [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
-| [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files) | high | introduced by branch | Lua cartesi.hash-tree and cartesi.filesystem (durable writes) | frontier_forest_store and fs.sync_file ignore write errors and commit truncated files | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
 | [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
@@ -349,65 +348,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 - `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B06. frontier_forest_store and fs.sync_file ignore write errors and commit truncated files
-
-**Title**: hash-tree.lua `write_file` ignores `file:write` errors, so `frontier_forest_store` commits a truncated tree file that later stores never repair
-
-**Problem:** The durable `write_file` helper in `cartesi.hash-tree` calls `temporary.file:write(contents)` and never checks the result. Lua's `file:write` does not raise on failure; it returns `nil, err`. When a large `fwrite` fails partway (ENOSPC, EFBIG, EDQUOT), glibc returns a short count and leaves nothing pending in the stdio buffer. The later `fs.sync_file` therefore succeeds (`fflush` returns 0 and `fsync` works): its C implementation, `filesystem_core_mod_sync_file`, checks only `fflush`'s return value and never the stream's sticky error flag (`ferror`). So every user of the public `cartesi.filesystem` durable-write pattern (`new_temporary_file`, `file:write`, `sync_file`, `rename`) that does not check `file:write` itself loses the error too, not just `hash-tree.lua`. The same path can also replace a previously good file with a truncated one. `temporary:rename` in `cartesi.filesystem` also ignores the result of `self.file:close()`, so the truncated temporary file is renamed into place. This breaks the helper's own guarantee that "the name never appears with incomplete contents". `store_tree` writes a tree file only `if not fs.exists(path)`, and files are named by the tree's hash, so no later store rewrites or checks the corrupt file, even in a fresh process with free space. The next `frontier_forest_store` then commits a new frontier file (the store's commit point) that references the unloadable tree.
-
-**Origin:** Introduced by this branch. `src/cartesi/filesystem.lua` and the durable forest store in `src/cartesi/hash-tree.lua` do not exist on `main`.
-
-**Area:** Lua library `cartesi.hash-tree` (frontier forest and frontier persistence) and `cartesi.filesystem`. The `cartesi-machine` CLI's `store_frontier` also goes through `write_file`.
-
-**Category:** Durability / silent data corruption (an unchecked I/O error).
-
-**Location:**
-- `src/cartesi/hash-tree.lua:509-514`: `write_file`, where `temporary.file:write(contents)` is unchecked.
-- `src/clua-cartesi-filesystem.cpp:111-125`: `filesystem_core_mod_sync_file` checks `fflush` only, never `ferror`.
-- `src/cartesi/filesystem.lua:47-51`: `temporary_file_meta.__index:rename`, where `self.file:close()` is unchecked.
-- `src/cartesi/hash-tree.lua:577-596`: `store_tree` skips any tree file that already exists.
-- `src/cartesi/hash-tree.lua:967-990`: `frontier_forest_store` commits the frontier file over the corrupt tree.
-- `src/cartesi/hash-tree.lua:935-938` (`frontier_store`) and `src/cartesi-machine.lua:3274-3277` (CLI `store_frontier`): other users of the same `write_file`.
-
-**Evidence:** The test builds a 512-leaf keccak256 forest, whose single fixed-point tree file is about 35 KB. A child process stores it under `trap '' XFSZ; ulimit -f 8`, so `write(2)` fails with EFBIG at 8 KiB, which is the same short-write path ENOSPC takes on a full disk. The parent then stores again with no limit, reloads the forest, and queries a node hash. Run from the repo root: `eval $(make -s env); lua5.4 bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`
-```
-child (limited store): STORE-OK
-tree file 0x8782ecbf...6e6606a5.json size 8192
-second (unlimited) store:	true	nil
-tree file after second store 0x8782ecbf...6e6606a5.json size 8192
-reload + query:	false	.../src/cartesi/hash-tree.lua:528: failed to parse JSON from a string: [json.exception.parse_error.101] parse error at line 1, column 8193: ... missing closing quote
-BUG: frontier_forest_store reported success although writing the tree file failed (EFBIG)
-BUG: the committed tree file is truncated and the forest cannot be reloaded/queried: ...
-BUG: a later store over the same directory did not repair the truncated file (store_tree skips existing files)
-exit=1
-```
-The prover patched a copy with `assert(temporary.file:write(contents))`. With that change, the limited store raises `hash-tree.lua:511: File too large` and commits nothing, the later store writes the full 35388-byte file, and the reload and query succeed.
-
-**Scenario:** A long-running PRT validator, Rollups Node or Dave component persists its commitment or output forest snapshots with `frontier_forest_store`. Fixed-point tree files hold up to 2^k hashes of about 68 bytes each, so many are larger than the stdio buffer and take this path. If the disk fills or a quota is hit during a store, the store reports success and leaves a truncated tree file. After the operator frees space, later stores succeed but keep the corrupt file and commit frontiers that point at it. `frontier_forest_load` still succeeds because trees load lazily. After a restart, or when a dispute first needs that subtree for bisection or proof siblings, `frontier_forest_get_node_hash` and the related calls raise an error, and the node cannot take part in the dispute from that snapshot until an operator finds and deletes the bad file or rebuilds the forest from the machine. If that takes longer than the tournament's time budget, an honest player can lose on timeout. The CLI's `store_frontier` and `frontier_store` payloads are small and usually fit in the stdio buffer, so for them the failure normally shows up at `fflush` and is caught. Their exposure is lower but not zero.
-
-**Possible solution:**
-- In `write_file`, use `assert(temporary.file:write(contents))`.
-- In `filesystem_core_mod_sync_file`, raise if `ferror(stream->f)` is set before or after `fflush`, so `sync_file` never reports success for a stream whose writes failed.
-- In `filesystem.lua`'s `rename`, use `assert(self.file:close())` before renaming, so a deferred write error cannot be lost either.
-- Optionally make `store_tree` stronger: check an existing file (parse it and compare its hash) before trusting it, or rewrite trees that the forest has not recorded as durable, so a corrupt file left by earlier code or by external damage is repaired instead of committed.
-
-**Severity:** High. This entry's own reviewers rated it medium, because a truncated file always fails JSON parsing or the hash check and so never yields a wrong hash or proof. Two independent reproductions (`lua-01` and `rpc-05`, listed below) were each rated high by both of their reviewers. That rating is used here. A realistic operating event, a disk full or quota hit during a store, is reported as success. It leaves committed state permanently unreadable, later stores never repair it, and the validator cannot reload its trees or build bisection proofs until an operator intervenes. It can therefore lose a dispute by timeout. That matches the high level of the scale (stored validator state corrupted in realistic use).
-
-**Risks:**
-- *Of the bug:* Nodes that once hit a full disk carry corrupt snapshots that look committed. They then hit query failures at the worst time: after a restart or deep in a bisection. Dispute deadlines can be missed while operators diagnose a JSON parse error in a hash-named file.
-- *Of the fix:* Checking the write and close results is low risk. Stores that used to "succeed" on a full disk will now raise, so callers must handle that error, for example by retrying after freeing space. The temporary file is still removed by its `<close>` handler. Validating or rewriting existing files in `store_tree` costs extra reads and hashing per store, and must keep the rule that the frontier file is written only after every tree it reaches is durable.
-
-**Proof of concept:** `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/ht-07-hashtree-lua-write-file-ignores-write-error/test_write_file_short_write.lua`. It exits 1 and prints `BUG:` lines while the bug is present, and exits 0 with `OK:` once it is fixed. It needs `bash` and `ulimit -f` (RLIMIT_FSIZE) and uses a `mktemp -d` work directory that it removes afterwards.
-
-**ID**: `ht-07-hashtree-lua-write-file-ignores-write-error`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `lua-01-tempfile-write-error-silently-committed`: run with `eval $(make -s env); lua5.4 bugs/lua-01-tempfile-write-error-silently-committed/test_tempfile_write_error.lua`. It also identified the missing `ferror` check in `fs.sync_file` and showed that a previously good file can be replaced by a truncated one.
-- `rpc-05-hash-tree-write-file-ignores-write-error`: run with `eval $(make -s env); lua5.4 bugs/rpc-05-hash-tree-write-file-ignores-write-error/test_forest_store_short_write.lua`.
-
-**Related**: B05 (fixed).
 
 ### B07. Interrupted remove_stored leaves a directory that blocks the name forever
 
@@ -1514,7 +1454,7 @@ Exit status 1 means the bug reproduced; 0 means it is fixed. The I/O error is si
 
 **ID**: `lua-20-failed-expansion-store-never-retried`
 
-**Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files), [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees).
+**Related**: B06 (fixed), [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees).
 
 ### B32. Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes
 
@@ -1825,7 +1765,7 @@ It exits with 1 and prints `BUG: ...` while the leak is present, and prints `OK:
 
 **ID**: `lua-25-leftover-temp-files`
 
-**Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files).
+**Related**: B06 (fixed).
 
 ### B37. filesystem.temp_pathname returns a deleted /tmp name that another user can claim
 

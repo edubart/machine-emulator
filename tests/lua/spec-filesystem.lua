@@ -133,6 +133,16 @@ describe("filesystem", function()
         end, "unable to create temporary file")
     end)
 
+    it("fails to sync a file after a failed write", function()
+        local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
+        filesystem.write_file("contents", dirname .. "/state.json")
+        local file <close> = assert(io.open(dirname .. "/state.json", "rb"))
+        expect.falsy(file:write("lost"))
+        expect.fail(function()
+            filesystem.sync_file(file)
+        end, "an earlier write to it failed")
+    end)
+
     it("reports missing paths", function()
         local missing = filesystem.temp_pathname()
         expect.falsy(filesystem.exists(missing))

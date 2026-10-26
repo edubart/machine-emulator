@@ -510,7 +510,7 @@ local function get_parent_directory(path) return path:match("^(.*)/[^/]*$") or "
 -- never appears with incomplete contents. Making the name itself durable is left to the caller.
 local function write_file(contents, path)
     local temporary <close> = fs.new_temporary_file(get_parent_directory(path), path:match("[^/]*$") .. ".tmp.")
-    temporary.file:write(contents)
+    assert(temporary.file:write(contents))
     fs.sync_file(temporary.file)
     temporary:rename(path)
 end

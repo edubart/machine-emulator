@@ -900,6 +900,26 @@ describe("selectorless ABI", function()
         assert(decoded[1][1] == "0xcd" and decoded[1][2] == "0xef")
         assert(not pcall(evmu.decode_abi, "(bytes,bytes)", word(0x80) .. word(0x40) .. ef .. cd .. word(0)))
     end)
+    it("rejects aliased or overlapping tails that inflate the decoded data", function()
+        local function word(n)
+            return string.rep("\0", 24) .. string.pack(">I8", n)
+        end
+        local function check(data)
+            local ok, err = pcall(evmu.decode_abi, "(bytes[])", data)
+            assert(not ok and err:find("decoded data too large"), tostring(err))
+        end
+        -- 256 elements, all pointing at one 4 KiB tail
+        local heads, words = {}, {}
+        for i = 1, 256 do
+            heads[i] = word(256 * 32)
+        end
+        check(word(0x20) .. word(256) .. table.concat(heads) .. word(4096) .. string.rep("\xcd", 4096))
+        -- 256 elements pointing at successive words of a region where word j holds the length of the rest
+        for i = 1, 256 do
+            heads[i], words[i] = word((255 + i) * 32), word((256 - i) * 32)
+        end
+        check(word(0x20) .. word(256) .. table.concat(heads) .. table.concat(words))
+    end)
 end)
 
 lester.report()

@@ -685,10 +685,18 @@ local function decode_bool(calldata, offset)
     end
 end
 
+-- subtracts 'size' from the decoded data size left in 'budget', a table set to 32 times the calldata size
+-- canonical encodings stay within the calldata size, but aliased or overlapping tails can be decoded many times
+local function charge_decoded(budget, size)
+    budget[1] = budget[1] - size
+    if budget[1] < 0 then error("decoded data too large for calldata size (aliased or overlapping tails)") end
+end
+
 -- reads a string value from 'calldata' at 'offset'
-local function decode_string(calldata, offset, prefer)
+local function decode_string(calldata, offset, prefer, budget)
     local length, new_offset = decode_uint(calldata, offset)
     local len = check_lua_uint(length, "string length", calldata)
+    charge_decoded(budget, len)
     local padded_len = ceil32(len)
     if new_offset + padded_len > #calldata then errorf("insufficient calldata for string of length %d", len) end
     local str_data = calldata:sub(new_offset + 1, new_offset + len)
@@ -707,11 +715,12 @@ local function decode_bytes_sized(calldata, offset, size, prefer)
 end
 
 -- reads a bytes value from 'calldata' at 'offset'
-local function decode_bytes(calldata, offset, size, prefer)
+local function decode_bytes(calldata, offset, size, prefer, budget)
     if not size then
         -- Dynamic bytes (same as string but return as hex by default)
         local length, new_offset = decode_uint(calldata, offset)
         local len = check_lua_uint(length, "bytes length", calldata)
+        charge_decoded(budget, len)
         local padded_len = ceil32(len)
         if new_offset + padded_len > #calldata then errorf("insufficient calldata for bytes of length %d", len) end
         local bytes_data = calldata:sub(new_offset + 1, new_offset + len)
@@ -722,7 +731,7 @@ local function decode_bytes(calldata, offset, size, prefer)
 end
 
 -- reads an array value from 'calldata' at 'offset'
-local function decode_array(calldata, offset, parsed_type_spec, prefer)
+local function decode_array(calldata, offset, parsed_type_spec, prefer, budget)
     local element_type = parsed_type_spec.element_type
     local size = parsed_type_spec.size
     local new_offset = offset
@@ -732,6 +741,7 @@ local function decode_array(calldata, offset, parsed_type_spec, prefer)
         local size_val
         size_val, new_offset = decode_uint(calldata, new_offset)
         size = check_lua_uint(size_val, "array size", calldata)
+        charge_decoded(budget, 32 * size) -- A word per element, the least it takes unless it is an empty tuple
         array_data_start = new_offset -- Array data starts after the length field
     end
     local result = {}
@@ -744,21 +754,21 @@ local function decode_array(calldata, offset, parsed_type_spec, prefer)
             -- Offsets are relative to the start of the array data section
             local element_offset = array_data_start + check_lua_uint(offset_val, "array offset", calldata)
             local element_end
-            result[i], element_end = decode_value(calldata, element_offset, element_type, prefer)
+            result[i], element_end = decode_value(calldata, element_offset, element_type, prefer, budget)
             last_offset = math.max(last_offset, element_end) -- Tails may appear in any order
         end
         return result, last_offset
     else
         -- Static elements: read sequentially
         for i = 1, size do
-            result[i], new_offset = decode_value(calldata, new_offset, element_type, prefer)
+            result[i], new_offset = decode_value(calldata, new_offset, element_type, prefer, budget)
         end
         return result, new_offset
     end
 end
 
 -- Reads a tuple value from 'calldata' at 'offset'
-local function decode_tuple(calldata, offset, parsed_type_spec, prefer)
+local function decode_tuple(calldata, offset, parsed_type_spec, prefer, budget)
     local components = parsed_type_spec.components
     local result = {}
     local static_offset = offset -- Position within the static portion
@@ -774,10 +784,10 @@ local function decode_tuple(calldata, offset, parsed_type_spec, prefer)
             -- Offsets are relative to the start of the tuple
             local dynamic_offset = tuple_start + check_lua_uint(offset_val, "tuple offset", calldata)
             local dynamic_end
-            result[i], dynamic_end = decode_value(calldata, dynamic_offset, comp_type, prefer)
+            result[i], dynamic_end = decode_value(calldata, dynamic_offset, comp_type, prefer, budget)
             new_offset = math.max(new_offset, dynamic_end) -- Tails may appear in any order
         else
-            result[i], static_offset = decode_value(calldata, static_offset, comp_type, prefer)
+            result[i], static_offset = decode_value(calldata, static_offset, comp_type, prefer, budget)
         end
         local name = comp_type.name
         if name then result[name] = result[i] end
@@ -786,7 +796,7 @@ local function decode_tuple(calldata, offset, parsed_type_spec, prefer)
 end
 
 -- Reads a value of the specified type from 'calldata' at 'offset'
-function decode_value(calldata, offset, parsed_type_spec, prefer)
+function decode_value(calldata, offset, parsed_type_spec, prefer, budget)
     local tn = parsed_type_spec.type_name
     if tn == "uint" then
         return decode_uint(calldata, offset, parsed_type_spec.size)
@@ -797,13 +807,13 @@ function decode_value(calldata, offset, parsed_type_spec, prefer)
     elseif tn == "bool" then
         return decode_bool(calldata, offset)
     elseif tn == "string" then
-        return decode_string(calldata, offset, prefer)
+        return decode_string(calldata, offset, prefer, budget)
     elseif tn == "bytes" then
-        return decode_bytes(calldata, offset, parsed_type_spec.size, prefer)
+        return decode_bytes(calldata, offset, parsed_type_spec.size, prefer, budget)
     elseif tn == "array" then
-        return decode_array(calldata, offset, parsed_type_spec, prefer)
+        return decode_array(calldata, offset, parsed_type_spec, prefer, budget)
     elseif tn == "tuple" then
-        return decode_tuple(calldata, offset, parsed_type_spec, prefer)
+        return decode_tuple(calldata, offset, parsed_type_spec, prefer, budget)
     else
         -- luacov: disable
         errorf("unknown type name: %s", tostring(tn))
@@ -829,7 +839,7 @@ function _M.decode_calldata(func_sig_str, calldata_raw, prefer)
         errorf("function selector mismatch (expected %s, got %s)", tohex(func_sel), tohex(calldata_func_sel))
     end
     assert(#parsed_sig.params.components ~= 0 or #calldata_raw == 4, "calldata too long")
-    local value, offset = decode_value(calldata_raw, 4, parsed_sig.params, prefer)
+    local value, offset = decode_value(calldata_raw, 4, parsed_sig.params, prefer, { 32 * #calldata_raw })
     assert(offset == #calldata_raw, "calldata too long")
     return value
 end
@@ -844,7 +854,7 @@ end
 function _M.decode_abi(tuple_spec, data, prefer)
     local parsed = _M.parse_type_spec(tuple_spec)
     assert(parsed.type_name == "tuple", "expected tuple type")
-    local value, offset = decode_value(data, 0, parsed, prefer)
+    local value, offset = decode_value(data, 0, parsed, prefer, { 32 * #data })
     assert(offset == #data, "ABI data too long")
     return value
 end

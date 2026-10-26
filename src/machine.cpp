@@ -27,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <regex>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -629,14 +630,30 @@ void machine::remove_stored(const std::string &dir) {
     if (dir.empty()) {
         throw std::invalid_argument{"directory name cannot be empty"};
     }
-    // Remove all files, skipping those already removed by an interrupted removal.
-    // The config file is removed last, so without it at most an empty directory remains.
-    if (os::exists(machine_config::get_config_filename(dir))) {
+    bool has_config = true;
+    try {
+        static_cast<void>(machine_config::load(dir));
+    } catch (const std::exception &) {
+        has_config = false;
+    }
+    if (has_config) {
+        // Remove all files, skipping those already removed by an interrupted removal.
         for_each_stored_filename(dir, [](const std::string &filename) {
             if (os::exists(filename)) {
                 os::remove_file(filename);
             }
         });
+    } else {
+        // An interrupted removal, store or clone_stored can leave the config file missing or incomplete.
+        // Remove the files only if all are named like stored files, so other directories are never emptied.
+        static const std::regex stored_filename{
+            R"([0-9a-f]{16}-[0-9a-f]+\.(bin|dht|dpt)|hash_tree\.(sht|phtc)|config\.json)"};
+        const auto names = os::list_directory(dir);
+        if (std::ranges::all_of(names, [](const auto &name) { return std::regex_match(name, stored_filename); })) {
+            for (const auto &name : names) {
+                os::remove_file(dir + "/" + name);
+            }
+        }
     }
 
     // Remove directory

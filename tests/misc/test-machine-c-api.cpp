@@ -1074,6 +1074,27 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(remove_stored_interrupted_test, ordinary_machine_
     BOOST_CHECK(!std::filesystem::exists(_machine_dir_path));
 }
 
+BOOST_FIXTURE_TEST_CASE_NOLINT(remove_stored_incomplete_config_test, ordinary_machine_fixture) {
+    cm_error error_code = cm_store(_machine, _machine_dir_path.c_str(), CM_SHARING_ALL);
+    BOOST_REQUIRE_EQUAL(error_code, CM_ERROR_OK);
+
+    // A store interrupted while writing the config file
+    const std::string config_path = _machine_dir_path + "/config.json";
+    std::filesystem::resize_file(config_path, std::filesystem::file_size(config_path) / 2);
+
+    // An extraneous file still makes the removal fail, and no file is removed
+    const std::string extraneous_path = _machine_dir_path + "/extraneous";
+    std::ofstream{extraneous_path}.put('x');
+    error_code = cm_remove_stored(_machine, _machine_dir_path.c_str());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_RUNTIME_ERROR);
+    BOOST_CHECK(std::filesystem::exists(config_path));
+
+    BOOST_REQUIRE(std::filesystem::remove(extraneous_path));
+    error_code = cm_remove_stored(_machine, _machine_dir_path.c_str());
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_OK);
+    BOOST_CHECK(!std::filesystem::exists(_machine_dir_path));
+}
+
 BOOST_FIXTURE_TEST_CASE_NOLINT(sync_stored_null_machine_test, ordinary_machine_fixture) {
     cm_error error_code = cm_store(_machine, _machine_dir_path.c_str(), CM_SHARING_ALL);
     BOOST_REQUIRE_EQUAL(error_code, CM_ERROR_OK);

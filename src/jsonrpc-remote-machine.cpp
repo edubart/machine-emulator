@@ -62,6 +62,7 @@
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #include <boost/asio/signal_set.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp> // IWYU pragma: keep
 #include <boost/beast/http.hpp> // IWYU pragma: keep
 #include <boost/beast/version.hpp>
@@ -343,6 +344,7 @@ struct http_handler : std::enable_shared_from_this<http_handler> {
     asio::signal_set signals;                          ///< Signal set used for process termination notifications
     tcp::endpoint local_endpoint;                      ///< Address server receives requests at
     tcp::acceptor acceptor;                            ///< TCP connection acceptor
+    asio::steady_timer accept_timer;                   ///< Timer used to retry accepting after an error
     uint64_t delay{0};                                 ///< How much to delay next request in ms
     std::unique_ptr<cartesi::machine> machine;         ///< Cartesi Machine, if any
     std::vector<std::weak_ptr<http_session>> sessions; ///< HTTP sessions
@@ -351,7 +353,8 @@ struct http_handler : std::enable_shared_from_this<http_handler> {
         ioc(ioc),
         signals(ioc),
         local_endpoint(acceptor.local_endpoint()),
-        acceptor(std::move(acceptor)) {
+        acceptor(std::move(acceptor)),
+        accept_timer(ioc) {
         SLOG(info) << "remote machine server bound to " << local_endpoint;
     }
 
@@ -379,6 +382,7 @@ struct http_handler : std::enable_shared_from_this<http_handler> {
     void rebind(tcp::acceptor &&new_acceptor) {
         // Stop asynchronous accept and close the acceptor
         beast::error_code ec;
+        std::ignore = accept_timer.cancel();
         std::ignore = acceptor.cancel(ec);
         std::ignore = acceptor.close(ec);
         // Replace current acceptor with the new one
@@ -390,6 +394,7 @@ struct http_handler : std::enable_shared_from_this<http_handler> {
     // Stop accepting new connections
     void close_acceptor() {
         beast::error_code ec;
+        std::ignore = accept_timer.cancel();
         std::ignore = acceptor.cancel(ec);
         std::ignore = acceptor.close(ec);
     }
@@ -426,10 +431,10 @@ private:
         }
         if (ec) {
             SLOG(error) << local_endpoint << " accept error: " << format_ec(ec);
-            // If we can't accept, the listening socket is probably in a broken state,
-            // close the acceptor so the client abort new connection attempts.
-            // This may happen when amount of open files is reached.
-            close_acceptor();
+            // Errors such as reaching the open files limit are transient, so retry after a delay.
+            // Retrying right away would spin, because the pending connection keeps the acceptor ready.
+            accept_timer.expires_after(std::chrono::milliseconds(100));
+            accept_timer.async_wait(beast::bind_front_handler(&http_handler::on_accept_timer, shared_from_this()));
             return;
         }
 
@@ -450,6 +455,15 @@ private:
         session->do_read_request();
 
         // Accept next connection
+        next_accept();
+    }
+
+    // Retries accepting after an accept error
+    void on_accept_timer(const beast::error_code ec) {
+        // Operation may be aborted (e.g rebind() or close_acceptor() was called)
+        if (ec == asio::error::operation_aborted || !acceptor.is_open()) {
+            return;
+        }
         next_accept();
     }
 };

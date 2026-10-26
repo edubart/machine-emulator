@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-25 confirmed issues: 2 high, 6 medium, 17 low.
+24 confirmed issues: 2 high, 6 medium, 16 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -40,7 +40,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
-| [B54](#b54-a-transient-accept-error-closes-the-json-rpc-servers-listening-socket-for-good) | low | pre-existing | JSON-RPC remote machine server | A transient accept error closes the JSON-RPC server's listening socket for good | `bugs/w2b-06-jsonrpc-accept-error-kills-server/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
@@ -573,52 +572,6 @@ Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not r
 **ID**: `w2b-04-sharing-all-enospc-sigbus`
 
 **Related**: [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus).
-
-### B54. A transient accept error closes the JSON-RPC server's listening socket for good
-
-**Title**: One transient `accept()` error (EMFILE) permanently closes the JSON-RPC server's listening socket; the process stays alive but its machine can no longer be reached
-
-**Problem**: `http_handler::on_accept` in `cartesi-jsonrpc-machine` handles every accept error other than `operation_aborted` the same way. It logs `accept error: ...`, calls `close_acceptor()` (cancel and close the listening socket) and returns without calling `next_accept()`. The comment says this is expected when the open-file limit is reached. But EMFILE is transient, and so are ENFILE, ENOBUFS and ENOMEM, the other errors that reach this handler. Boost.Asio already retries ECONNABORTED and EPROTO internally, so those never get here. Once the burst of connections ends, fds are free again, but the acceptor stays closed for good. Nothing reopens it. The only other code that installs an acceptor is `rebind()`, reached through the fork/rebind RPCs, and those need a connection that is already open.
-
-The process does not exit either. The SIGINT/SIGTERM `signal_set::async_wait` is still pending, so `ioc.run()` never returns. This contradicts the comment in `main` ("run until ... the handler is not accepting new connections"). The result is a live, orphaned server that holds the machine in memory with no listening socket. No client can read its state, `store` or snapshot it, or even send `shutdown`. Only SIGTERM/SIGKILL ends it, and any unsaved in-memory machine state is lost. The process and its memory also leak until someone kills it.
-
-**Origin**: Pre-existing. `on_accept` is byte-identical on `origin/main`. The branch's 14-line change to `src/jsonrpc-remote-machine.cpp` does not touch it.
-
-**Area**: `cartesi-jsonrpc-machine` (the JSON-RPC remote machine server), `src/jsonrpc-remote-machine.cpp`.
-
-**Category**: Crash / availability. Denial of service: the server becomes permanently unreachable.
-
-**Location**:
-- `src/jsonrpc-remote-machine.cpp:387-399`: in `http_handler::on_accept`, the `if (ec)` branch (391-398) calls `close_acceptor()` and returns without re-arming accept.
-- `src/jsonrpc-remote-machine.cpp:357-361`: `close_acceptor()` cancels and closes the acceptor.
-- `src/jsonrpc-remote-machine.cpp:345-354`: `rebind()` is the only other place an acceptor is reinstalled, and it is reachable only over an existing connection.
-- `src/jsonrpc-remote-machine.cpp:325-331, 2182-2188`: the termination `signal_set` async_wait keeps `ioc.run()` alive after the acceptor is gone.
-
-**Evidence**: `test.lua` starts `cartesi-jsonrpc-machine` under `prlimit --nofile=32:32` on a free port. Over JSON-RPC it creates a 1 MiB machine with `x10=0x1234`. It then opens 60 TCP connections at once, so `accept()` hits EMFILE. It closes them all, waits 1 s for the server to release the fds, and connects as a normal client to call `read_reg("x10")`. Only 24 of the 60 connects succeed, because the server closes its acceptor at the first EMFILE. The later client gets ECONNREFUSED while the server process is still alive. It reproduced on every run (4/4 for the prover, plus two independent reviewer runs and the recorder re-run). Run with `eval $(make -s env); lua5.4 bugs/w2b-06-jsonrpc-accept-error-kills-server/test.lua`; it exits 1:
-```
-created remote machine, root hash ok:	true
-opened	24	client connections
-... info cartesi-jsonrpc-machine ... remote machine server bound to 127.0.0.1:43993
-... error cartesi-jsonrpc-machine ... 127.0.0.1:43993 accept error: Too many open files
-server process still alive:	yes
-BUG: after transient accept() EMFILE the JSON-RPC server stopped listening; machine unreachable: ...test.lua:64: jsonrpc error: post error contacting 127.0.0.1:43993 (Connection refused [system:111 ...])
-```
-
-**Scenario**: A node (Rollups Node, Dave or a PRT validator) runs `cartesi-jsonrpc-machine` and holds a machine with advanced, unstored state. A momentary fd exhaustion in the server process happens: a burst of parallel clients or forked children, a port scanner or connection flood against a reachable bind address, or a low `ulimit -n` in a container. ENFILE (system-wide) or ENOBUFS/ENOMEM under memory pressure have the same effect. A single failed accept closes the listener for good. Clients that already hold a keep-alive connection keep working until they reconnect, after a timeout, an error, a new client instance or a new `connect_server`. From then on every call gets "connection refused". The node cannot store or snapshot the machine or shut it down cleanly. It must kill the process and re-execute from the last stored state, and it leaks a lingering server process until it does. CLI users driving a remote machine (`cartesi-machine --remote-address=...`) see the same thing. Hashes, proofs and dispute outcomes are not affected.
-
-**Possible solution**: Treat transient accept errors as recoverable. On EMFILE, ENFILE, ENOBUFS and ENOMEM (and as a safe default, anything except EBADF/EINVAL/ENOTSOCK), log the error and arm a short `asio::steady_timer` backoff (for example 10-100 ms, possibly growing). When it fires, call `next_accept()` again. Do not retry straight away: the pending connection keeps the listening fd readable in epoll, so an immediate retry spins at 100% CPU. Close the acceptor only on unrecoverable errors. If the acceptor does have to be closed for good, make the server exit or shut down cleanly, for example by uninstalling the signal handlers so `ioc.run()` can return, rather than lingering unreachable. Optionally reserve a spare fd that is released and re-acquired to drain the pending connection (the classic "idle fd" trick), so clients get a clean close instead of a hang.
-
-**Severity**: Low. Both reviewers rated it low, against the candidate's medium. The failure mode is bad: a live but unreachable server, and loss of unsaved in-memory state. But it needs fd exhaustion in the server process, which is unusual when validators use one connection per server and default limits are 1024 or more. Existing keep-alive connections keep working. Anyone who can flood the port can already call `shutdown` on the unauthenticated API, so an attacker gains nothing new. It cannot affect hashes, proofs or dispute outcomes.
-
-**Risks**:
-- Bug: the server is permanently unreachable after one transient error. Unsaved machine state is lost when the operator kills it. A zombie server process leaks memory and possibly large machine mappings. A node that monitors liveness by PID will not notice anything wrong.
-- Fix: retrying without a backoff turns EMFILE into a busy loop at 100% CPU. A backoff that is too long delays legitimate clients. Retrying on genuinely unrecoverable errors (EBADF/EINVAL after `rebind`/`close_acceptor`) must still be avoided; the existing `operation_aborted` / `!acceptor.is_open()` guard covers the close paths. The backoff timer must be cancelled on rebind, on signal-triggered shutdown and on the `shutdown` RPC, or it will keep `ioc.run()` alive or re-arm accept on a closed or replaced acceptor.
-
-**Proof of concept**: `bugs/w2b-06-jsonrpc-accept-error-kills-server/test.lua`. It needs `prlimit` (util-linux) and lua-socket, and takes about 3 s. Run from the repo root with `eval $(make -s env); lua5.4 bugs/w2b-06-jsonrpc-accept-error-kills-server/test.lua`. It exits 1 while the bug is present and 0 once the server is still reachable after EMFILE. The spawned server is killed at the end and its log goes to a temporary file that is deleted.
-
-**ID**: `w2b-06-jsonrpc-accept-error-kills-server`
-
-**Related**: B09 (fixed).
 
 ### B55. spawn_server hangs on its error path when the caller has SIGTERM blocked
 

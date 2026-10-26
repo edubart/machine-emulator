@@ -37,6 +37,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -619,6 +620,34 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(fork_server_test, spawned_server_fixture) {
     cm_jsonrpc_set_cleanup_call(forked, CM_JSONRPC_SHUTDOWN);
     cm_delete(forked);
 }
+
+#ifdef __linux__
+// What: a transient accept error, such as reaching the open files limit, must not stop the server from accepting.
+// How:  lower the server's open files limit, open more connections than it can accept, close them,
+//       restore the limit, then send a request on a new connection.
+BOOST_FIXTURE_TEST_CASE_NOLINT(accept_error_recovery_test, spawned_server_fixture) {
+    // Keep a connection open, so the fixture can shut the server down even if it stops accepting
+    const char *ver{};
+    BOOST_REQUIRE_EQUAL(cm_jsonrpc_get_server_version(m, &ver), CM_ERROR_OK);
+    struct rlimit limit{};
+    BOOST_REQUIRE_EQUAL(prlimit(static_cast<pid_t>(pid), RLIMIT_NOFILE, nullptr, &limit), 0);
+    const struct rlimit low_limit{.rlim_cur = 16, .rlim_max = limit.rlim_max};
+    BOOST_REQUIRE_EQUAL(prlimit(static_cast<pid_t>(pid), RLIMIT_NOFILE, &low_limit, nullptr), 0);
+    const auto colon = bound_address.rfind(':');
+    const boost::asio::ip::tcp::endpoint endpoint{boost::asio::ip::make_address(bound_address.substr(0, colon)),
+        static_cast<uint16_t>(std::stoi(bound_address.substr(colon + 1)))};
+    boost::asio::io_context ioc;
+    std::vector<boost::asio::ip::tcp::socket> sockets;
+    for (int i = 0; i < 32; ++i) {
+        sockets.emplace_back(ioc).connect(endpoint);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    sockets.clear();
+    BOOST_REQUIRE_EQUAL(prlimit(static_cast<pid_t>(pid), RLIMIT_NOFILE, &limit, nullptr), 0);
+    auto j = jsonrpc_post(bound_address, R"({"jsonrpc":"2.0","id":1,"method":"get_version"})");
+    BOOST_CHECK(j.contains("result"));
+}
+#endif
 
 // What: the CM_JSONRPC_SHUTDOWN cleanup mode shuts the server down when the
 //       client handle is deleted.

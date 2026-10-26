@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-40 confirmed issues: 2 high, 8 medium, 30 low.
+39 confirmed issues: 2 high, 8 medium, 29 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -36,7 +36,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B89](#b89-clone_file-hard-links-the-symlink-itself-when-a-read-only-source-is-reached-through-a-symlink) | medium | pre-existing | cartesi.filesystem and stored machine API (os::clone_file) | clone_file hard-links the symlink itself when a read-only source is reached through a symlink | `bugs/u2-02-clone-file-hardlinks-symlink-itself/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
-| [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
@@ -311,70 +310,6 @@ Exit status 1 with `BUG:` lines means the bug reproduces. Exit status 0 with "al
 
 **Related**: B20 (fixed).
 
-### B23. JSON-RPC protocol version not bumped for the new clear_hash_tree API
-
-**Title**: JSON-RPC protocol version left at 0.8 although the branch adds `machine.clear_hash_tree` and `runtime_config.clear_hash_tree`
-
-**Problem:** The branch adds a new RPC method, `machine.clear_hash_tree`, and a new runtime-config field, `clear_hash_tree`, to the JSON-RPC protocol. It does not bump the protocol version, which stays at 0.8.0, the value shipped in v0.22.0.
-
-The client's handshake only requires the server to have the same major.minor. So a branch client accepts an older (main / v0.22.0) `cartesi-jsonrpc-machine`. That server parses `machine_runtime_config` by reading only the fields it knows, so it drops `clear_hash_tree=true` without an error. As a result:
-- `create`/`load` with `{clear_hash_tree=true}` succeeds, but the cached hash tree is never cleared;
-- `get_runtime_config().clear_hash_tree` returns `false`;
-- an explicit `clear_hash_tree()` fails only later, with a method-not-found error.
-
-The version handshake exists to catch exactly this kind of mismatch, and here it does not.
-
-**Origin:** Introduced by this branch. The new method and field were added, but `src/jsonrpc-version.hpp` is unchanged from `origin/main`.
-
-**Area:** JSON-RPC client/server version handshake (`cartesi.jsonrpc` Lua module, C API `cm_jsonrpc_*`, `cartesi-jsonrpc-machine`).
-
-**Category:** API contract / version compatibility.
-
-**Location:**
-- `src/jsonrpc-version.hpp:24-26`: `JSONRPC_VERSION_MAJOR/MINOR/PATCH = 0/8/0`, not bumped.
-- `src/jsonrpc-machine.cpp:407-414`: `check_server_version` compares only major/minor; called at lines 430 and 559.
-- `src/json-util.cpp:1130-1140`: `ju_get_opt_field(..., machine_runtime_config&)` reads only known keys and ignores unknown ones. This is how the older server drops the field.
-- `src/jsonrpc-remote-machine.cpp:1285-1294,1856`: the new `machine.clear_hash_tree` handler. Client side: `src/jsonrpc-machine.cpp:908-911`.
-- `src/json-util.cpp:1139,2583`, `src/machine-runtime-config.hpp:88`, `src/machine.cpp:316`: the new runtime field.
-
-**Evidence:** `run.sh` builds `cartesi-jsonrpc-machine` from `git archive origin/main`, then runs the branch Lua client against it. Run from the repo root with `eval $(make -s env); bugs/rpc-04-jsonrpc-protocol-version-not-bumped/run.sh`:
-```
-client library version:	0.22.0
-handshake accepted, server protocol version 0.8.0
-create({...}, {clear_hash_tree=true}) succeeded; get_runtime_config().clear_hash_tree =	false
-BUG: runtime option clear_hash_tree=true silently ignored by a server that passed the version handshake
-clear_hash_tree() failed only now: .../test.lua:55: machine.clear_hash_tree
-BUG: client accepted a server (same protocol 0.8) that does not implement machine.clear_hash_tree
-exit=1
-```
-Control run against the branch server (`CARTESI_JSONRPC_MACHINE=src/cartesi-jsonrpc-machine`): `clear_hash_tree = true`, exit 0.
-
-**Scenario:** An operator of a PRT validator (Rollups Node, Dave or a custom node) upgrades the emulator library or Lua client but keeps an older `cartesi-jsonrpc-machine` binary or container image, for example in a split client/server deployment. The node spawns or connects to the server and passes `clear_hash_tree=true` on `create`/`load` to throw away a possibly stale or untrusted cached hash tree. The handshake succeeds and the option is silently skipped, so the node keeps working from the cached tree. If the node only calls `clear_hash_tree()` later, it gets a "method not found" error in the middle of a run instead of a clear incompatibility error at connect time.
-
-Two things limit the impact:
-- an older server cannot load machines stored by the branch (config archive version 8 vs 9), so the silent skip mostly affects `create`, or machines stored by the older server itself;
-- skipping the clear only gives a wrong hash if the on-disk cache is actually stale or corrupted.
-
-**Possible solution:** Bump `JSONRPC_VERSION_MINOR` to 9 in `src/jsonrpc-version.hpp`, with a CHANGELOG line ("Bumped JSON-RPC protocol version to 0.9.0"), as v0.21.0 and v0.22.0 did, so the handshake rejects older servers. As defence in depth, the server could also reject unknown keys in `runtime_config` (and other config objects) rather than ignoring them.
-
-**Severity:** Low. Both reviewers agree. It needs a newer client paired with an older server, and its only direct effect is a skipped defensive hash-tree clear plus a late method-not-found error. No hash or proof is computed incorrectly unless the cached tree is already bad. The fix is a one-line version bump, which may already be planned for release, since the library version is also still 0.22.0 and the branch is "Unreleased".
-
-**Risks:**
-- Bug: in a mixed-version deployment, a validator that relies on `clear_hash_tree=true` to distrust a cached tree silently keeps using it. A corrupted cache could then produce wrong root hashes or proofs, and the honest player could lose a dispute.
-- Bug: it also hides version skew that could break other new behaviour later.
-- Fix: bumping the minor version makes 0.22.x servers and newer clients refuse each other at connect time. That is the intended outcome, but deployments that mix versions must upgrade both sides together.
-- Fix: strict rejection of unknown config keys would break clients that send extra or forward-compatible fields.
-
-**Proof of concept:** `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/test.lua` (Lua client test, which needs `CARTESI_JSONRPC_MACHINE` to point at an old server) and `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/run.sh` (the driver). The driver builds the old server once from `origin/main` into `${OLD_BUILD_DIR:-${TMPDIR:-/tmp}/rpc-04-old-server}`, which takes a few minutes; set `CARTESI_JSONRPC_MACHINE` to reuse an existing old binary and skip the build. Run from the repo root:
-```
-eval $(make -s env); bugs/rpc-04-jsonrpc-protocol-version-not-bumped/run.sh
-```
-Exit code 1 means the bug reproduced. Exit code 0 means it is fixed: the handshake rejects the old server, or the option is honoured.
-
-**ID**: `rpc-04-jsonrpc-protocol-version-not-bumped`
-
-**Related**: [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines).
-
 ### B25. --clear-hash-tree is reapplied on every stored-mode revert
 
 **Title**: `--clear-hash-tree` is reapplied on every `--revert-mode=stored` snapshot/revert reload, forcing a full-machine rehash per input
@@ -462,7 +397,7 @@ BUG: CLI accepted --clear-hash-tree with --no-remote-create and exited successfu
 
 **ID**: `rpc-09-clear-hash-tree-ignored-existing-remote`
 
-**Related**: [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api).
+**Related**: B23 (fixed).
 
 ### B27. --dump-memory-ranges runs mkdir through the shell with an unquoted path
 

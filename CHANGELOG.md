@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed the stored page hash-tree cache layout, making stored machines much faster to load
 - Changed `dependencies.lock` to define the kernel and rootfs download URLs
 - Bumped machine configuration archive version from 8 to 9
+- Bumped JSON-RPC protocol version to 0.9.0
 
 ### Removed
 - Removed `read_file` and `write_file` from `cartesi.util`, superseded by `cartesi.filesystem`

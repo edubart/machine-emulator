@@ -514,6 +514,17 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(get_server_version_test, spawned_server_fixture) 
     BOOST_CHECK(j.contains("patch"));
 }
 
+// What: the server reports JSON-RPC protocol version 0.9, which added
+//       clear_hash_tree, so the handshake rejects older 0.8 servers.
+// How:  parse the returned version JSON and check its major and minor.
+BOOST_FIXTURE_TEST_CASE_NOLINT(get_server_version_protocol_test, spawned_server_fixture) {
+    const char *ver{};
+    BOOST_REQUIRE_EQUAL(cm_jsonrpc_get_server_version(m, &ver), CM_ERROR_OK);
+    auto j = nlohmann::json::parse(ver);
+    BOOST_CHECK_EQUAL(j["major"].get<int>(), 0);
+    BOOST_CHECK_EQUAL(j["minor"].get<int>(), 9);
+}
+
 // What: cm_jsonrpc_set_timeout and cm_jsonrpc_get_timeout are symmetric.
 // How:  set the timeout to 1234 ms, read it back, and compare.
 BOOST_FIXTURE_TEST_CASE_NOLINT(set_get_timeout_test, spawned_server_fixture) {

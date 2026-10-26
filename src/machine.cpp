@@ -2680,7 +2680,7 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
     if (!update_hash_tree()) {
         throw std::runtime_error{"update hash tree failed"};
     }
-    if (read_reg(reg::uarch_cycle) != 0) {
+    if (read_reg(reg::uarch_cycle) != 0 || read_reg(reg::uarch_halt) != 0) {
         throw std::runtime_error{"microarchitecture is not reset"};
     }
 
@@ -2838,8 +2838,10 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
         // Finish the period with the halted and reset state root hashes
         append_uarch_reset_root_hash(result, back_tree, log2_bundle_uarch_cycle_count, halt_root_hash, reset_root_hash);
 
-        // Sanity check to ensure the loop is working correctly, this should always be true
-        assert(mcycle_reached == mcycle_target);
+        // A uarch that halts without reaching the target mcycle would misalign the collected periods
+        if (mcycle_reached != mcycle_target) {
+            throw std::runtime_error{"microarchitecture did not reach the target mcycle"};
+        }
 
         const auto fallback = read_reg(reg::iflags_X) != 0 ? interpreter_break_reason::yielded_automatically :
                                                              interpreter_break_reason::reached_target_mcycle;

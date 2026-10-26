@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-49 confirmed issues: 3 high, 9 medium, 37 low.
+48 confirmed issues: 3 high, 9 medium, 36 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -37,7 +37,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
 | [B89](#b89-clone_file-hard-links-the-symlink-itself-when-a-read-only-source-is-reached-through-a-symlink) | medium | pre-existing | cartesi.filesystem and stored machine API (os::clone_file) | clone_file hard-links the symlink itself when a read-only source is reached through a symlink | `bugs/u2-02-clone-file-hardlinks-symlink-itself/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
-| [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
 | [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
@@ -298,48 +297,6 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 - `u3-05-clone-file-reflink-einval-no-fallback`: run with `eval $(make -s env); lua5.4 bugs/u3-05-clone-file-reflink-einval-no-fallback/test.lua`. It shows the same incomplete fallback list for reflinks: `ioctl(FICLONE)` returns `EINVAL` when btrfs clones a COW file into a NOCOW (`chattr +C`) directory, and `clone_stored` fails although a copy would work. The fix should fall back to `copy_file` on `EINVAL` as well as `EMLINK`.
 - `u2-03-clone-file-no-fallback-einval-eagain`: run with `eval $(make -s env); lua5.4 bugs/u2-03-clone-file-no-fallback-einval-eagain/test.lua`. It also shows the missing fallback for `EAGAIN`, which some filesystems return from `FICLONE` when a reflink cannot be made right away.
 - `u1-01-clone-file-reflink-einval-eagain-no-copy-fallback`: run with `eval $(make -s env); lua5.4 bugs/u1-01-clone-file-reflink-einval-eagain-no-copy-fallback/test.lua`.
-
-### B11. JSON-RPC request with an invalid id is rejected but still executed
-
-**Title**: JSON-RPC server rejects a request with an invalid `id` but still executes it, and answers it twice in a batch
-
-**Problem**: `handle_request` in the JSON-RPC remote-machine server checks each request and replies `-32600 invalid request` if the request is malformed. For the `jsonrpc` and `method` fields, the code pushes the error and then `continue`s. For an `id` that is not a string, number or null (for example `true`, `{}` or `[]`), it pushes the error but has no `continue`. Control falls through to `jsonrpc_dispatch_method`, so the method runs and changes machine state. Then, because `ji.contains("id")` is true, the method's result is pushed as a second response. A single request returns only `jr[0]`, which is the error, so the client is told the call was rejected when it actually ran. A batch returns both responses for one request. JSON-RPC 2.0 forbids both behaviours: an invalid request must not be executed, and each request gets exactly one response.
-
-**Origin**: pre-existing. `origin/main` has the same code, and the branch's changes to this file do not touch this check.
-
-**Area**: jsonrpc-remote-machine server (`cartesi-jsonrpc-machine`), request validation.
-
-**Category**: api-contract.
-
-**Location**:
-- `src/jsonrpc-remote-machine.cpp:1984-1991`: the invalid-`id` check pushes the error with no `continue`.
-- `src/jsonrpc-remote-machine.cpp:1997`: `jsonrpc_dispatch_method(ji, session)` still runs.
-- `src/jsonrpc-remote-machine.cpp:2003-2005`: the result is pushed as a second response.
-- `src/jsonrpc-remote-machine.cpp:2012`: a single (non-array) request returns only `jr[0]`, the error.
-
-**Evidence**: The test spawns a real `cartesi-jsonrpc-machine` server using the Lua `cartesi.jsonrpc` client and creates a 1 MiB machine. It then sends raw HTTP POSTs with curl. Run with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`:
-```
-single response: {"error":{"code":-32600,"message":"invalid field \"id\" (expected string, number, or null)"},"id":true,"jsonrpc":"2.0"}
-x1 after rejected request: 77
-BUG: request rejected as invalid (bad id) but write_reg was executed anyway (x1=77)
-batch response: [{"error":{"code":-32600,...},"id":{},"jsonrpc":"2.0"},{"id":{},"jsonrpc":"2.0","result":true}]
-responses in batch for 1 request: 2, x2=55
-BUG: batch with one invalid-id request produced 2 responses
-BUG: batch request with invalid id executed (x2=55)
-exit=1
-```
-
-**Scenario**: A third-party or hand-written client talks to `cartesi-jsonrpc-machine` directly over HTTP, for example a validator written in another language or a debugging script. It sends a request whose `id` is not a scalar, such as `{"method":"machine.write_reg","id":true,"params":["x1",77]}`. It receives "invalid field id", treats the call as having no effect, and may retry or carry on. Meanwhile `write_reg`, `run`, `write_memory`, `send_cmio_response` or `store` has already run, so the client's view of the machine no longer matches the real state. A batch-aware client that pairs responses with requests is also confused by the extra response. The official `libcartesi_jsonrpc` C/C++ client, which the Lua bindings, the `cartesi-machine` CLI, Rollups Node, Dave and the PRT node all use, always sends numeric ids. Honest validators using the shipped clients cannot trigger this, and hashes and proofs are not affected.
-
-**Possible solution**: Add `continue;` after `jr.push_back(jsonrpc_response_invalid_request(ji, "invalid field \"id\" ..."))` at line 1990. The invalid-`id` check then behaves like the `jsonrpc` and `method` checks: one error response, and no dispatch.
-
-**Severity**: low. Both reviewers agreed with the prover. Only clients that send a malformed, non-scalar `id` can reach this, and the official C/Lua clients never do. There is no crash, hang, memory corruption, or wrong hash or proof. The harm is that the server tells non-conforming clients a request was rejected when it actually ran.
-
-**Risks**: The bug itself can make a non-conforming client misjudge machine state after a state-changing call it believes was rejected, and can break response pairing in batches. The fix is a one-line change with minimal risk. Any client that currently sends non-scalar ids and depends, by accident, on the method running will now see the request genuinely rejected, which is the behaviour JSON-RPC 2.0 requires.
-
-**Proof of concept**: `bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/rpc-03-jsonrpc-invalid-id-still-executes/test.lua`. It needs `curl` and `cartesi-jsonrpc-machine` in `PATH`. It exits with 1 and prints `BUG:` lines while the bug is present, and exits with 0 once the bug is fixed.
-
-**ID**: `rpc-03-jsonrpc-invalid-id-still-executes`
 
 ### B15. frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof
 

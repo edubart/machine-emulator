@@ -855,6 +855,19 @@ describe("remote error messages", function()
         end, "parse error")
         expect.truthy(server:is_empty())
     end)
+
+    it("should not execute a request with an invalid id", function()
+        local jsonrpc = require("cartesi.jsonrpc")
+        local http = require("socket.http")
+        local server <close> =
+            jsonrpc.spawn_server():set_cleanup_call(jsonrpc.SHUTDOWN):create({ ram = { length = 0x1000 } })
+        local body = '[{"jsonrpc":"2.0","id":true,"method":"machine.write_reg","params":["x1",77]}]'
+        local response = assert(http.request("http://" .. server:get_server_address() .. "/", body))
+        local responses = cartesi.fromjson(response)
+        expect.equal(#responses, 1)
+        expect.equal(responses[1].error.code, -32600)
+        expect.equal(server:read_reg("x1"), 0)
+    end)
 end)
 
 describe("remote clone cleanup", function()

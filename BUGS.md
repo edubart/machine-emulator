@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-55 confirmed issues: 3 high, 11 medium, 41 low.
+54 confirmed issues: 3 high, 10 medium, 41 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -33,7 +33,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
 | [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
-| [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection) | medium | pre-existing | JSON-RPC client and server (fork) | Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection | `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
@@ -1716,65 +1715,6 @@ Apps or CLI tools that call `cm_read_virtual_memory` directly with a range that 
 
 **ID**: `w2b-09-virtual-memory-range-wraparound`
 
-### B58. Timed-out fork_server leaks an unreachable server, and a forked child can take over the parent's connection
-
-**Title**: JSON-RPC timeouts do not cancel the server-side request: a timed-out `fork_server()` leaves an unknown machine server running after shutdown, and a forked child can take over the parent's pending connection
-
-**Problem**: A JSON-RPC timeout (`cm_jsonrpc_set_timeout`, or the spawn/connect timeout) only stops the client from waiting. `json_post` throws `jsonrpc error: timeout` from the asio completion handler and closes the socket with an RST (`SO_LINGER` 0). The server is never told to stop. The server is single-threaded and calls `handle_request` synchronously, so the request in flight runs to completion. A request that is already queued in the backlog of the reset connection is also accepted and executed. Only `send_response` fails, with "Connection reset by peer". This has three effects:
-1. A timed-out `run()` still advances the machine. This is normal RPC semantics, but it is not documented: the header says only "milliseconds to wait before returning".
-2. A timed-out `fork` still forks a full copy of the machine. That copy listens on a port that nobody knows about. `fork_server()` never receives the child's pid or address, and the parent does not reap a child whose reply could not be delivered. Forked servers have no parent-death signal, so the child is orphaned (ppid 1) for good and keeps holding memory and file locks. The spawn constructor has the same flaw: its own `fork` request runs before `grand_child_killer` is armed, so a spawn timeout there orphans the grandchild.
-3. A connection race in the forked child (found while reproducing). If `fork` is handled while another connection has already been `accept()`ed by the reactor but its `on_accept` completion has not run yet, that connection is not in `sessions`. The child's `close_sessions()` therefore misses it. The child then runs the queued `on_accept` against its freshly rebound, open acceptor and serves the connection. Parent and child now share one client TCP connection, and each request goes to whichever process reads it first. In 2 of 4 prover runs and in both reviewer runs, the child answered `shutdown_server()` and the original server was the process that leaked.
-
-**Origin**: pre-existing.
-
-**Area**: libcartesi_jsonrpc client (`src/jsonrpc-machine.cpp`) / `cartesi-jsonrpc-machine` server (`src/jsonrpc-remote-machine.cpp`).
-
-**Category**: resource-leak, plus wrong machine instance serving a request (fork race).
-
-**Location**:
-- `src/jsonrpc-machine.cpp:120-129`: `shutdown_and_close_socket` closes with an RST.
-- `src/jsonrpc-machine.cpp:172-290`: the `json_post` timeout path. It throws from the connect/write/read handlers and sends no cancellation.
-- `src/jsonrpc-machine.cpp:743-747`: `fork_server()` gets no pid or address on timeout.
-- `src/jsonrpc-machine.cpp:563-571`: the spawn constructor's `fork` runs before `grand_child_killer` is armed.
-- `src/jsonrpc-remote-machine.cpp:217-246`: `handle_request` runs synchronously, so an in-flight request always completes.
-- `src/jsonrpc-remote-machine.cpp:830-885`: `jsonrpc_fork_handler`. It never reaps a child whose reply failed. At 863, the child's `close_sessions()` misses connections that were accepted but not yet dispatched.
-- `src/jsonrpc-remote-machine.cpp:364-372, 387-418`: `close_sessions` and `on_accept`. The `!acceptor.is_open()` guard passes in the child after `rebind`.
-
-**Evidence**: The test runs a 1 MiB RAM machine whose program is `j .`. It sets a 300 ms timeout, calls `run(3e8)` (about 1.3 s of work), then calls `fork_server()`. Both calls report a timeout. Afterwards `mcycle` equals 3e8, the server has an unexpected child `cartesi-jsonrpc-machine --server-fd=6`, and one server process is still running with ppid 1 after `shutdown_server()`. The prover's 4 runs and the re-run all exit 1. Command: `eval $(make -s env); lua5.4 bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/test.lua`
-```
-run(300000000) with 300ms timeout -> ok= false err= jsonrpc error: post error contacting 127.0.0.1:36997 (jsonrpc error: timeout)
-fork_server() with 300ms timeout -> ok= false err= jsonrpc error: post error contacting 127.0.0.1:36997 (jsonrpc error: timeout)
-... error cartesi-jsonrpc-machine pid:26845 ppid:1 ... send response error: Connection reset by peer   (x2)
-mcycle after the timed-out run: 300000000
-BUG: run() reported a timeout, but the server executed it to completion (mcycle=300000000)
-unexpected child of server: 26846 cartesi-jsonrpc-machine --server-fd=6
-BUG: fork_server() reported a timeout, but the server forked 1 machine server process(es) whose pid/address the client never received
-process 26845 still running after shutdown_server(), ppid=    1
-BUG: 1 cartesi-jsonrpc-machine process(es) leaked (orphaned, listening forever)
-```
-In this run the leaked process was the original server (26845), because the forked child served the client's later requests (effect 3).
-
-**Scenario**: A PRT validator, Rollups Node, Dave or app backend sets per-call timeouts to detect stuck servers. It then calls `fork_server()` to snapshot or branch the machine (PRT's `doc/recipes/prt.lua` uses `fork_server` heavily, although it keeps the default timeout of -1). Each `fork` that times out leaks one full machine server (RAM plus flash backing, file locks) that never exits, and the leaks add up until the host runs out of memory or descriptors. A client that retries `run` or `collect` after a timeout works on a machine that has already advanced, so it gets timing-dependent results unless it discards the server. A server shared by several clients, or a client that reconnects during a `fork`, can have its requests answered by the forked copy instead of the original. State-changing calls then go to a machine instance nobody intended, and the original may survive `shutdown`.
-
-**Possible solution**:
-- In `jsonrpc_fork_handler`, the parent should check whether the reply was delivered. If `send_response` fails for a `fork` reply, `kill` and `waitpid` the child. Alternatively, have the child confirm through a handshake before it starts serving.
-- In the child, call `close_sessions()` and also drop any pending accept completions before rebinding. For example, give each acceptor a generation counter and have `on_accept` ignore sockets accepted under an old generation. Another option is to `close()` the inherited listening acceptor and every socket fd except the new acceptor.
-- In the spawn constructor, arm `grand_child_killer` (or kill the whole process group) on every failure path, including a timeout during the `fork` request.
-- Optionally, set `PR_SET_PDEATHSIG` for forked servers, or provide a server-side "abort current request" mechanism.
-- Document in `cm-jsonrpc.h` that after a timeout the remote state is unknown, and that the server should be treated as tainted (shut down or killed) rather than reused.
-
-**Severity**: medium. One reviewer rated it medium and the other low. Both agree that "a timeout does not cancel the request" is standard RPC semantics and would rate low on its own. Both also agree that the defects with real impact are the unrecoverable process leak after a timed-out `fork` or spawn, and the fork-child connection race that sends requests to the wrong machine instance. These need non-default settings (timeouts) or overlapping connections, and they do not affect a single sequential client with default settings, so the rating is medium, not high.
-
-**Risks**: Of the bug: each incident leaks a full machine process with no handle to kill it; retried calls can give timing-dependent results; and requests can be served by the wrong machine instance (forked copy and original sharing a connection). Of the fix: killing the child when the reply fails could kill a child the client did receive, if the send error is spurious, so a handshake is more robust than inferring delivery from `send_response`. Changing accept handling around `fork` touches the asio fork-notification sequence and must be tested with concurrent clients. `PDEATHSIG` would change the lifetime semantics of forked servers that callers may rely on, since today they deliberately outlive their parent after `rebind`/`shutdown`.
-
-**Proof of concept**: `bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/test.lua` (self-contained; it writes its 4-byte `j .` RAM image to `os.tmpname()` and kills every process it spawned before exiting). Run from the repo root:
-`eval $(make -s env); lua5.4 bugs/w2b-01-rpc-timeout-request-still-executes-fork-leaks-server/test.lua`
-It exits 1 and prints `BUG:` lines while the defect is present, and exits 0 once fixed. Part (A) (the `mcycle` check) shows the expected no-cancellation behaviour. It should be relaxed or removed if that behaviour is accepted and documented rather than changed.
-
-**ID**: `w2b-01-rpc-timeout-request-still-executes-fork-leaks-server`
-
-**Related**: B10 (fixed).
-
 ### B59. replace_memory_range leaves the config stale, so store persists the old flash image
 
 **Title**: `replace_memory_range` leaves `m_c.flash_drive`/`m_c.nvram` stale, so `store` with `SHARING_CONFIG`/`SHARING_NONE` persists the pre-replacement image
@@ -2865,7 +2805,7 @@ It exits with status 1 and prints `BUG: ...` while the bug is present, and print
 
 **ID**: `p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race`
 
-**Related**: [B58](#b58-timed-out-fork_server-leaks-an-unreachable-server-and-a-forked-child-can-take-over-the-parents-connection).
+**Related**: B58 (fixed).
 
 ### B84. The JSON-RPC client cannot use IPv6 server addresses
 

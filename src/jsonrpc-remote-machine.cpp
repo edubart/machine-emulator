@@ -55,6 +55,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h> // IWYU pragma: keep
+#include <sys/wait.h>
 #include <unistd.h>
 
 #pragma GCC diagnostic push
@@ -221,6 +222,7 @@ struct http_session : std::enable_shared_from_this<http_session> {
     beast::flat_buffer buffer;
     std::unique_ptr<http::request_parser<http::string_body>> req_parser;
     std::shared_ptr<http_handler> handler;
+    std::vector<pid_t> forked_pids; ///< Servers forked while handling the request being replied to
 
     // Take ownership of the stream
     http_session(tcp::socket &&socket, std::shared_ptr<http_handler> handler) :
@@ -290,9 +292,15 @@ struct http_session : std::enable_shared_from_this<http_session> {
         }
         if (ec) { // Unexpected error
             SLOG(error) << "send response error: " << format_ec(ec);
+            // The client never received the addresses of the servers forked for this response, so stop them
+            for (const pid_t pid : forked_pids) {
+                std::ignore = kill(pid, SIGKILL);
+                std::ignore = waitpid(pid, nullptr, 0);
+            }
             shutdown();
             return;
         }
+        forked_pids.clear();
 
         // The stream may have been closed due to a signal
         if (!stream.socket().is_open()) {
@@ -364,7 +372,7 @@ struct http_handler : std::enable_shared_from_this<http_handler> {
 
     // Begins an asynchronous accept
     void next_accept() {
-        acceptor.async_accept(ioc, beast::bind_front_handler(&http_handler::on_accept, shared_from_this()));
+        acceptor.async_accept(ioc, beast::bind_front_handler(&http_handler::on_accept, shared_from_this(), getpid()));
     }
 
     // Bind the HTTP server to a new TCP port
@@ -410,9 +418,10 @@ private:
     }
 
     // Receives an incoming TCP connection
-    void on_accept(const beast::error_code ec, tcp::socket socket) {
-        // Operation may be aborted (e.g rebind() or close_acceptor() was called)
-        if (ec == asio::error::operation_aborted || !acceptor.is_open()) {
+    void on_accept(pid_t accept_pid, const beast::error_code ec, tcp::socket socket) {
+        // Operation may be aborted (e.g rebind() or close_acceptor() was called),
+        // or a forked child may inherit a connection accepted by its parent, which still serves it
+        if (ec == asio::error::operation_aborted || !acceptor.is_open() || accept_pid != getpid()) {
             return;
         }
         if (ec) {
@@ -903,6 +912,7 @@ static json jsonrpc_fork_handler(const json &j, const std::shared_ptr<http_sessi
             return jsonrpc_response_server_error(j, "fork failed ("s + strerror(fork_errno) + ")"s);
         }
         SLOG(trace) << session->handler->local_endpoint << " fork parent";
+        session->forked_pids.push_back(pid);
     }
     const cartesi::fork_result result{
         .address = new_server_address,

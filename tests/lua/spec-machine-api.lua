@@ -718,6 +718,52 @@ describe("JSON-RPC fork", function()
         expect.not_equal(address, server:get_server_address())
     end)
 
+    -- Keeps the server busy with a request that timed out, so the next connections wait in its backlog
+    local function make_busy(server)
+        server:delay_next_request(1000)
+        server:set_timeout(100)
+        expect.fail(function()
+            server:is_empty()
+        end, "timeout")
+    end
+
+    it("should stop a server forked for a request that timed out", function()
+        local server <close>, _, pid = jsonrpc.spawn_server()
+        server:set_cleanup_call(jsonrpc.SHUTDOWN)
+        make_busy(server)
+        expect.fail(function()
+            server:fork_server()
+        end, "timeout")
+        server:set_timeout(-1)
+        expect.truthy(server:is_empty())
+        local children <close> = assert(io.open(string.format("/proc/%d/task/%d/children", pid, pid)))
+        expect.equal(children:read("a"), "")
+    end)
+
+    it("should not serve a connection accepted before a fork in the forked server", function()
+        local socket = require("socket")
+        local server <close> = jsonrpc.spawn_server():set_cleanup_call(jsonrpc.SHUTDOWN)
+        make_busy(server)
+        local host, port = server:get_server_address():match("^(.*):(%d+)$")
+        local body = '{"jsonrpc":"2.0","id":1,"method":"fork"}'
+        local request = "POST / HTTP/1.1\r\nConnection: close\r\nContent-Length: " .. #body .. "\r\n\r\n" .. body
+        local forker = assert(socket.connect(host, port))
+        assert(forker:send(request))
+        -- Accepted by the server right before it handles the fork request
+        local idle = assert(socket.connect(host, port))
+        local response = assert(forker:receive("*a"))
+        local result = cartesi.fromjson(response:match("\r\n\r\n(.*)$")).result
+        forker:close()
+        local child <close> = jsonrpc.connect_server(result.address):set_cleanup_call(jsonrpc.SHUTDOWN)
+        -- Shutting down the server closes its connections, and the forked server must not hold the idle one open
+        server:set_timeout(-1)
+        server:shutdown_server()
+        server:set_cleanup_call(jsonrpc.NOTHING)
+        idle:settimeout(1)
+        expect.equal(select(2, idle:receive(1)), "closed")
+        idle:close()
+    end)
+
     it("should reject a shared memory range", function()
         local _ <close>, filename = filesystem.write_scope_temp_file(string.rep("\0", 0x1000))
         local server <close> = jsonrpc.spawn_server():set_cleanup_call(jsonrpc.SHUTDOWN):create({

@@ -136,6 +136,8 @@ CM_API cm_error cm_jsonrpc_emancipate_server(cm_machine *m);
 /// \param m Pointer to a valid JSONRPC remote machine object.
 /// \param ms Number of milliseconds to wait before returning due to a timeout. Use -1 to block indefinitely.
 /// \returns 0 for success, non zero code for error.
+/// \details A timeout does not cancel the request, which the server may still carry out.
+/// After a timeout, the state of the remote machine is unknown.
 CM_API cm_error cm_jsonrpc_set_timeout(cm_machine *m, int64_t ms);
 
 /// \brief Gets the current timeout for communication with remote machine server.

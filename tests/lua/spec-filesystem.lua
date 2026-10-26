@@ -61,6 +61,12 @@ describe("filesystem", function()
         expect.equal(filesystem.get_file_size(filename), 3)
     end)
 
+    it("reports write errors when closing files", function()
+        expect.fail(function()
+            filesystem.write_file("hash", "/dev/full")
+        end, "No space left on device")
+    end)
+
     it("clones files", function()
         local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
         local original, clone = dirname .. "/original", dirname .. "/clone"

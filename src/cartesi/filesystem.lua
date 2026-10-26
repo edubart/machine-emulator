@@ -91,6 +91,7 @@ end
 function filesystem.write_file(data, filename)
     local f <close> = assert(io.open(filename, "wb"))
     assert(f:write(data))
+    assert(f:close())
 end
 
 -- Returns the size of a file in bytes.

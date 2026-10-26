@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-90 confirmed issues: 6 high, 20 medium, 64 low.
+89 confirmed issues: 6 high, 20 medium, 63 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -51,7 +51,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B87](#b87-hash-tree-updates-start-a-full-openmp-team-for-tiny-batches-slowing-collection-100-500x-under-cpu-contention) | medium | pre-existing | Hash tree (parallel page hashing) | Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention | `bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/` |
 | [B89](#b89-clone_file-hard-links-the-symlink-itself-when-a-read-only-source-is-reached-through-a-symlink) | medium | pre-existing | cartesi.filesystem and stored machine API (os::clone_file) | clone_file hard-links the symlink itself when a read-only source is reached through a symlink | `bugs/u2-02-clone-file-hardlinks-symlink-itself/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
-| [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
 | [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
@@ -363,73 +362,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
 
-### B05. cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files
-
-**Title**: `cartesi.filesystem.write_file` reports success when the final flush fails, so CLI hash and proof files can be left empty
-
-**Problem:** `filesystem.write_file` opens the file as a to-be-closed variable (`local f <close> = ...`), calls `assert(f:write(data))`, and never closes the file explicitly. For small payloads (32-byte hashes, proofs, reports) `f:write` only fills the stdio buffer, so it succeeds. The real `write(2)` happens in `fclose`, which runs from the `<close>` handler. Lua 5.4's file `__close` (the same function as `__gc`) throws away `fclose`'s result. So ENOSPC, EFBIG, EIO or quota errors are lost: `write_file` returns normally and leaves an empty or truncated file. `write_temp_file` wraps `write_file` in `pcall`, so it cannot see the error either. The CLI then exits 0.
-
-**Origin:** Pre-existing. `util.write_file` on `origin/main` has identical code (`src/cartesi/util.lua:344-347`). This branch moved it into the new `cartesi.filesystem` module.
-
-**Area:** Lua library `cartesi.filesystem` (exported to other projects) / `cartesi-machine` CLI.
-
-**Category:** Durability / silent error loss.
-
-**Location:**
-- `src/cartesi/filesystem.lua:91-94` (`write_file`)
-- `src/cartesi/filesystem.lua:103-109` (`write_temp_file`, and `write_scope_temp_file` through it)
-- CLI callers in `src/cartesi-machine.lua`: 3214, 3287 (per-advance state hash files), 3486 and 3500 (proofs), 3587, 3606 (memory-range dumps), 3669 (`--initial-hash`), 4365, 4715 (`--final-hash`)
-- Not affected: `hash-tree.lua` has its own `write_file` (temp file, sync, rename) for stored hash trees.
-
-**Evidence:** `test_write_file_close.lua` writes 32 bytes to `/dev/full`. An explicit `f:close()` reports the error, but `fs.write_file` returns success:
-```
-$ lua5.4 bugs/ht-08-filesystem-write-file-swallows-close-errors/test_write_file_close.lua
-explicit f:close() on /dev/full ->	nil	No space left on device
-fs.write_file(32 bytes, /dev/full) ->	true	nil
-BUG: cartesi.filesystem.write_file reported success although the data could not be written (ENOSPC on fclose was swallowed)
-```
-`test_cli_final_hash.sh` runs `cartesi-machine.lua --final-hash=...` with `ulimit -f 0` and SIGXFSZ ignored, so the write fails with EFBIG:
-```
-$ sh bugs/ht-08-filesystem-write-file-swallows-close-errors/test_cli_final_hash.sh
-Halted
-Cycles: 56481123
-cli_exit=0
-final.bin size=0
-BUG: cartesi-machine exited 0 although the --final-hash file was not written (size=0)
-```
-
-**Scenario:** A script, CI job or operator tool runs `cartesi-machine --final-hash=final.bin` (or `--initial-hash`, state-hash, proof or dump outputs) on a host whose disk is full, over quota or failing. The CLI exits successfully and leaves a 0-byte or truncated file. Downstream tooling reads an empty or wrong hash or proof and may compare it, submit it or reject it with nothing pointing at the real cause. Lua projects that use `cartesi.filesystem.write_file`, `write_temp_file` or `write_scope_temp_file` (for example to stage input files for a run) can silently feed empty data into a later step after a host I/O failure.
-
-**Possible solution:** Close explicitly and check the result. For example, keep `<close>` and add `assert(f:close())` after the write; closing an already-closed file in `__close` is harmless. Or:
-```lua
-function filesystem.write_file(data, filename)
-    local f = assert(io.open(filename, "wb"))
-    local ok, err = f:write(data)
-    if ok then ok, err = f:close() else f:close() end
-    assert(ok, err)
-end
-```
-Audit other `<close>`-only write paths for the same pattern.
-
-**Severity:** Low. Both reviewers agree. It only triggers on host-side write failures. Machine state and the hashes and proofs computed in memory are correct, and neither the C API nor the PRT hash-tree storage path is involved. The harm is output files left empty or truncated while the CLI reports success.
-
-**Risks:** Bug: downstream consumers of CLI output files, or Lua library users, can act on empty or truncated hashes, proofs or inputs with no error raised. Fix: minimal. Callers that used to "succeed" on a failing disk will now raise an error, which is the intended behavior. `write_temp_file` already removes the file when it fails.
-
-**Proof of concept:** `bugs/ht-08-filesystem-write-file-swallows-close-errors/test_write_file_close.lua` (library-level, needs `/dev/full`) and `bugs/ht-08-filesystem-write-file-swallows-close-errors/test_cli_final_hash.sh` (end-to-end CLI, needs the default Cartesi images). Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/ht-08-filesystem-write-file-swallows-close-errors/test_write_file_close.lua
-eval $(make -s env); sh bugs/ht-08-filesystem-write-file-swallows-close-errors/test_cli_final_hash.sh
-```
-Both exit 1 while the bug is present and 0 once it is fixed.
-
-**ID**: `ht-08-filesystem-write-file-swallows-close-errors`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `lua-21-write-file-close-error-ignored`: run with `lua5.4 bugs/lua-21-write-file-close-error-ignored/test_write_file_close_error.lua`.
-
-**Related**: [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files).
-
 ### B06. frontier_forest_store and fs.sync_file ignore write errors and commit truncated files
 
 **Title**: hash-tree.lua `write_file` ignores `file:write` errors, so `frontier_forest_store` commits a truncated tree file that later stores never repair
@@ -487,7 +419,7 @@ The prover patched a copy with `assert(temporary.file:write(contents))`. With th
 - `lua-01-tempfile-write-error-silently-committed`: run with `eval $(make -s env); lua5.4 bugs/lua-01-tempfile-write-error-silently-committed/test_tempfile_write_error.lua`. It also identified the missing `ferror` check in `fs.sync_file` and showed that a previously good file can be replaced by a truncated one.
 - `rpc-05-hash-tree-write-file-ignores-write-error`: run with `eval $(make -s env); lua5.4 bugs/rpc-05-hash-tree-write-file-ignores-write-error/test_forest_store_short_write.lua`.
 
-**Related**: [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files).
+**Related**: B05 (fixed).
 
 ### B07. Interrupted remove_stored leaves a directory that blocks the name forever
 

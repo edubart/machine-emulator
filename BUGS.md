@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-29 confirmed issues: 2 high, 6 medium, 21 low.
+28 confirmed issues: 2 high, 6 medium, 20 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -50,7 +50,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
 | [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
-| [B80](#b80-bintnew-returns-non-numeric-values-unchanged-instead-of-failing) | low | pre-existing | Lua bint (cartesi.third-party.bint), cartesi.evmu | bint.new returns non-numeric values unchanged instead of failing | `bugs/p3-14-bint-new-returns-non-numeric-input/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
 | [B88](#b88-read-only-memory-ranges-longer-than-their-page-aligned-image-are-always-rejected) | low | pre-existing | Machine config (memory ranges) | Read-only memory ranges longer than their page-aligned image are always rejected | `bugs/u3-06-readonly-backing-gap-always-throws/` |
@@ -1201,78 +1200,6 @@ The test exits 1 while the bug is present. It exits 0 once `tojson` raises an er
 **ID**: `p3-08-tojson-uint64-written-as-negative`
 
 **Related**: B69 (fixed).
-
-### B80. bint.new returns non-numeric values unchanged instead of failing
-
-**Title**: `bint.new` / `evmu.bint()` returns `true`, tables and `evmu.hex` wrappers unchanged instead of asserting, so the evmu int/uint encoders' "value not an integer" check never fires
-
-**Problem**: `bint.new(x)` is documented to return "a new bint" and to throw an assert "in case x is not convertible to a bint". It only converts numbers and strings. Any other value that is not already a bint skips both branches. It then reaches `assert(x, 'value cannot be represented by a bint')`, which only rejects `nil` and `false`, and is returned as is. So:
-- `bint.new(true)` returns `true`.
-- `bint.new({})` returns the same table, and `bint.isbint` is false for it.
-- `bint.new(evmu.hex("0x05"))` returns the hex wrapper.
-
-In `evmu`, `encoded_uint` and `append_encoded_int` validate their input with `assert(bint.new(value), "value not an integer")`. That check therefore never fires for a truthy non-numeric value. The call still fails, but later and with an unrelated internal error ("attempt to perform bitwise operation on a table value", "attempt to compare number with nil"). Also, `evmu.bint(x) == evmu.bint(y)` compares the raw values when both are non-numeric, so `evmu.bint(true) == evmu.bint(true)` is `true`.
-
-**Origin**: Pre-existing. `bint.new` is unchanged from `origin/main`, where it matches upstream lua-bint. This branch's changes to `evmu.lua` do not touch these lines.
-
-**Area**: Lua `cartesi.third-party.bint` (exposed as `evmu.bint`) and the `cartesi.evmu` ABI encoders.
-
-**Category**: api-contract (input validation and diagnostics).
-
-**Location**:
-- `src/cartesi/third-party/bint.lua:384-407`: doc comment and `bint.new`. Only `number` and `string` are converted, and the `assert(x, ...)` at line 397 lets any truthy value through.
-- `src/cartesi/evmu.lua:405-410`: `encoded_uint`, `assert(bint.new(value), "value not an integer")` at line 407. It then fails at line 408 (`value >> size`).
-- `src/cartesi/evmu.lua:416-423`: `append_encoded_int`, same assert at line 418. It then fails inside the bint comparison (`bint.lua:1719`).
-- `src/cartesi/evmu.lua:609`: the `encode_calldata` comment says int/uint values are accepted "in any format bint.new accepts".
-
-**Evidence**: The test reports 6 `BUG:` lines and exits with code 1. `bint.new(false)` and `bint.new(nil)` do raise as expected, so only truthy non-numeric values pass through.
-```
-$ eval $(make -s env); lua5.4 bugs/p3-14-bint-new-returns-non-numeric-input/test.lua
-bint.new(true):	true	true
-BUG: bint.new(true) returned true instead of raising
-bint.new({}):	true	table: 0x55fd29d96990	true	false
-BUG: bint.new({}) returned a non-bint table (same ref=true)
-bint(true)==bint(true):	true	true
-BUG: evmu.bint(true) == evmu.bint(true) is true (malformed values compare equal)
-bint.new(evmu.hex('0x05')):	true	hex("0x05")	true
-BUG: bint.new(evmu.hex('0x05')) returned the hex wrapper unchanged
-encode_abi((uint256),{hex}):	false	.../src/cartesi/evmu.lua:408: attempt to perform bitwise operation on a table value (local 'value')
-BUG: encode_abi with hex wrapper fails with unrelated error: ...
-encode_abi((int256),{true}):	false	.../src/cartesi/third-party/bint.lua:1719: attempt to compare number with nil
-BUG: encode_abi with boolean fails with unrelated error: ...
-exit=1
-```
-
-**Scenario**: In practice, the result is a misleading error message:
-- A PRT/Rollups Node or app developer passes a JSON-decoded boolean or object, or an `evmu.hex()` wrapper, as an int/uint argument to `encode_abi`/`encode_calldata`. They get an internal Lua error that points into `evmu.lua` or `bint.lua`, not the intended "value not an integer". The wrapper is documented for string arguments only. For uint arguments, a plain `"0x05"` string works.
-- Code that calls `evmu.bint(x)` to validate or normalize input, such as the `evmu.bint(decoded[field]) == evmu.bint(expected)` pattern in `doc/recipes/prt-cast.lua:217`, does not get an error for a malformed field. The comparison passes wrongly only when both sides are the very same truthy non-numeric value (`true` vs `true`, or the same table). Comparing against a real number is still false, so a mismatch with a real expected value is never accepted.
-
-Nothing is mis-encoded, and no wrong hash, proof or calldata is produced. Validator correctness and PRT disputes are not affected.
-
-**Possible solution**:
-- In `bint.new`, raise an error for any argument type other than number, string or bint, for example `error('value cannot be represented by a bint')` in an `else` branch. Alternatively, make it delegate to `bint.tobint` and assert on a `nil` result.
-- In `evmu.lua`, validate with `bint.isbint` (or `bint.tobint(value)` plus an assert) so that "value not an integer" is what users see.
-- Add a regression test that passes `true`, `{}` and `evmu.hex(...)` to `bint.new` and to the int/uint encoders.
-
-**Severity**: low. The prover and both reviewers agree. The only realistic effect is a misleading error message for invalid input, and the silent-equality case needs both sides to be the same malformed value, which no real validator flow produces.
-
-**Risks**:
-- Of the bug:
-  - Poor diagnostics for API misuse.
-  - Callers that rely on `bint()` to reject non-numeric values silently get the raw value back, and may propagate or compare it.
-- Of the fix:
-  - It changes a vendored third-party file, which diverges from upstream lua-bint. Keep it small, document it, or put the check in an evmu wrapper instead.
-  - Code that currently passes, knowingly or not, a non-bint table with bint-like behaviour through `bint.new` would start to fail. No such use is known in the repo.
-
-**Proof of concept**: `bugs/p3-14-bint-new-returns-non-numeric-input/test.lua`. Run it from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/p3-14-bint-new-returns-non-numeric-input/test.lua
-```
-It exits with code 1 and prints `BUG:` lines while the defect is present, and prints `OK` once it is fixed.
-
-**ID**: `p3-14-bint-new-returns-non-numeric-input`
-
-**Related**: B79 (fixed).
 
 ### B82. Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot
 

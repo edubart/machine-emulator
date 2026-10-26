@@ -761,6 +761,8 @@ describe("cartesi evmu", function()
 
         check_encode_calldata_hex_error("_(int[])", nil, "expected arguments table")
         check_encode_calldata_hex_error("_(int)", {}, "missing tuple component at index 1")
+        check_encode_calldata_hex_error("_(int)", { true }, "value cannot be represented by a bint")
+        check_encode_calldata_hex_error("_(uint)", { evmu.hex("0x05") }, "value cannot be represented by a bint")
         check_encode_calldata_hex_error("_(int[])", { 1 }, "array values not in table")
         check_encode_calldata_hex_error("_(int[])", { evmu.bint.new(1) }, "array values not in table")
         check_encode_calldata_hex_error("_(int[2])", { 1 }, "array values not in table")

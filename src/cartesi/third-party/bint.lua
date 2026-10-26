@@ -394,6 +394,8 @@ function bint.new(x)
       x = bint_frominteger(x)
     elseif ty == 'string' then
       x = bint_fromstring(x)
+    else
+      x = nil
     end
     assert(x, 'value cannot be represented by a bint')
     return x

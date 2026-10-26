@@ -1788,7 +1788,8 @@ static json jsonrpc_machine_verify_send_cmio_response_handler(const json &j,
 /// \returns HTTP response message
 static http::message_generator jsonrpc_http_reply(const http::request<http::string_body> &req, const json &j,
     const std::shared_ptr<http_session> &session) {
-    std::string body = j.dump();
+    // Error messages may echo bytes that are not valid UTF-8, so replace them instead of throwing
+    std::string body = j.dump(-1, ' ', false, json::error_handler_t::replace);
     SLOG(trace) << session->handler->local_endpoint << " response is " << body;
     http::response<http::string_body> res{http::status::ok, req.version()};
     res.set(http::field::server, BOOST_BEAST_VERSION_STRING);

@@ -216,6 +216,18 @@ describe("tojson / fromjson schema dictionary", function()
         expect.equal(back, { hash = HASH, n = 5, label = "hi" })
     end)
 
+    it("should reject an ArrayIndex that overflows when shifted", function()
+        local SCHEMA = { Msg = { n = "ArrayIndex" } }
+        expect.fail(function()
+            cartesi.tojson({ n = math.mininteger }, nil, "Msg", SCHEMA)
+        end, "array index is out of range")
+        for _, n in ipairs({ "9223372036854775807", "18446744073709551615" }) do
+            expect.fail(function()
+                cartesi.fromjson('{"n":' .. n .. "}", "Msg", SCHEMA)
+            end, "array index is out of range")
+        end
+    end)
+
     it("should apply a different schema to each tuple item", function()
         local SCHEMA = { Tuple = { items = { "Base64", "ArrayIndex", "Default", "Hex" } } }
         local tuple = { HASH, 5, true, BINARY }

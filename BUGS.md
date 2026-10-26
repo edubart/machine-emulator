@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-34 confirmed issues: 2 high, 8 medium, 24 low.
+33 confirmed issues: 2 high, 8 medium, 23 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -48,7 +48,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B60](#b60-full-shadow-write_memory-skips-validation-and-never-marks-the-tlb-padding-page-dirty) | low | pre-existing | Machine API (write_memory) | Full-shadow write_memory skips validation and never marks the TLB padding page dirty | `bugs/w2b-12-shadow-snapshot-write-unvalidated-not-dirty/` |
 | [B61](#b61-cm_translate_virtual_address-crashes-on-a-null-output-pointer) | low | pre-existing | C API | cm_translate_virtual_address crashes on a NULL output pointer | `bugs/w2b-14-capi-null-output-crashes/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
-| [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices) | low | pre-existing | Lua bindings (JSON conversion) | ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices | `bugs/p2-07-clua-arrayindex-signed-overflow/` |
 | [B71](#b71-fromjson-rewrites-strings-that-match-a-key-of-a-struct-array-or-tuple-schema) | low | pre-existing | Lua bindings (JSON with schemas) | fromjson rewrites strings that match a key of a struct, array or tuple schema | `bugs/p3-01-fromjson-object-schema-string-enum-rewrite/` |
 | [B72](#b72-tojson-and-fromjson-truncate-object-keys-at-nul-bytes-merging-distinct-keys) | low | pre-existing | Lua bindings (JSON conversion) | tojson and fromjson truncate object keys at NUL bytes, merging distinct keys | `bugs/p3-06-json-nul-in-keys-truncated-merged/` |
 | [B73](#b73-fromjson-and-the-json-rpc-server-stop-parsing-at-a-nul-byte-and-accept-trailing-data) | low | pre-existing | Lua bindings and JSON-RPC server (JSON parsing) | fromjson and the JSON-RPC server stop parsing at a NUL byte and accept trailing data | `bugs/p3-05-fromjson-truncates-at-nul/` |
@@ -1068,67 +1067,6 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 
 **Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
 
-### B69. ArrayIndex conversion between JSON and Lua silently wraps out-of-range indices
-
-**Title**: Unchecked ±1 in Lua/JSON ArrayIndex conversion silently wraps peer-supplied indices (signed overflow; UB only in builds without -fno-strict-overflow)
-
-- **Problem**: `cartesi.fromjson` and `cartesi.tojson` (in `clua-i-machine.cpp`) shift values that have the `"ArrayIndex"` schema between 0-based JSON and 1-based Lua. The schemas that use it include the AccessLog bracket `where` field and `ArrayArrayIndex` (for example `mcycle_hash_offsets`). The shift does `v += 1` (JSON to Lua) and `v -= 1` (Lua to JSON) on `int64_t` with no range check. In the `number_unsigned` branch, the code also does `static_cast<int64_t>(uint64)` first, which turns any value above INT64_MAX into a negative number. So for peer-supplied JSON:
-  - `where = 9223372036854775807` (INT64_MAX) overflows to `math.mininteger`;
-  - `where = 18446744073709551615` (UINT64_MAX) silently becomes `0`.
-
-  In the other direction, `math.mininteger` overflows to INT64_MAX. Each case is a signed integer overflow in C++. Nothing raises an error.
-- **Origin**: pre-existing. The branch's diff does not touch these lines.
-- **Area**: Lua JSON conversion (`cartesi.fromjson` / `cartesi.tojson`, the AccessLog / ArrayIndex / ArrayArrayIndex schemas). PRT nodes use it to decode step logs received from peers.
-- **Category**: memory-safety / undefined behaviour (signed overflow), plus missing input validation.
-- **Location**:
-  - `src/clua-i-machine.cpp:414-417`: Lua to JSON, `int64_t v = lua_tointeger(L, idx); ... v -= 1;` (the overflow is at line 416).
-  - `src/clua-i-machine.cpp:501-507`: JSON to Lua, the `number_integer` branch, `v += 1`.
-  - `src/clua-i-machine.cpp:509-515`: JSON to Lua, the `number_unsigned` branch, `static_cast<int64_t>(get<uint64_t>())` then `v += 1` (the overflow is at line 512). nlohmann parses non-negative literals as unsigned, so this is the path peer input takes.
-  - `src/Makefile:267-289`: default builds add `-fno-strict-overflow`; the `sanitize=yes` and `fuzz=yes` builds drop it and add `-fsanitize=address,undefined -fno-sanitize-recover=all`.
-- **Evidence**: With the stock build, the test feeds an AccessLog whose bracket `where` is INT64_MAX or UINT64_MAX to `cartesi.fromjson(..., "AccessLog")`. It then serializes a bracket with `where = math.mininteger` through `cartesi.tojson(..., nil, "AccessLog")`. Every conversion wraps silently:
-  ```
-  $ eval $(make -s env); timeout 30 lua5.4 bugs/p2-07-clua-arrayindex-signed-overflow/test.lua
-  fromjson where=INT64_MAX ->	-9223372036854775808
-  BUG: JSON->Lua ArrayIndex conversion overflowed: INT64_MAX became -9223372036854775808
-  fromjson where=UINT64_MAX ->	0
-  BUG: JSON->Lua ArrayIndex conversion wrapped: UINT64_MAX became 0
-  tojson where=math.mininteger ->	{"accesses":[],"brackets":[{"text":"x","type":"begin","where":9223372036854775807}],...}
-  BUG: Lua->JSON ArrayIndex conversion overflowed: math.mininteger became 9223372036854775807
-  (exit 1)
-  ```
-  The prover also rebuilt `clua-i-machine.o` with `-fsanitize=signed-integer-overflow -fno-sanitize-recover=all` and without `-fno-strict-overflow`, then relinked `cartesi.so`. With that build, the same test aborts the process:
-  ```
-  clua-i-machine.cpp:512:19: runtime error: signed integer overflow: 9223372036854775807 + 1 cannot be represented in type 'long int'
-  (tojson path) clua-i-machine.cpp:416:23: runtime error: signed integer overflow: -9223372036854775808 - 1 cannot be represented in type 'long long int'
-  ```
-  A UBSan build that keeps the project's `-fno-strict-overflow` reports nothing and gives the same silent-wrap output as the stock build.
-- **Scenario**: A malicious player in a PRT dispute (Dave, or a Rollups Node running the Lua PRT node) sends a `step_log` whose brackets contain `{"type":"begin","where":9223372036854775807,"text":"x"}`. The validator decodes it with `cartesi.fromjson(..., "AccessLog")`. The effects:
-  - In a release build, any Lua code that reads `brackets[i].where` gets `math.mininteger` (or `0` for UINT64_MAX) instead of an error.
-  - In a build made with `make sanitize=yes` or `fuzz=yes`, the validator process aborts on that message.
-
-  Verification itself is not affected. When the log reaches C++, `json-util.cpp:1509` rejects any `where > accesses.size()`. The wrap round-trips (INT64_MAX goes to mininteger and back to INT64_MAX), so the bad bracket is still rejected. Hashes, proofs and `verify_*` results stay correct. `mcycle_hash_offsets` (ArrayArrayIndex) comes from the node's own collect calls, not from peers.
-- **Possible solution**: Range-check before the shift and raise a Lua error on out-of-range values:
-  - JSON to Lua: reject unsigned values above `INT64_MAX - 1` and signed values equal to `INT64_MAX`. Optionally, since these are indices, reject negative values too.
-  - Lua to JSON: reject `v == INT64_MIN`, or more strictly, any `v < 1` for an ArrayIndex.
-
-  Alternatively, use `__builtin_add_overflow` / `__builtin_sub_overflow` and throw on overflow.
-- **Severity**: low. The prover and both reviewers agree. Shipped builds use `-fno-strict-overflow` (GCC's `-fwrapv`), so the overflow is defined wrapping and the optimizer cannot exploit it. The C++ side still rejects the wrapped indices, so no wrong hash or proof is accepted and no honest player can lose a dispute. What remains is silent corruption of out-of-range indices seen by Lua code, and a peer-triggerable abort only in the sanitize/fuzz debug builds.
-- **Risks**:
-  - Bug: Lua-side logic that trusts decoded `where` values (bounds, sorting, display) can misbehave on absurd peer input without any error. Nodes or CI fuzzers running sanitizer builds can be crashed remotely. A future build-flag change that drops `-fno-strict-overflow` would turn this into real UB in production.
-  - Fix: low risk. Valid indices are far below the limits. A stricter check (rejecting `v < 1` or negative indices) could break callers that pass 0 or negative placeholders on purpose, so start with the overflow-only check.
-- **Proof of concept**: `bugs/p2-07-clua-arrayindex-signed-overflow/test.lua` uses only the public `cartesi` Lua module and needs no machine image. It exits 1 when the bug reproduces. Run from the repo root:
-  `eval $(make -s env); timeout 30 lua5.4 bugs/p2-07-clua-arrayindex-signed-overflow/test.lua`
-
-  To see the abort, run the same test against a `cartesi.so` built with `-fsanitize=signed-integer-overflow -fno-sanitize-recover=all` and without `-fno-strict-overflow` (for example `make sanitize=yes`, which needs the ASan `LD_PRELOAD` that the Makefile sets up).
-
-**ID**: `p2-07-clua-arrayindex-signed-overflow`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `p3-03-arrayindex-signed-overflow`: run with `eval $(make -s env); lua5.4 bugs/p3-03-arrayindex-signed-overflow/test.lua`.
-
-**Related**: B62 (fixed).
-
 ### B71. fromjson rewrites strings that match a key of a struct, array or tuple schema
 
 **Title**: Lua `fromjson` replaces any string equal to a key of an object (struct/array/tuple) schema with that schema's internal value; the mapping was meant only for enum schemas
@@ -1197,7 +1135,7 @@ It exits with code 1 and prints `BUG:` lines while the defect is present, and pr
 
 **ID**: `p3-01-fromjson-object-schema-string-enum-rewrite`
 
-**Related**: [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices).
+**Related**: B69 (fixed).
 
 ### B72. tojson and fromjson truncate object keys at NUL bytes, merging distinct keys
 
@@ -1388,7 +1326,7 @@ The test exits 1 while the bug is present. It exits 0 once `tojson` raises an er
 
 **ID**: `p3-08-tojson-uint64-written-as-negative`
 
-**Related**: [B69](#b69-arrayindex-conversion-between-json-and-lua-silently-wraps-out-of-range-indices).
+**Related**: B69 (fixed).
 
 ### B79. bint shifts by a bint count of 2^63 or more wrap the count modulo 2^64
 

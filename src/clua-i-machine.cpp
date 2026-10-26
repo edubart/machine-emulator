@@ -411,6 +411,9 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
             if (lua_isinteger(L, idx) != 0) {
                 int64_t v = lua_tointeger(L, idx);
                 if (schema.is_string() && schema.template get<std::string_view>() == "ArrayIndex") {
+                    if (v == INT64_MIN) {
+                        throw std::runtime_error{"array index is out of range"};
+                    }
                     v -= 1;
                 }
                 j = v;
@@ -499,6 +502,9 @@ static void clua_push_json_value(lua_State *L, const nlohmann::json &j, const nl
         case nlohmann::json::value_t::number_integer: {
             int64_t v = j.template get<int64_t>();
             if (schema.is_string() && schema.template get<std::string_view>() == "ArrayIndex") {
+                if (v == INT64_MAX) {
+                    throw std::runtime_error{"array index is out of range"};
+                }
                 v += 1;
             }
             lua_pushinteger(L, v);
@@ -507,6 +513,9 @@ static void clua_push_json_value(lua_State *L, const nlohmann::json &j, const nl
         case nlohmann::json::value_t::number_unsigned: {
             auto v = static_cast<int64_t>(j.template get<uint64_t>());
             if (schema.is_string() && schema.template get<std::string_view>() == "ArrayIndex") {
+                if (v < 0 || v == INT64_MAX) {
+                    throw std::runtime_error{"array index is out of range"};
+                }
                 v += 1;
             }
             lua_pushinteger(L, v);

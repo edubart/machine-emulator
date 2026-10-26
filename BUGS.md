@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-22 confirmed issues: 2 high, 6 medium, 14 low.
+21 confirmed issues: 2 high, 6 medium, 13 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -42,7 +42,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
-| [B74](#b74-tojson-silently-writes-nan-and-infinities-as-null) | low | pre-existing | Lua bindings (JSON conversion) | tojson silently writes NaN and infinities as null | `bugs/p3-07-json-nan-inf-serialized-as-null/` |
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
@@ -793,52 +792,6 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 **ID**: `p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo`
 
 **Related**: B35 (fixed).
-
-### B74. tojson silently writes NaN and infinities as null
-
-**Title**: cartesi.tojson silently turns NaN/+Inf/-Inf into JSON null; fromjson reads it back as nil, so the field or array element is lost
-
-**Problem**: When `clua_push_managed_toclose_json_ref` meets a non-integer Lua number, it stores the number in the `nlohmann::json` value as it is, with no `std::isfinite` check. `nlohmann::json::dump()` writes NaN, +Inf and -Inf as `null` and raises no error. `cartesi.fromjson` then maps `null` to `nil`. The result is silent data loss: `{a=0/0, b=1}` serializes to `{"a":null,"b":1}` and comes back without `a`, and `{1, 0/0, 3}` becomes `[1,null,3]`, which restores with a nil hole at `t[2]`. The reverse direction is strict, because `fromjson` rejects a literal `NaN` with a parse error. So the API is asymmetric, and only `tojson` loses data.
-
-**Origin**: Pre-existing. The branch's diff to `src/clua-i-machine.cpp` does not touch the number case.
-
-**Area**: Lua JSON binding (`cartesi.tojson` / `cartesi.fromjson`, and Lua-table-to-JSON conversion in general).
-
-**Category**: correctness (silent data loss)
-
-**Location**:
-- `src/clua-i-machine.cpp:419-421`: in `clua_push_managed_toclose_json_ref`, the `LUA_TNUMBER` floating-point branch runs `j = lua_tonumber(L, idx);` and never checks whether the value is finite.
-- `src/clua-i-machine.cpp:629`: `clua_tojson` calls `j.dump(indent)`, and this is where nlohmann writes non-finite values as `null`.
-
-**Evidence**: The test round-trips `{a=v, b=1}` through `cartesi.tojson` and `cartesi.fromjson` for v = NaN, +Inf and -Inf, and does the same for the array `{1, 0/0, 3}`. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/p3-07-json-nan-inf-serialized-as-null/test.lua
-nan -> {"a":null,"b":1} -> a=nil
-BUG: tojson serialized non-finite nan as null without error; fromjson round-trip loses field 'a'
-inf -> {"a":null,"b":1} -> a=nil
-BUG: tojson serialized non-finite inf as null without error; fromjson round-trip loses field 'a'
--inf -> {"a":null,"b":1} -> a=nil
-BUG: tojson serialized non-finite -inf as null without error; fromjson round-trip loses field 'a'
-array {1,nan,3} -> [1,null,3] -> #t=3 t[2]=nil
-BUG: NaN array element silently becomes null/nil hole
-```
-The test exits 1 while the bug is present. It exits 0 once `tojson` raises an error for non-finite numbers, because it treats a `pcall` failure as the correct behaviour.
-
-**Scenario**: A Lua tool, a PRT node helper or a CLI script stores a computed float in its JSON state with `cartesi.tojson`, for example a rate, a timeout or a progress ratio that divides by zero. The JSON is written without any error. After a restart the field is `nil`, so code that indexes or compares it either throws far from the cause or silently takes a default path. Machine config and runtime config are not affected: every field in those schemas is an integer or a string. A NaN passed by mistake in a config table would still become `null` and most likely fall back to a default without any error.
-- Hashes, proofs, step logs and the PRT node's persisted state (EpochState, `epoch.json`, cache manifests, `hash-tree.lua`'s StoredTree) contain no floats. The `math.huge` in `prt-demo.lua`'s `get_progress` is a local accumulator that is never serialized.
-- So validators, the Rollups Node and Dave are not affected today.
-
-**Possible solution**: In the floating-point branch, check the value first and throw when it is not finite. For example: `const lua_Number n = lua_tonumber(L, idx); if (!std::isfinite(n)) { throw std::invalid_argument("cannot serialize non-finite number (NaN or Inf) to JSON"); } j = n;`. `clua_tojson` already catches `std::exception` and turns it into a Lua error. Check that the other callers of `clua_push_managed_toclose_json_ref`, such as `clua_tojsonschemadict` and the config conversion, also catch it. If they do not, use `luaL_error` directly; nothing has to be released at that point because only to-be-closed managed values are held. Add a regression test for `tojson` with NaN, Inf and -Inf, both as object fields and as array elements.
-
-**Severity**: low. Both reviewers rated it low. Non-finite floats are lost silently, but no emulator schema field and no PRT-node persisted value is a float, so hashes, proofs, step logs and validator liveness cannot be affected. Writing `null` is also the same choice JavaScript's `JSON.stringify` makes. The defect is the silent loss in a general-purpose library function, where lua-cjson and Python's `json.dumps(allow_nan=False)` raise an error instead.
-
-**Risks**:
-- Of the bug: third-party Lua state that holds non-finite floats is silently lost or truncated, and the failure shows up later, far from its cause. A NaN in a config table is silently replaced by a default instead of being rejected.
-- Of the fix: code that today relies on `tojson` succeeding with NaN or Inf (for example, logging or dumping debug tables that contain `math.huge`) would start raising errors. This is a behaviour change, so it should be noted in the changelog. A less disruptive alternative is to keep `null` but add an opt-in strict mode. That leaves the silent loss as the default behaviour.
-
-**Proof of concept**: `bugs/p3-07-json-nan-inf-serialized-as-null/test.lua`. Run it from the repo root with `eval $(make -s env); lua5.4 bugs/p3-07-json-nan-inf-serialized-as-null/test.lua`. It exits 1 while the bug is present and 0 once it is fixed.
-
-**ID**: `p3-07-json-nan-inf-serialized-as-null`
 
 ### B75. tojson writes unsigned 64-bit values of 2^63 or more as negative integers
 

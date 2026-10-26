@@ -91,6 +91,15 @@ describe("tojson / fromjson schema dictionary", function()
         expect.equal(cartesi.tojson({ 1, nil, 3 }), "[1,null,3]")
     end)
 
+    it("should reject non-finite numbers", function()
+        for _, value in ipairs({ 0 / 0, math.huge, -math.huge }) do
+            expect.fail(function()
+                cartesi.tojson({ a = value })
+            end, "non-finite")
+        end
+        expect.equal(cartesi.tojson({ 1.5 }), "[1.5]")
+    end)
+
     it("should keep NUL bytes in object keys", function()
         expect.equal(cartesi.tojson({ ["a\0b"] = 1, a = 2 }), '{"a":2,"a\\u0000b":1}')
         expect.equal(cartesi.fromjson('{"a\\u0000b":1,"a":2}'), { ["a\0b"] = 1, a = 2 })

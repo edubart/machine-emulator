@@ -17,6 +17,7 @@
 #include "clua-i-machine.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -420,7 +421,11 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
                 }
                 j = v;
             } else { // floating point
-                j = lua_tonumber(L, idx);
+                const lua_Number v = lua_tonumber(L, idx);
+                if (!std::isfinite(v)) {
+                    throw std::runtime_error{"cannot serialize non-finite number to JSON"};
+                }
+                j = v;
             }
             break;
         }

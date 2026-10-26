@@ -394,6 +394,15 @@ describe("cartesi evmu", function()
             "_(int calldata a)",
             { name = "_", params = make_tuple({ make_int(nil, "calldata", "a") }), returns = empty_tuple }
         )
+        check_parse_func_sig("_(int storageRoot, int memory memoryIndex, int calldata_)", {
+            name = "_",
+            params = make_tuple({
+                make_int(nil, nil, "storageRoot"),
+                make_int(nil, "memory", "memoryIndex"),
+                make_int(nil, nil, "calldata_"),
+            }),
+            returns = empty_tuple,
+        })
         check_parse_func_sig(
             "_(int, address)",
             { name = "_", params = make_tuple({ make_int(), make_address() }), returns = empty_tuple }

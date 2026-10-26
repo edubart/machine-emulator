@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-43 confirmed issues: 2 high, 8 medium, 33 low.
+42 confirmed issues: 2 high, 8 medium, 32 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -37,7 +37,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
 | [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
-| [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
@@ -409,75 +408,6 @@ Exit status 1 with `BUG:` lines means the bug reproduces. Exit status 0 with "al
 **ID**: `lua-06-verify-slice-noncanonical-address`
 
 **Related**: B20 (fixed).
-
-### B19. ABI type parser mangles parameter names starting with memory, storage or calldata
-
-**Title**: evmu type parser splits parameter names that start with `memory`/`storage`/`calldata`, so named encode/decode uses the wrong field
-
-**Problem:** In the `cartesi.evmu` type-spec grammar, the `data_location` rule is `P("memory") + P("calldata") + P("storage")`. It has no identifier-boundary check (`idnot`), and the int/bytes size rules in the same file do have one. `type_spec` matches `C(V("data_location")^-1) * opsp * C(identifier^-1)`, and `opsp` allows zero spaces. As a result, a parameter name that begins with one of these keywords gets split in two. `uint256 storageRoot` parses as data_location `storage` with name `Root`. `memoryIndex` becomes `Index`, `calldataHash` becomes `Hash`, and `storage_x` becomes `_x`. Every named spec gets these wrong names:
-- `parse_type_spec` and `parse_func_sig` return the wrong `name`.
-- `decode_abi`, `decode_calldata` and `decode_calldata_hex` return the value under the mangled key, so `v.storageRoot` is `nil`.
-- `encode_abi`, `encode_calldata` and `encode_calldata_hex` reject a correctly named argument table with `unexpected tuple component with name "storageRoot"`.
-
-**Origin:** Pre-existing. The grammar line is the same on `main`. This branch adds `encode_abi` and `decode_abi`, which are used for event data and return values. Those specs are usually built from ABI JSON with names, so the new functions make the bug easier to hit.
-
-**Area:** Lua library `cartesi.evmu` (`src/cartesi/evmu.lua`), the EVM ABI helper that ships in the emulator package.
-
-**Category:** Correctness (parser / ABI encoding and decoding).
-
-**Location:**
-- `src/cartesi/evmu.lua:127`: the `data_location` rule, missing `* idnot`
-- `src/cartesi/evmu.lua:129-141`: `type_spec` uses that rule and assigns `name` and `data_location`
-- `src/cartesi/evmu.lua:100`: `idnot`, already defined and not applied here
-- Affected entry points:
-  - `parse_func_sig` (`:280`) and `parse_type_spec` (`:299`)
-  - `encode_calldata` and `encode_calldata_hex` (`:611`, `:623`)
-  - `encode_abi` (`:627`)
-  - `decode_calldata` and `decode_calldata_hex` (`:820`, `:836`)
-  - `decode_abi` (`:842`)
-
-**Evidence:** The test parses, decodes and encodes specs whose parameter names start with each keyword. Run it with `eval $(make -s env); lua5.4 bugs/lua-11-evmu-param-name-data-location-prefix-mangled/test.lua`. Output:
-```
-BUG: parameter "storageRoot" parsed as name=Root data_location=storage
-BUG: parameter "memoryIndex" parsed as name=Index data_location=memory
-BUG: parameter "calldataHash" parsed as name=Hash data_location=calldata
-BUG: parameter "storage_x" parsed as name=_x data_location=storage
-BUG: decode_abi named fields missing: storageRoot=nil memoryIndex=nil; keys present: 1,2,Index,Root
-BUG: encode_abi with {storageRoot=7} failed: .../src/cartesi/evmu.lua:39: unexpected tuple component with name "storageRoot"
-BUG: encode_calldata with {calldataHash=...} failed: .../src/cartesi/evmu.lua:39: unexpected tuple component with name "calldataHash"
-exit=1
-```
-With the one-line fix below, the same test prints `OK: ...` and exits 0. It also checks that `(bytes memory payload)` still parses as data_location `memory` with name `payload`.
-
-**Scenario:** A validator node or tool builds encode/decode specs from a contract's ABI JSON, keeping the parameter names. Examples are event arguments or function return values decoded with `decode_abi`, or calls built with `encode_calldata`. Names such as `storageRoot`, `memoryHash` and `calldataSize` are legal in Solidity and appear in real contracts.
-- Decoding puts the field under `Root`, `Hash` or `Size`, so the caller reads `nil` and fails, or may misread the data.
-- Encoding a named argument table throws.
-
-The PRT node in this branch uses only unnamed specs such as `(uint64)` (`prt-bridge.lua`), so it does not hit the bug. Third-party validators and tools that use names would.
-
-**Possible solution:** Add an identifier boundary to the keyword rule:
-```lua
-data_location = (P("memory") + P("calldata") + P("storage")) * idnot,
-```
-This fix was verified in a patched copy. Separately, `idfirst`/`idrest` reject `$`, which Solidity allows in identifiers. That is a different grammar limitation and is not covered by this test.
-
-**Severity:** Low. Both reviewers confirmed the bug and rated it low; the prover's medium was not adopted. It is a real bug in a shipped Lua helper, but the impact is narrow:
-- Nothing touches state hashes, proofs, step logs or the C API.
-- The decoded value is correct and only its key is wrong.
-- Failures are usually loud: a nil field or an encode error.
-- The trigger is uncommon: a named spec whose name starts with one of the three keywords.
-
-**Risks:**
-- Bug: a caller may misread data or fail when decoding events or return values under the expected field name. An encode error may also stop a transaction or query from being built. This can disrupt tools or nodes that rely on names taken from ABI JSON.
-- Fix: minimal. Real data locations are always followed by whitespace or the end of the input, and `idnot` accepts both, so `bytes memory payload` and `string calldata` still parse. The only change in behaviour is that names starting with these keywords are now kept whole.
-
-**Proof of concept:** `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/test.lua`. Run it from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/lua-11-evmu-param-name-data-location-prefix-mangled/test.lua
-```
-It exits 1 and prints `BUG: ...` lines while the bug is present. It exits 0 and prints `OK: ...` once fixed.
-
-**ID**: `lua-11-evmu-param-name-data-location-prefix-mangled`
 
 ### B23. JSON-RPC protocol version not bumped for the new clear_hash_tree API
 

@@ -773,6 +773,8 @@ describe("cartesi evmu", function()
 
         check_encode_calldata_hex_error("_(int[3])", { { 1, 2 } }, "invalid value count (expected 3, got 2)")
         check_encode_calldata_hex_error("_(int[3])", { { 1, 2, 3, 4 } }, "invalid value count (expected 3, got 4)")
+        check_encode_calldata_hex_error("_(int[3])", { { 1, nil, 3 } }, "missing array element at index 2")
+        check_encode_calldata_hex_error("_(string[])", { { "a", nil, "c" } }, "missing array element at index 2")
 
         check_encode_calldata_hex_error("_(int,int,int)", { 1, 2 }, "missing tuple component at index 3")
         check_encode_calldata_hex_error(

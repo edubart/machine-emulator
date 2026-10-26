@@ -490,6 +490,9 @@ local function append_encoded_array(output, values, tn)
     if not dynamic_size and tn.size ~= #values then
         errorf("invalid value count (expected %u, got %u)", tn.size, #values)
     end
+    for i = 1, #values do
+        if values[i] == nil then errorf("missing array element at index %u", i) end
+    end
     -- For dynamic arrays, encode length first
     if dynamic_size then append_encoded_uint(output, #values) end
     -- Static elements: encode directly

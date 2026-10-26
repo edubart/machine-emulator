@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-89 confirmed issues: 5 high, 19 medium, 65 low.
+89 confirmed issues: 5 high, 20 medium, 64 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -33,6 +33,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
+| [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain) | medium | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B09](#b09-json-rpc-server-exits-when-an-error-message-contains-invalid-utf-8) | medium | pre-existing | JSON-RPC remote machine server | JSON-RPC server exits when an error message contains invalid UTF-8 | `bugs/rpc-01-jsonrpc-server-crash-invalid-utf8-error-message/` |
 | [B10](#b10-spawned-json-rpc-servers-inherit-client-sockets-so-concurrent-spawns-fail) | medium | pre-existing | JSON-RPC client (spawn_server) | Spawned JSON-RPC servers inherit client sockets, so concurrent spawns fail | `bugs/rpc-02-jsonrpc-client-fds-leak-into-spawned-servers/` |
 | [B12](#b12-frontier_forest_store-drops-expansions-under-single-value-fixed-point-trees) | medium | introduced by branch | Lua cartesi.hash-tree (frontier forest store) | frontier_forest_store drops expansions under single-value fixed-point trees | `bugs/lua-02-store-skips-expanded-single-value-tree/` |
@@ -50,7 +51,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B87](#b87-hash-tree-updates-start-a-full-openmp-team-for-tiny-batches-slowing-collection-100-500x-under-cpu-contention) | medium | pre-existing | Hash tree (parallel page hashing) | Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention | `bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/` |
 | [B89](#b89-clone_file-hard-links-the-symlink-itself-when-a-read-only-source-is-reached-through-a-symlink) | medium | pre-existing | cartesi.filesystem and stored machine API (os::clone_file) | clone_file hard-links the symlink itself when a read-only source is reached through a symlink | `bugs/u2-02-clone-file-hardlinks-symlink-itself/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
-| [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
 | [B15](#b15-frontierlast_proof-hangs-on-the-last-leaf-of-a-64-bit-tree-and-does-not-validate-the-proof) | low | pre-existing | Lua cartesi.hash-tree (frontier) | frontier(last_proof) hangs on the last leaf of a 64-bit tree and does not validate the proof | `bugs/lua-05-frontier-from-proof-hang-and-no-validation/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
@@ -548,7 +548,7 @@ exit=1
 
 - `api-13-remove-stored-fails-on-incomplete-dir`: run with `eval $(make -s env); lua5.4 bugs/api-13-remove-stored-fails-on-incomplete-dir/test_remove_stored_incomplete_dir.lua`.
 
-### B08. clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL)
+### B08. clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL, EAGAIN)
 
 **Title**: `clone_stored` fails with EMLINK ("Too many links") instead of copying once about 65000 stored clones share one hard-linked read-only file
 
@@ -582,7 +582,7 @@ The exit status is 1. Once fixed, the test exits 0 and also checks that each clo
 
 **Possible solution:** In `os::clone_file`, also fall back to `copy_file` on `EMLINK`, and arguably on `EACCES` and `EOPNOTSUPP` (the same value as `ENOTSUP` on Linux, but not on every platform). Check that the copied file keeps the source's read-only mode, so that later clones of it are still hard-linked.
 
-**Severity:** Low. Both reviewers agreed. It is an availability failure that needs about 65000 unpruned live clones of one stored lineage on ext4. It produces no wrong hashes or proofs and no corrupted state. The error is clean and catchable, `scope_remove` cleans up the partial target, and deleting old clones lowers the link count again.
+**Severity:** Medium. This entry's own reviewers rated the EMLINK case low: it needs about 65000 unpruned clones of one lineage on ext4, and the error is clean. Two later reproductions (listed below) show the same incomplete fallback list fails for reflinks too: `FICLONE` returns `EINVAL` on btrfs with NOCOW (`chattr +C`) directories and on XFS realtime or DAX files, and `EAGAIN` with OpenZFS block cloning. On those hosts `clone_stored` fails every time, and a node that snapshots with it (as the PRT node does) cannot run at all there. Hashes and proofs are never affected and the failure is loud, so this stays below high.
 
 **Risks:** Bug: when the limit is reached, a long-running validator that depends on `clone_stored` loses the ability to snapshot or revert, which could delay its dispute moves. Fix: very low risk. Falling back to a copy only costs disk space and time for the affected file (the PMAs file is 4 KiB). If `EACCES` is added, the fallback must not hide real permission errors on the destination directory. `copy_file` would surface those itself.
 
@@ -5135,7 +5135,7 @@ It exits with status 1 and prints `BUG:` lines while the defect is present, and 
 
 **ID**: `u2-02-clone-file-hardlinks-symlink-itself`
 
-**Related**: [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval).
+**Related**: [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval-eagain).
 
 ## Candidates that were not confirmed
 

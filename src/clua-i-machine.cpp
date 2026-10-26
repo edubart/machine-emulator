@@ -375,6 +375,8 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
     }
     nlohmann::json &j = *clua_push_new_managed_toclose_ptr(L, nlohmann::json(), ctxidx);
     idx -= idx < 0 ? 1 : 0; // adjust offset after pushing j reference
+    // UnsignedInteger also applies to every integer nested in the value it types
+    const bool is_unsigned = schema.is_string() && schema.template get<std::string_view>() == "UnsignedInteger";
     switch (lua_type(L, idx)) {
         case LUA_TTABLE: {
             const int64_t len = clua_get_array_table_len(L, idx);
@@ -383,7 +385,8 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
                 clua_check_array_schema_size(static_cast<std::size_t>(len), schema);
                 for (int64_t i = 1; i <= len; ++i) {
                     lua_geti(L, idx, i);
-                    const auto &item_schema =
+                    const auto &item_schema = is_unsigned ?
+                        schema :
                         clua_get_array_item_schema(L, static_cast<std::size_t>(i - 1), schema, user_schema_dict);
                     j.push_back(
                         clua_push_managed_toclose_json_ref(L, -1, item_schema, user_schema_dict, ctxidx, depth + 1));
@@ -401,7 +404,8 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
                     size_t field_name_len = 0;
                     const char *field_name_ptr = lua_tolstring(L, -1, &field_name_len);
                     const std::string_view field_name(field_name_ptr, field_name_len);
-                    const auto &field_schema = clua_get_field_schema(L, field_name, schema, user_schema_dict);
+                    const auto &field_schema =
+                        is_unsigned ? schema : clua_get_field_schema(L, field_name, schema, user_schema_dict);
                     j[field_name] =
                         clua_push_managed_toclose_json_ref(L, -2, field_schema, user_schema_dict, ctxidx, depth + 1);
                     lua_pop(L, 3); // pop value, key copy, child j reference
@@ -419,7 +423,11 @@ static nlohmann::json &clua_push_managed_toclose_json_ref(lua_State *L, int idx,
                     }
                     v -= 1;
                 }
-                j = v;
+                if (is_unsigned) {
+                    j = static_cast<uint64_t>(v);
+                } else {
+                    j = v;
+                }
             } else { // floating point
                 const lua_Number v = lua_tonumber(L, idx);
                 if (!std::isfinite(v)) {
@@ -550,6 +558,7 @@ static const nlohmann::json &clua_get_machine_schema_dict(lua_State * /*unused*/
     // - Binary strings (translate Base64 or Hex strings in JSON to binary strings in Lua)
     // - Enumeration strings (convert to integers of an enumeration)
     // - Array indexes (translate 0 based index in JSON to 1 based index in Lua)
+    // - Unsigned integers (write Lua integers as unsigned 64-bit JSON integers)
     static const nlohmann::json machine_schema_dict = {
         {"Base64", "Base64"},
         {"Hex", "Hex"},
@@ -563,6 +572,7 @@ static const nlohmann::json &clua_get_machine_schema_dict(lua_State * /*unused*/
                 {"console_output", CM_BREAK_REASON_CONSOLE_OUTPUT}, {"console_input", CM_BREAK_REASON_CONSOLE_INPUT},
                 {"mcycle_overflow", CM_BREAK_REASON_MCYCLE_OVERFLOW}}},
         {"ArrayIndex", "ArrayIndex"},
+        {"UnsignedInteger", "UnsignedInteger"},
         {"Base64Array",
             {
                 {"items", "Base64"},

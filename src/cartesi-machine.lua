@@ -3113,7 +3113,7 @@ end
 
 local function serialize_config(out, config, format)
     if format == "json" then
-        out:write(cartesi.tojson(config, 2), "\n")
+        out:write(cartesi.tojson(config, 2, "UnsignedInteger"), "\n")
     elseif format == "lua" then
         out:write("return ")
         util.dump_table(config, out, default_config)

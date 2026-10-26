@@ -1386,6 +1386,7 @@ describe("cartesi-machine CLI", function()
             "--store-config=" .. json_file .. ",format:json",
         })
         expect.truthy(filesystem.read_file(json_file):find('"sha256"'))
+        expect.truthy(filesystem.read_file(json_file):find('"ilrsc": 18446744073709551615'))
 
         local cfg3 = config_for({ "--load-config=" .. json_file .. ",format:json" })
         expect.equal(cfg3.hash_tree.hash_function, "sha256")

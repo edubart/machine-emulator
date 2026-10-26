@@ -248,6 +248,15 @@ describe("tojson / fromjson schema dictionary", function()
         end
     end)
 
+    it("should write UnsignedInteger values and the integers nested in them as unsigned", function()
+        local value = { a = -1, b = { math.mininteger, 5 }, s = "x" }
+        local j = cartesi.tojson(value, nil, "UnsignedInteger")
+        expect.equal(j, '{"a":18446744073709551615,"b":[9223372036854775808,5],"s":"x"}')
+        expect.equal(cartesi.fromjson(j), value)
+        local SCHEMA = { Msg = { n = "UnsignedInteger" } }
+        expect.equal(cartesi.tojson({ n = -1, m = -1 }, nil, "Msg", SCHEMA), '{"m":-1,"n":18446744073709551615}')
+    end)
+
     it("should apply a different schema to each tuple item", function()
         local SCHEMA = { Tuple = { items = { "Base64", "ArrayIndex", "Default", "Hex" } } }
         local tuple = { HASH, 5, true, BINARY }

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-18 confirmed issues: 2 high, 4 medium, 12 low.
+17 confirmed issues: 2 high, 4 medium, 11 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -40,7 +40,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
 | [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
-| [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
 
@@ -741,44 +740,6 @@ Exit 1 with `BUG: ... SIGBUS` means the bug reproduced. Exit 0 means fixed (no c
 **ID**: `w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc`
 
 **Related**: [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages), [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages).
-
-### B75. tojson writes unsigned 64-bit values of 2^63 or more as negative integers
-
-**Title**: Lua tojson writes uint64 values >= 2^63 as negative JSON integers (e.g. `--store-config` with `format:json`)
-
-- **Problem**: Lua 5.4 has only signed 64-bit integers. So when the Lua binding converts JSON to Lua (`clua_push_json_value`), a `number_unsigned` value at or above 2^63 becomes a negative Lua integer through `static_cast<int64_t>`. That step alone is unavoidable. The problem is the way back out. `clua_push_managed_toclose_json_ref` always stores a Lua integer as `int64_t`, and the only schema primitive it treats specially is `ArrayIndex`. No primitive writes the value back as `uint64_t`. As a result, JSON produced by `cartesi.tojson` (and anything built on it) contains negative numbers for fields that the JSON-RPC schema (`src/jsonrpc-discover.cpp`) documents as `UnsignedInteger`. Examples are `"ilrsc": -1`, `"imcyclemax": -1` and `"misa": -9223372036853460691`. For the same machine, the C API (`cm_get_initial_config`) writes `18446744073709551615` and `9223372036856090925`.
-- **Origin**: pre-existing. `origin/main` has the same code, and the branch makes no relevant change to these paths.
-- **Area**: Lua JSON layer (`cartesi.tojson` / `fromjson`) and the CLI's `--store-config=...,format:json`.
-- **Category**: api-contract (interoperability).
-- **Location**:
-  - `src/clua-i-machine.cpp:509-515`: `clua_push_json_value`, `number_unsigned` case, `static_cast<int64_t>(j.get<uint64_t>())`.
-  - `src/clua-i-machine.cpp:412-423`: `clua_push_managed_toclose_json_ref`, `LUA_TNUMBER` case, `int64_t v = lua_tointeger(...); j = v;`. Only `ArrayIndex` is special-cased.
-  - `src/clua-cartesi.cpp:164-170`: `cartesi_mod_tojson`, which exposes the path to Lua.
-  - `src/cartesi-machine.lua:3114-3116`: `serialize_config`, which writes `cartesi.tojson(config, 2)` to the user's file.
-  - `src/json-util.cpp:802-826`: `ju_get_opt_field<uint64_t>`, which casts negative integers back to unsigned. This is why the emulator's own loaders do not notice the problem.
-- **Evidence**: `test.lua` round-trips `m:get_initial_config()` through `cartesi.tojson`, runs `cartesi-machine.lua --store-config=<tmp>.json,format:json`, and looks for negative values in both outputs. `c.cpp` is a control that prints the same fields as the C API emits them. Run with `eval $(make -s env); timeout 120 lua5.4 bugs/p3-08-tojson-uint64-written-as-negative/test.lua`:
-  ```
-  tojson(get_initial_config()) negative fields: ilrsc=-1, imcyclemax=-1, misa=-9223372036853460691
-  Lua value of processor.registers.ilrsc = -1 (C API value is 2^64-1 = 18446744073709551615)
-  cartesi-machine --store-config JSON negative fields: ilrsc=-1, imcyclemax=-1, misa=-9223372036853460691
-  BUG: Lua tojson writes uint64 fields >= 2^63 as negative JSON integers (violates UnsignedInteger schema)
-  (exit status 1)
-  ```
-  The C API control (`c.cpp`) prints `"ilrsc":18446744073709551615,...` and `"misa":9223372036856090925,...`.
-- **Scenario**: Suppose a Rollups Node, Dave component or other tool written in another language (Rust serde `u64`, Go `uint64`, or jq/JS scripts comparing magnitudes) reads a machine config or other JSON file written by the Lua tooling, for example `cartesi-machine --store-config=cfg.json,format:json`. That reader rejects `-1`, or it misreads a sentinel such as `imcyclemax` or `ilrsc` as a small signed value. The same applies to any Lua-produced JSON sent to a JSON-RPC server that is not the emulator. The PRT Lua node itself is not affected in practice. Its own `tojson` messages carry small integers, and the fields PRT depends on (`mcycle`, target addresses, log2 sizes) stay far below 2^63. Nodes that call the C API directly get correct unsigned JSON.
-- **Possible solution**: In `clua_push_managed_toclose_json_ref`, write `j = static_cast<uint64_t>(v)` when the field schema marks the value as unsigned. One way is to add an `UnsignedInteger` primitive to the Lua schema dictionary and use it for the config, register and other `uint64` fields. Another is to default integer fields of known-unsigned schemas, such as the machine config, to unsigned output. Leave `fromjson` as is: the two's-complement Lua integer is the correct bit pattern.
-- **Severity**: low. Both reviewers agreed. Hashes, proofs, step logs and machine state are unaffected, and the emulator's own consumers (C API, `cartesi-jsonrpc-machine`, `--load-config`) accept the negative values by design and round-trip them bit-exactly. The only impact is on strict external `u64` parsers reading JSON produced from Lua, and only for the few fields whose values reach 2^63 or more (`ilrsc`, `imcyclemax`, `misa`).
-- **Risks**: Of the bug: stored configs and other Lua-produced JSON break the documented `UnsignedInteger` contract, which can cause parse failures or misread sentinels in tooling written in other languages. Of the fix: emitting unsigned values for fields that really are signed would turn small negative values into huge positive ones, so the unsigned primitive must only be applied to fields that are actually `uint64`. Users or tests that compare existing stored JSON byte for byte would see output change from `-1` to `18446744073709551615`. The C++ loaders accept both forms, so reading stays compatible.
-- **Proof of concept**: `bugs/p3-08-tojson-uint64-written-as-negative/test.lua` (reproducer; exits 1 while the bug is present) and `bugs/p3-08-tojson-uint64-written-as-negative/c.cpp` (C API control). Run from the repo root:
-  ```
-  eval $(make -s env); timeout 120 lua5.4 bugs/p3-08-tojson-uint64-written-as-negative/test.lua
-  # optional control:
-  g++ -std=c++20 -Isrc bugs/p3-08-tojson-uint64-written-as-negative/c.cpp -Lsrc -lcartesi -o /tmp/p3-08-c && /tmp/p3-08-c
-  ```
-
-**ID**: `p3-08-tojson-uint64-written-as-negative`
-
-**Related**: B69 (fixed).
 
 ### B83. Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail
 

@@ -568,6 +568,15 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(rebind_server_test, spawned_server_fixture) {
     BOOST_CHECK_EQUAL(cm_jsonrpc_get_server_version(m, &ver), CM_ERROR_OK);
 }
 
+// What: cm_jsonrpc_rebind_server rejects a null address.
+// How:  call with address=nullptr and expect CM_ERROR_INVALID_ARGUMENT.
+BOOST_FIXTURE_TEST_CASE_NOLINT(rebind_server_null_address_test, spawned_server_fixture) {
+    const char *new_addr{};
+    cm_error err = cm_jsonrpc_rebind_server(m, nullptr, &new_addr);
+    BOOST_CHECK_EQUAL(err, CM_ERROR_INVALID_ARGUMENT);
+    BOOST_CHECK(new_addr == nullptr);
+}
+
 // What: cm_jsonrpc_emancipate_server returns OK on a freshly spawned server.
 // How:  call the wrapper once against the fixture server and expect success.
 BOOST_FIXTURE_TEST_CASE_NOLINT(emancipate_server_test, spawned_server_fixture) {

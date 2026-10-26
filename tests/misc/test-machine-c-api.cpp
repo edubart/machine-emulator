@@ -1513,6 +1513,11 @@ BOOST_FIXTURE_TEST_CASE_NOLINT(read_write_virtual_memory_basic_test, ordinary_ma
     BOOST_REQUIRE_EQUAL(paddr, address);
 }
 
+BOOST_FIXTURE_TEST_CASE_NOLINT(translate_virtual_address_null_output_test, ordinary_machine_fixture) {
+    cm_error error_code = cm_translate_virtual_address(_machine, 0x80000000, nullptr);
+    BOOST_CHECK_EQUAL(error_code, CM_ERROR_INVALID_ARGUMENT);
+}
+
 BOOST_FIXTURE_TEST_CASE_NOLINT(read_write_virtual_memory_scattered_data, ordinary_machine_fixture) {
     uint16_t read_value = 0;
     uint16_t write_value = 0xdead;

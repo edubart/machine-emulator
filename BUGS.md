@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-88 confirmed issues: 5 high, 18 medium, 65 low.
+89 confirmed issues: 5 high, 19 medium, 65 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -48,6 +48,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
 | [B87](#b87-hash-tree-updates-start-a-full-openmp-team-for-tiny-batches-slowing-collection-100-500x-under-cpu-contention) | medium | pre-existing | Hash tree (parallel page hashing) | Hash-tree updates start a full OpenMP team for tiny batches, slowing collection 100-500x under CPU contention | `bugs/u3-01-hash-tree-omp-tiny-batch-slowdown/` |
+| [B89](#b89-clone_file-hard-links-the-symlink-itself-when-a-read-only-source-is-reached-through-a-symlink) | medium | pre-existing | cartesi.filesystem and stored machine API (os::clone_file) | clone_file hard-links the symlink itself when a read-only source is reached through a symlink | `bugs/u2-02-clone-file-hardlinks-symlink-itself/` |
 | [B05](#b05-cartesifilesystemwrite_file-ignores-close-errors-cli-writes-empty-hash-files) | low | pre-existing | Lua cartesi.filesystem, CLI | cartesi.filesystem.write_file ignores close errors, CLI writes empty hash files | `bugs/ht-08-filesystem-write-file-swallows-close-errors/` |
 | [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval) | low | pre-existing | Stored machine API, cartesi.filesystem | clone_stored fails instead of copying when a hard link or reflink is refused (EMLINK, EINVAL) | `bugs/ht-10-clone-stored-emlink-no-fallback/` |
 | [B11](#b11-json-rpc-request-with-an-invalid-id-is-rejected-but-still-executed) | low | pre-existing | JSON-RPC remote machine server | JSON-RPC request with an invalid id is rejected but still executed | `bugs/rpc-03-jsonrpc-invalid-id-still-executes/` |
@@ -5079,6 +5080,61 @@ Optionally, for read-only mappings with a real partial page, map the file region
 It exits 1 and prints `BUG:` while the defect is present. Once fixed, it exits 0 and prints `OK: read-only gap mapping works`, after also checking that the read-only drive's content is the image followed by zeros.
 
 **ID**: `u3-06-readonly-backing-gap-always-throws`
+
+### B89. clone_file hard-links the symlink itself when a read-only source is reached through a symlink
+
+**Title**: clone_file hard-links the symlink itself when a read-only source is reached through a symlink, so the clone dangles or aliases the caller's file
+
+**Problem:** `os::clone_file` opens `from` with `open()`, which follows symlinks, and calls `fstat` on that fd. The read-only test `(st.st_mode & S_WRITE_ALL) == 0` therefore checks the mode of the symlink's target. For a read-only target it then calls `hardlink_file(from, to)`, which is a plain `link(from, to)`. On Linux, `link(2)` does not follow a symlink in `oldpath`, so it hard-links the symlink inode, not the data. The "clone" is a symlink with the same target text. If the target is relative and the destination sits at a different directory depth, the clone dangles. If the target is absolute, the clone is only a pointer into the caller's storage. Writable sources take the reflink or copy path, which open the target, so only read-only sources are affected. This contradicts the API's stated purpose: the binding says it "Clones a file into a new path", and `doc/recipes/prt.lua` `store_input` says the clone exists "so replay never depends on the caller's file". macOS `link()` follows symlinks, so behaviour also differs between platforms.
+
+**Origin:** Pre-existing. The `clone_file` core is the same on `origin/main`, where `machine::clone_stored` is the only caller. This branch exposes it directly through the new `cartesi.filesystem.clone_file` Lua binding, which the PRT recipe uses to store inputs.
+
+**Area:** os-filesystem `clone_file`. Reached through `cartesi.filesystem.clone_file` and `machine::clone_stored` / `cm_clone_stored`.
+
+**Category:** correctness
+
+**Location:**
+- `src/os-filesystem.cpp:511-515`: `hardlink_file` uses `link()`, which does not follow symlinks
+- `src/os-filesystem.cpp:575-621`: `clone_file` checks the target's mode through `open`/`fstat`, then takes the read-only branch at lines 599-603
+- `src/clua-cartesi-filesystem.cpp:70`: `filesystem.clone_file` binding
+- `src/machine.cpp:509-539`: `clone_stored` calls `os::clone_file` on every stored file
+- `doc/recipes/prt.lua:2439`: `store_input` relies on the clone being independent
+
+**Evidence:** `test.lua` calls the real public APIs and covers three cases:
+1. **Relative symlink.** `caller/in.bin -> ../data/in.bin` (mode 0444) is cloned to `epoch/inputs/0.bin`. The result is a dangling symlink, and `sync_file` then fails with ENOENT.
+2. **Absolute symlink.** The clone is a symlink to the caller's file. After the caller replaces its file, the clone reads `"Y"` instead of `"X"`.
+3. **`clone_stored`.** The source is a `cp -rs` symlink farm of a stored machine. The read-only pmas backing store `0000000000010000-1000.bin` (mode 0444) comes out as an absolute symlink into the source directory.
+
+Run command: `eval $(make -s env); lua5.4 bugs/u2-02-clone-file-hardlinks-symlink-itself/test.lua`
+```
+ls -l epoch/inputs: total 0
+lrwxrwxrwx 2 root root 14 Oct 26 02:01 0.bin -> ../data/in.bin
+BUG: clone_file produced a symlink, not a link to the data: epoch/inputs/0.bin -> ../data/in.bin
+BUG: cloned file epoch/inputs/0.bin is unreadable (dangling symlink)
+BUG: sync_file of the clone failed: unable to sync file '/tmp/tmp.NAF0gg2uMr/epoch/inputs/0.bin': open() failed: No such file or directory
+BUG: absolute-symlink clone is a symlink; after caller replaced its file, clone reads "Y" (expected "X")
+BUG: clone_stored produced 1 symlink(s) in the clone (e.g. lrwxrwxrwx 2 root root 52 ... /cloned/0000000000010000-1000.bin -> /tmp/.../stored/0000000000010000-1000.bin)
+exit=1
+```
+The link count of 2 on a symlink shows that `link()` duplicated the symlink inode.
+
+**Scenario:** A PRT validator or Rollups Node stores inputs with `fs.clone_file(caller_path, epoch/inputs/N.bin)`. The caller's input is a read-only file reached through a symlink, for example inputs fetched into a cache, a Nix or symlink-farm layout, or a `cp -rs` snapshot. With a relative link at a different depth, the stored input dangles. The next `sync_file` or replay fails with ENOENT, and the node fails again on every relaunch. With an absolute link, the stored input silently aliases the caller's file. If that file is later replaced or deleted, replay reads different bytes or fails. `clone_stored` has the same problem when it is used for template checkpoints, snapshots or `cm_clone_stored` in Dave and other validators, and the stored machine directory contains symlinks. The read-only pmas `.bin` then becomes a symlink back into the source directory, so the clone is not independent of its source. Directories stored by the emulator itself contain no symlinks and are not affected.
+
+**Possible solution:** In `hardlink_file`, use `linkat(AT_FDCWD, from, AT_FDCWD, to, AT_SYMLINK_FOLLOW)`. A better option is to link the fd that is already open and locked: `linkat(from_fd, "", AT_FDCWD, to, AT_EMPTY_PATH)`, or `linkat(AT_FDCWD, "/proc/self/fd/N", AT_FDCWD, to, AT_SYMLINK_FOLLOW)`. This also closes the TOCTOU gap between `fstat` and `link`. Add a regression test that clones a 0444 file through relative and absolute symlinks.
+
+**Severity:** medium. Both reviewers rated it medium. It produces wrong results, either a dangling clone (a loud, deterministic node failure) or silent aliasing of caller storage, in a legitimate but uncommon layout: a read-only source reached through a symlink. It cannot directly produce a wrong accepted proof, and default stored machines and plain input files are unaffected.
+
+**Risks:**
+- Of the bug: stored validator state that is not self-contained. This means either a node that cannot relaunch, or replay that depends on caller files the caller may later change or delete.
+- Of the fix: `AT_SYMLINK_FOLLOW` is low risk, but it is not POSIX-guaranteed on every platform; macOS `link()` already follows symlinks. `AT_EMPTY_PATH` needs `CAP_DAC_READ_SEARCH` on older kernels. The `/proc/self/fd` form needs `/proc` to be mounted. The existing EXDEV/EPERM/ENOTSUP fallback to copy must keep working.
+
+**Proof of concept:** `bugs/u2-02-clone-file-hardlinks-symlink-itself/test.lua`. It creates and removes its own `mktemp -d` work directory and needs no machine images. Run from the repo root:
+`eval $(make -s env); lua5.4 bugs/u2-02-clone-file-hardlinks-symlink-itself/test.lua`
+It exits with status 1 and prints `BUG:` lines while the defect is present, and prints `OK: no defect` with exit status 0 once it is fixed.
+
+**ID**: `u2-02-clone-file-hardlinks-symlink-itself`
+
+**Related**: [B08](#b08-clone_stored-fails-instead-of-copying-when-a-hard-link-or-reflink-is-refused-emlink-einval).
 
 ## Candidates that were not confirmed
 

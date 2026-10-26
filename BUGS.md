@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-20 confirmed issues: 2 high, 5 medium, 13 low.
+19 confirmed issues: 2 high, 5 medium, 12 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -44,7 +44,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B75](#b75-tojson-writes-unsigned-64-bit-values-of-263-or-more-as-negative-integers) | low | pre-existing | Lua bindings (JSON conversion), CLI | tojson writes unsigned 64-bit values of 2^63 or more as negative integers | `bugs/p3-08-tojson-uint64-written-as-negative/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
-| [B88](#b88-read-only-memory-ranges-longer-than-their-page-aligned-image-are-always-rejected) | low | pre-existing | Machine config (memory ranges) | Read-only memory ranges longer than their page-aligned image are always rejected | `bugs/u3-06-readonly-backing-gap-always-throws/` |
 
 ## Issues
 
@@ -948,53 +947,6 @@ The sandbox has no IPv6 networking, so the full `spawn_server("::1:0")` path (bi
 `eval $(make -s env); lua5.4 bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/test.lua` (exits 1 while the bug is present, 0 once fixed).
 
 **ID**: `p1-07-rml-05-ipv6-endpoint-format-unparseable`
-
-### B88. Read-only memory ranges longer than their page-aligned image are always rejected
-
-**Title**: A read-only memory range longer than its page-aligned backing image is always rejected with "possible non zero partial page"
-
-**Problem**: The `os_mapped_memory` constructor handles a backing file that is shorter than the range in two steps. It first maps the whole range as anonymous memory, then maps the file over the start of it. Afterwards it zero-fills the file's last partial page, which works around the Linux page-cache issue described in mmap(2) BUGS. The amount to zero-fill is computed as `partial_page_remaining = min(page_size - backing_file_length % page_size, length - backing_file_length)`. When the image length is a multiple of the page size there is no partial page. Even so, the value comes out as `min(page_size, gap)`, which is greater than 0. Read-only mappings cannot be zero-filled, so they throw `possible non zero partial page when mapping backing file ...` every time. As a result, a read-only flash drive or other memory range that is longer than its page-aligned image can never be created or loaded. The bytes after the image are already zeros from the anonymous mapping. The code comment says only the true partial-page case is unsupported, so this rejection is not intended. In the read-write case the same mistake only memsets one already-zero anonymous page, which is harmless.
-
-**Origin**: Pre-existing. The same logic is on origin/main (around lines 234-236). This branch only added `mapped_memory::clear()` to the file.
-
-**Area**: os-mapped-memory constructor (setting up backing files for memory ranges: flash drives and other ranges with `backing_store.data_filename`)
-
-**Category**: api-contract
-
-**Location**:
-- `src/os-mapped-memory.cpp:212`: the backing-gap branch (`backing_fd >= 0 && length != backing_file_length`)
-- `src/os-mapped-memory.cpp:239-241`: `partial_page_size` / `partial_page_remaining` are computed with no `partial_page_size != 0` guard
-- `src/os-mapped-memory.cpp:242-246`: the read-only branch throws
-- `src/os-mapped-memory.cpp:249-250`: the read-write branch memsets the already-zero anonymous page
-
-**Evidence**: The test writes a page-aligned 8 KiB image with non-zero content. It then calls `cartesi.machine(config)` with one flash drive at `0x80000000000000` backed by that image, in three configurations. The 8 KiB read-only drive works. The 16 KiB read-write drive works, and the image reads back intact with zeros after it. The 16 KiB read-only drive throws. Run with `eval $(make -s env); lua5.4 bugs/u3-06-readonly-backing-gap-always-throws/test.lua`:
-```
-length=8192 read_only=true -> OK
-length=16384 read_only=false -> OK
-length=16384 read_only=true -> FAIL possible non zero partial page when mapping backing file '.../ro.bin' to memory when initializing flash drive 0
-BUG: read-only flash drive of 16 KiB backed by page-aligned 8 KiB image rejected: possible non zero partial page ...
-exit=1
-```
-
-**Scenario**: A machine template, an app's build tooling, or a CLI user (`cartesi-machine --flash-drive=label:data,data_filename:img.ext2,length:...,read_only`) declares a read-only flash drive, for example an input dataset or rootfs. The drive is given a fixed, larger length so it fits a fixed address and size layout, and it is backed by a smaller page-aligned image. Machine creation fails with a misleading "possible non zero partial page" error. The same config works with `read_only=false` or with `length` equal to the image size, so the user gets confused or quietly drops `read_only`. PRT validators, the Rollups Node and Dave normally start from a stored snapshot whose range files are written at full length, so they are unlikely to hit this on load. Any tooling that builds templates from configs with such a drive is blocked.
-
-**Possible solution**: Zero-fill, or reject read-only mappings, only when a real partial page exists:
-```cpp
-const uint64_t partial_page_size = backing_file_length % page_size;
-const uint64_t partial_page_remaining =
-    partial_page_size != 0 ? std::min(page_size - partial_page_size, length - backing_file_length) : 0;
-```
-Optionally, for read-only mappings with a real partial page, map the file region writable, zero the tail, then `mprotect` it to read-only instead of throwing. Add a regression test that covers both page-aligned and unaligned images, read-only and read-write.
-
-**Severity**: low. Both reviewers and the prover agree. The failure is closed and loud: the configuration is rejected when the machine is created or loaded. Hashes, proofs, determinism and stored state are not affected, and padding the image to the full range length works around it.
-
-**Risks**: Bug: legitimate read-only configurations are rejected with a misleading error, and users may work around it by making drives writable, which weakens the isolation they intended. Fix: low risk, because it only skips a memset or throw where the bytes are already zero from the `MAP_ANONYMOUS` mapping. Behaviour for truly unaligned images is unchanged. If the optional mprotect route is taken, it must keep the zeroed tail private (`MAP_PRIVATE`) and must not write to the backing file.
-
-**Proof of concept**: `bugs/u3-06-readonly-backing-gap-always-throws/test.lua` (self-contained; it creates `ro.bin` next to itself and deletes it afterwards). Run from the repo root:
-`eval $(make -s env); lua5.4 bugs/u3-06-readonly-backing-gap-always-throws/test.lua`
-It exits 1 and prints `BUG:` while the defect is present. Once fixed, it exits 0 and prints `OK: read-only gap mapping works`, after also checking that the read-only drive's content is the image followed by zeros.
-
-**ID**: `u3-06-readonly-backing-gap-always-throws`
 
 ### B91. Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs
 

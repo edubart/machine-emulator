@@ -1393,6 +1393,17 @@ describe("backing stores", function()
 
         expect.equal(filesystem.get_file_size(ram_filename), expected_ram_size)
     end)
+
+    it("should map a read-only backing file shorter than its memory range", function()
+        local machine <close> = cartesi.machine({
+            ram = { length = 0x1000 },
+            flash_drive = {
+                { length = 0x4000, read_only = true, backing_store = { data_filename = ro_data_filename } },
+            },
+        })
+        local start = machine:get_initial_config().flash_drive[1].start
+        expect.equal(machine:read_memory(start, 0x4000), b_data .. string.rep("\0", 0x2000))
+    end)
 end)
 
 lester.report()

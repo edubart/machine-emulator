@@ -522,6 +522,20 @@ describe("cartesi evmu", function()
             { "0x10000000000000000000000000000000000000000000000000000000000000000" },
             "integer value does not fit in target type"
         )
+        check_encode_calldata_hex_error(
+            "_(uint8)",
+            { "0x1" .. string.rep("0", 127) .. "5" },
+            "integer value does not fit in target type"
+        )
+        check_encode_calldata_hex_error(
+            "_(int)",
+            { "0x" .. string.rep("f", 128) },
+            "integer value does not fit in target type"
+        )
+        assert(
+            evmu.encode_calldata_hex("_(uint8)", { "0x" .. string.rep("0", 100) .. "ff" })
+                == "0x1bf62fa700000000000000000000000000000000000000000000000000000000000000ff"
+        )
         check_encode_decode_calldata_hex(
             "_(int)",
             { "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" },

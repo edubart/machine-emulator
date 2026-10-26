@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-39 confirmed issues: 2 high, 8 medium, 29 low.
+38 confirmed issues: 2 high, 8 medium, 28 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -40,7 +40,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
-| [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
 | [B48](#b48-evmu-hex-decoding-accepts-sign-characters) | low | pre-existing | Lua cartesi.evmu (ABI) | evmu hex decoding accepts sign characters | `bugs/lua-33-evmu-fromhex-sign-chars/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
@@ -539,50 +538,6 @@ Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image c
 **ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
 
 **Related**: B39 (fixed).
-
-### B46. ABI integer encoders wrap values of 2^512 or more instead of rejecting them
-
-**Title**: evmu integer encoders (encode_calldata / encode_abi) silently wrap values >= 2^512 given as strings instead of rejecting them
-
-**Problem**: `cartesi.evmu` uses a 512-bit bint (256 bits of headroom). `encoded_uint` and `append_encoded_int` call `bint.new(value)`. For a string or bint input, `bint.new` reduces the value modulo 2^512 and raises no error, and the range check then runs on the wrapped value. So the guard rejects values in [2^256, 2^512) but accepts any value >= 2^512 that is congruent mod 2^512 to an in-range value, and encodes that smaller value. Examples: 2^512 encodes as `0`, 2^512+5 encodes as `5` (also for `uint8`), and `int256` given `0x` followed by 128 `f`s encodes as `-1`.
-
-**Origin**: Pre-existing. The encoders behind `encode_calldata` / `encode_calldata_hex` predate this branch. This branch adds `_M.encode_abi`, which reuses the same encoders and inherits the defect.
-
-**Area**: `src/cartesi/evmu.lua` ABI/calldata encoder. This is a shipped Lua library, installed through `EMU_TO_LUA_PATH` in the Makefile.
-
-**Category**: correctness (silent truncation / missing input validation)
-
-**Location**:
-- `src/cartesi/evmu.lua:18-19`: `bint_extra = 256`; `bint(256 + bint_extra)`
-- `src/cartesi/evmu.lua:405-410`: `encoded_uint`, `bint.new(value)` followed by the `value >> size == 0` check
-- `src/cartesi/evmu.lua:416-423`: `append_encoded_int`, `bint.new(value)` followed by the intmin/intmax check
-- `src/cartesi/evmu.lua:627-633`: `_M.encode_abi` (new), plus `_M.encode_calldata` (pre-existing), both reach these encoders
-
-**Evidence**: The test passes the out-of-range values above through the public `encode_abi` and `encode_calldata_hex`. Every call is accepted and returns the wrapped value instead of raising "integer value does not fit in target type":
-```
-BUG: uint256 2^512+5 (hex string), encode_abi was accepted and encoded as 0x0000000000000000000000000000000000000000000000000000000000000005
-BUG: uint256 2^512+5 (hex string), encode_calldata was accepted and encoded as 0xb3de648b0000000000000000000000000000000000000000000000000000000000000005
-BUG: uint256 2^512 (decimal string) was accepted and encoded as 0x0000000000000000000000000000000000000000000000000000000000000000
-BUG: uint8 2^512+5 was accepted and encoded as 0x0000000000000000000000000000000000000000000000000000000000000005
-BUG: int256 2^512-1 (hex string) was accepted and encoded as 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-bint.new(2^512+5) =	5
-```
-Run: `eval $(make -s env); lua5.4 bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua` (exits 1 while the bug is present). For comparison, values in [2^256, 2^512) are correctly rejected.
-
-**Scenario**: A node or tool built on `cartesi.evmu` (for example, one that builds Rollups or Dave calldata, or event/return data with `encode_abi`) forwards a numeric string from untrusted input, such as a JSON-RPC parameter, a user-supplied amount or a CLI argument, without validating it. If the string is at least 155 decimal digits or 129 significant hex nibbles long, it is encoded as a small, different number and no error is raised. A transaction or input carrying the wrong argument is then signed and submitted. Lua integers can never reach the wrap. Machine hashes, proofs and step logs never pass through this path, so it cannot by itself make an honest PRT player lose a dispute. Applications running inside the machine are unaffected.
-
-**Possible solution**: Reject over-wide inputs before or after parsing. Options:
-- (a) For strings, strip the sign, the `0x` prefix and leading zeros, then reject more than 64 hex nibbles or more than 78 decimal digits before calling `bint.new` (the range check then handles the rest).
-- (b) Parse with a wider bint that has a guard, or check that `tostring`/`tobase` of the parsed value round-trips to the normalized input.
-- (c) Teach the bundled bint's `frombase`/`fromstring` to report overflow instead of wrapping.
-
-**Severity**: low. Both reviewers agree. This is a real silent truncation in a shipped helper library, but it fires only on absurdly large string inputs (>= 2^512) that well-behaved callers never produce. It touches no hashing, proof or step-verification path, and it cannot crash or hang a validator.
-
-**Risks**: Bug: wrong values are encoded into calldata or ABI data without any error when callers forward unvalidated, huge numeric strings, which may cause unintended on-chain actions. Fix: low risk. Stricter parsing could reject inputs that callers currently pass with redundant leading zeros or unusual formatting, so normalize (strip leading zeros) before applying the length check. A fix inside bint itself would affect every other user of the third-party bint module.
-
-**Proof of concept**: `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-31-evmu-encode-int-wraps-mod-2-512/test.lua`. It prints `BUG:` lines and exits 1 while the bug is present, and prints `PASS` once it is fixed.
-
-**ID**: `lua-31-evmu-encode-int-wraps-mod-2-512`
 
 ### B47. ABI encoder emits malformed data for arrays with nil holes
 

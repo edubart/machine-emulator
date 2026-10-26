@@ -399,10 +399,25 @@ local function get_raw_expect_raw(s)
     return s
 end
 
+-- maximum number of significant digits of a 256-bit integer string, by prefix
+local max_int_digits = { [""] = 78, ["0x"] = 64, ["0b"] = 256 }
+
+-- converts 'value' to a bint, rejecting strings too long for 256 bits, which bint.new would wrap
+local function tobint(value)
+    local ret = assert(bint.new(value), "value not an integer")
+    if type(value) == "string" then
+        local s = value:lower():gsub("^[+-]", "")
+        local prefix = s:match("^0[xb]") or ""
+        local digits = s:sub(#prefix + 1):gsub("^0+", "")
+        assert(#digits <= max_int_digits[prefix], "integer value does not fit in target type")
+    end
+    return ret
+end
+
 -- returns the calldata encoding of an uint 'value'
 local function encoded_uint(value, size)
     size = size or 256
-    value = assert(bint.new(value), "value not an integer")
+    value = tobint(value)
     assert(bint.eq(value >> size, 0), "integer value does not fit in target type")
     return tobe(value)
 end
@@ -413,7 +428,7 @@ local function append_encoded_uint(output, value, size) tinsert(output, encoded_
 -- appends the calldata parts of an int 'value' into the 'output' table
 local function append_encoded_int(output, value, size)
     size = size or 256
-    value = assert(bint.new(value), "value not an integer")
+    value = tobint(value)
     local intmax = bint.one() << (size - 1)
     local intmin = (-bint.one()) << (size - 1)
     assert(value >= intmin and value < intmax, "integer value does not fit in target type")

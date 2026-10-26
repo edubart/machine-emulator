@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-46 confirmed issues: 2 high, 8 medium, 36 low.
+45 confirmed issues: 2 high, 8 medium, 35 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -43,7 +43,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B28](#b28-get_data_root_hash-returns-nil-for-empty-data-and-rejects-root-sizes-63-and-64) | low | pre-existing | Lua cartesi.hash-tree | get_data_root_hash returns nil for empty data and rejects root sizes 63 and 64 | `bugs/lua-16-get-data-root-hash-empty-nil/` |
-| [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
 | [B47](#b47-abi-encoder-emits-malformed-data-for-arrays-with-nil-holes) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI encoder emits malformed data for arrays with nil holes | `bugs/lua-32-evmu-encode-array-holes-malformed/` |
@@ -723,50 +722,6 @@ BUG: log2_root_size=2 (< word) silently returns the full-word hash
 **Proof of concept**: `bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. It needs no machine images: it builds a RAM-only machine with a flash drive.
 
 **ID**: `lua-16-get-data-root-hash-empty-nil`
-
-### B30. verify_hash_tree returns true when inner nodes or the root are corrupted
-
-**Title**: verify_hash_tree returns true when dense inner nodes, the dense root or sparse nodes are corrupted
-
-- **Problem**: `hash_tree::verify` is the implementation behind `cm_verify_hash_tree`, Lua `m:verify_hash_tree()` and JSON-RPC `machine.verify_hash_tree`. It checks only three things for each address range:
-  1. It compares each page's recomputed Merkle hash with the dense-tree node at page level.
-  2. It checks that a page or range that is actually dirty is also marked dirty.
-  3. It compares the range's sparse node with its dense root.
-
-  It never recomputes dense inner nodes from their children, and it never recomputes sparse inner nodes or the sparse root. The third check only prints `dense hash tree root does not match sparse node hash` to stderr and never sets `ret = false`. A tree whose inner nodes are stale or corrupted therefore passes, even though `get_root_hash`, `get_node_hash` and `get_proof` return wrong values. This breaks the documented contract ("True if tree is self-consistent").
-- **Origin**: pre-existing. The branch only changed the cache-payload accessors inside the diagnostic branch. The print-only dense/sparse check is the same on `main`.
-- **Area**: hash-tree integrity check API (`cm_verify_hash_tree`, Lua `verify_hash_tree`, JSON-RPC `machine.verify_hash_tree`).
-- **Category**: correctness (false positive in an integrity check).
-- **Location**:
-  - `src/hash-tree.cpp:650-714`: `hash_tree::verify`. Only page-level dense nodes are recomputed (lines 662-666). The dense-root vs sparse-node mismatch at lines 707-710 prints but does not fail.
-  - `src/machine.cpp:1620`: `machine::verify_hash_tree` calls `m_ht.verify` directly.
-  - `src/cm.cpp:1036-1041`: `cm_verify_hash_tree`. Also `src/clua-i-machine.cpp:993` and `src/jsonrpc-remote-machine.cpp:1311`.
-- **Evidence**: The test stores a machine with 1 MiB of RAM, with data written in both halves. It patches the stored hash-tree files and loads them with `sharing = "none"`. For each value it compares the result before and after `clear_hash_tree()`, which forces a full re-hash. The four patches are:
-  - (A) the RAM `.dht` root node (heap index 1, byte 32);
-  - (B) a dense inner node (heap index 2, byte 64), read with `get_node_hash(RAM, 19)` and also seen as the sibling in `get_proof` for the right half;
-  - (C) the sparse root hash inside `hash_tree.sht`.
-
-  In every case `verify_hash_tree()` returns true while the reported value is wrong:
-  ```
-  $ eval $(make -s env); timeout 120 lua5.4 bugs/api-03-verify-hash-tree-misses-inner-nodes/test.lua
-  [A dense root] verify_hash_tree=true  value_before=4d05a7c1d6c16b50  recomputed=27323628b3e7e58f
-  [B dense inner node hash] verify_hash_tree=true  value_before=0202020202020202  recomputed=27e1bd4ef3afd672
-  [B proof sibling] verify_hash_tree=true  value_before=0202020202020202  recomputed=27e1bd4ef3afd672
-  [C sparse root] verify_hash_tree=true  value_before=0303030303030303  recomputed=27323628b3e7e58f
-  BUG: verify_hash_tree accepted 4 corrupted hash trees
-  ```
-- **Scenario**: A validator node (Rollups Node, Dave, or another PRT node) keeps a machine on disk and loads it after a crash or restart. It calls `verify_hash_tree` as a health or recovery check before it trusts the hash tree. The stored `.dht`/`.sht` files may be stale or damaged, either from disk corruption or from the crash-during-update states reported separately (ht-01, ht-03, rpc-12, rpc-14: stale dense inner nodes or a stuck sparse root). The check reports a healthy tree, so the node skips `clear_hash_tree` and then publishes wrong root hashes, proofs or step logs. Without that fix, an honest player could commit to or defend a wrong state. Applications inside the machine are not affected.
-- **Possible solution**: After the leaf checks in `verify`, recompute every dense inner node from its children and compare. Then recompute the sparse inner nodes up to the root, using pristine hashes for pristine children, and compare each one with the stored value. Set `ret = false` on any mismatch. For the existing dense-root vs sparse-node branch, also set `ret = false`, but only when the range is not marked dirty, because a range that is marked dirty and not yet updated can legitimately differ. Alternatively, compare against a simulated update.
-- **Severity**: low. Both reviewers rated it low (one said possibly low-to-medium), and the prover suggested medium. It is a real false positive in a public C, Lua and JSON-RPC API. But it does not produce wrong hashes by itself. The API is documented as "used only for emulator internal tests", and neither the CLI nor the in-branch PRT node calls it. It matters only to a node that relies on it after one of the separately reported corruption bugs.
-- **Risks**: Bug: an operator or node that trusts the check gets a false "OK" on a corrupted tree, and wrong roots or proofs get published. That hides the corruption bugs reported separately. Fix: a full inner-node recomputation is O(size of the dense trees). That is acceptable for a diagnostic but slower than today on large machines. Failing on a dense/sparse mismatch without the dirty-range exception would give false negatives on trees that are healthy but not yet updated.
-- **Proof of concept**: `bugs/api-03-verify-hash-tree-misses-inner-nodes/test.lua` patches stored hash-tree files and checks the result with the public Lua API. It uses a temporary directory, or `$WORKDIR` if that is set. It exits 1 when the bug reproduces. Run from the repo root:
-  `eval $(make -s env); timeout 120 lua5.4 bugs/api-03-verify-hash-tree-misses-inner-nodes/test.lua`
-
-**ID**: `api-03-verify-hash-tree-misses-inner-nodes`
-
-**Reviewer note**: A separate review panel (`ht-05-verify-hash-tree-misses-inner-nodes`) reproduced the same behavior but rejected it 2 to 1, arguing that `verify_hash_tree` is meant to check dirty-page tracking rather than the whole tree. This panel confirmed it. It is listed as low so that readers can weigh both views.
-
-**Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong), [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree).
 
 ### B35. collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image
 

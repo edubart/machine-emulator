@@ -210,6 +210,38 @@ for _, variant in ipairs(variants) do
             end)
         end)
 
+        describe("verify_hash_tree", function()
+            it("should detect corrupted inner nodes in stored hash trees", function()
+                local source <close> = variant.create({ ram = { length = 0x2000 } })
+                local root = source:get_root_hash()
+                local dirname = filesystem.temp_pathname()
+                local _ <close> = tests_util.scope_exit(function()
+                    cartesi.machine:remove_stored(dirname)
+                end)
+                source:store(dirname)
+                local function verify()
+                    local loaded <close> = variant.new():load(dirname, {}, cartesi.SHARING_NONE)
+                    return loaded:verify_hash_tree()
+                end
+                expect.truthy(verify())
+                local dht_filename = string.format("%s/%016x-%x.dht", dirname, cartesi.AR_RAM_START, 0x2000)
+                local sht_filename = dirname .. "/hash_tree.sht"
+                -- Overwrite the RAM dense tree root and the sparse tree root
+                for _, filename in ipairs({ dht_filename, sht_filename }) do
+                    local data = filesystem.read_file(filename)
+                    local offset = filename == dht_filename and cartesi.HASH_SIZE
+                        or assert(data:find(root, 1, true)) - 1
+                    local corrupted = string.rep("\1", cartesi.HASH_SIZE)
+                    filesystem.write_file(
+                        data:sub(1, offset) .. corrupted .. data:sub(offset + #corrupted + 1),
+                        filename
+                    )
+                    expect.falsy(verify())
+                    filesystem.write_file(data, filename)
+                end
+            end)
+        end)
+
         describe("concurrency runtime config", function()
             it("should clamp out-of-range update_hash_tree values", function()
                 for _, update_hash_tree in ipairs({ -1, 0xffffffff, 0x100000001 }) do

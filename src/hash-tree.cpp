@@ -650,6 +650,8 @@ machine_hash hash_tree::get_node_hash(address_ranges ars, uint64_t address, int 
 bool hash_tree::verify(address_ranges ars) const {
     variant_hasher h{m_hash_function};
     bool ret = true;
+    // Sparse nodes above ranges with dirty pages or a stale leaf may be stale until the next update
+    std::vector<bool> sparse_stale(m_sparse_nodes.size());
     for (auto ar_node_index = get_ar_sparse_node_index(0); const auto &ar : ars) {
         const std::span<const unsigned char> mem{ar.get_host_memory(), static_cast<size_t>(ar.get_length())};
         const auto &dht = ar.get_dense_hash_tree();
@@ -704,12 +706,52 @@ bool hash_tree::verify(address_ranges ars) const {
                 std::cerr << "! FAILED!\n";
             }
         }
+        // Dense inner nodes not marked dirty must match the hash of their children
+        for (int log2_size = HASH_TREE_LOG2_PAGE_SIZE + 1; log2_size <= ar_log2_size; ++log2_size) {
+            const auto child_size = UINT64_C(1) << (log2_size - 1);
+            for (uint64_t offset = 0; offset < (UINT64_C(1) << ar_log2_size); offset += 2 * child_size) {
+                if (dpt.is_node_dirty(offset, log2_size)) {
+                    continue;
+                }
+                machine_hash hash;
+                get_concat_hash(h, dht.node_hash_view(offset, log2_size - 1),
+                    dht.node_hash_view(offset + child_size, log2_size - 1), hash);
+                if (!std::ranges::equal(hash, dht.node_hash_view(offset, log2_size))) {
+                    ret = false;
+                    std::cerr << "dense node 0x" << std::hex << std::uppercase << (ar.get_start() + offset) << std::dec
+                              << " with log2_size " << log2_size << " (in " << ar.get_description()
+                              << ") does not match its children\n";
+                }
+            }
+        }
         const auto &ar_node = m_sparse_nodes[ar_node_index];
-        if (!std::ranges::equal(ar_node.hash, dht.node_hash_view(0, ar_log2_size))) {
+        const auto ar_node_stale = !std::ranges::equal(ar_node.hash, dht.node_hash_view(0, ar_log2_size));
+        if (ar_node_stale) {
             std::cerr << ar.get_description() << " dense hash tree root does not match sparse node hash\n";
+        }
+        for (auto i = ar_node_index; (ar_actually_dirty || ar_node_stale) && !is_pristine(i);
+             i = m_sparse_nodes[i].parent) {
+            sparse_stale[i] = true;
         }
         // LCOV_EXCL_STOP
         ++ar_node_index;
+    }
+    // Sparse inner nodes that are not stale must match the hash of their children
+    for (index_type node_index = 1; std::cmp_less(node_index, m_sparse_nodes.size()); ++node_index) {
+        const auto &node = m_sparse_nodes[node_index];
+        if (is_ar_node(node) || sparse_stale[node_index]) {
+            continue;
+        }
+        const int log2_size = static_cast<int>(node.log2_size);
+        machine_hash hash;
+        get_concat_hash(h, get_sparse_node_hash_view(node.left, log2_size - 1),
+            get_sparse_node_hash_view(node.right, log2_size - 1), hash);
+        // LCOV_EXCL_START
+        if (!std::ranges::equal(hash, node.hash)) {
+            ret = false;
+            std::cerr << "sparse node " << node_index << " does not match its children\n";
+        }
+        // LCOV_EXCL_STOP
     }
     return ret;
 }

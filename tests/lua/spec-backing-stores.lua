@@ -1063,6 +1063,27 @@ machine:clear_hash_tree()
         expect.truthy(filesystem.read_file(prefix .. ".dht") == dense_hashes)
     end)
 
+    it("should keep shared hash files allocated when clearing stored hashes", function()
+        local ram_length = 0x100000
+        local directory = filesystem.temp_pathname()
+        local _ <close> = tests_util.scope_exit(function()
+            cartesi.machine:remove_stored(directory)
+        end)
+        local machine <close> = cartesi.machine({ ram = { length = ram_length } }, {}, directory)
+        local root_hash = machine:get_root_hash()
+        local dht_filename = string.format("%s/%016x-%x.dht", directory, cartesi.AR_RAM_START, ram_length)
+        local function allocated_kib()
+            local du <close> = assert(io.popen("du -k '" .. dht_filename .. "'"))
+            return tonumber(du:read("a"):match("^%d+"))
+        end
+        local before = allocated_kib()
+        expect.truthy(before > 0)
+        -- Punching holes would free the blocks, so rewriting the hashes on a full disk would raise SIGBUS.
+        machine:clear_hash_tree()
+        expect.equal(allocated_kib(), before)
+        expect.equal(machine:get_root_hash(), root_hash)
+    end)
+
     describe("page hash-tree cache eviction", function()
         local drive_start = 0x90000000
         local retained_start = 0xa0000000

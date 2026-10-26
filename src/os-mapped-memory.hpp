@@ -126,7 +126,7 @@ public:
     }
 
     /// \brief Clears a writable mapping's contents to zero, preserving its address and length.
-    /// \details Punches holes in shared backing files when supported, otherwise writes zeros.
+    /// \details Writes zeros in place, so shared backing files keep their allocated blocks.
     /// Private backing files are never modified. The mapping must not be read-only.
     void clear() noexcept;
 

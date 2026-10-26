@@ -21,13 +21,12 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-4 confirmed issues: 1 high, 3 low.
+3 confirmed issues: 1 high, 2 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
-| [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 
 ## Issues
@@ -80,66 +79,7 @@ Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not r
 
 **ID**: `w2b-04-sharing-all-enospc-sigbus`
 
-**Related**: [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus).
-
-### B64. clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS
-
-**Title**: mapped_memory::clear punches holes in shared .dht backing files, so after cm_clear_hash_tree on a full filesystem the next get_root_hash dies with SIGBUS instead of returning an error
-
-**Problem**: `mapped_memory::clear()` handles a shared writable mapping (`m_backing_sync_length > 0`) by calling `fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)` (`F_PUNCHHOLE` on macOS) over the whole backing file. Every allocated block of the file is freed. `dense_hash_tree::do_clear()` reaches this code, and `hash_tree::clear()` calls that and then marks every page dirty. The next `get_root_hash`, `get_proof` or `collect_*` call therefore rewrites every dense node through the `MAP_SHARED` mapping. Pristine-page hashes are nonzero, so every node really is written. Each first touch of a punched page has to allocate a block from inside a page fault. If the filesystem is full or the quota is used up, the fault cannot be served and the kernel sends SIGBUS. The process is killed and the C API returns no error. A plain zero-fill (`std::ranges::fill`) would write over blocks that are already allocated and would need no new space. The punch saves almost nothing, because the blocks are filled again right away. `clear_hash_tree` is a recovery path, so it is likely to run on a node that is already short on disk.
-
-**Origin**: introduced by this branch. `mapped_memory::clear()`, `i_dense_hash_tree::clear` / `dense_hash_tree::do_clear` and the dense-tree part of `hash_tree::clear` are all new (`git diff origin/main...HEAD -- src/os-mapped-memory.cpp src/dense-hash-tree.hpp src/hash-tree.cpp`). On `origin/main`, `clear_hash_tree` never touched the dense trees. There is a related limitation that existed before the branch: stored RAM, flash and `.dht` files are sparse, so a `SHARING_ALL` machine loaded on a disk that is already full can SIGBUS on its first write to a hole. The branch makes this worse: a machine that was running fine on a full disk is turned into one that crashes as soon as someone else takes the freed space.
-
-**Area**: OS memory mapping / hash tree (`src/os-mapped-memory.cpp` `clear()`, `hash_tree::clear`, `cm_clear_hash_tree`, runtime option `clear_hash_tree`).
-
-**Category**: crash (SIGBUS, process kill with no error reported).
-
-**Location**:
-- `src/os-mapped-memory.cpp:536-566`: `mapped_memory::clear()`, the `fallocate(PUNCH_HOLE|KEEP_SIZE)` / `F_PUNCHHOLE` branch
-- `src/dense-hash-tree.hpp:80-82`: `dense_hash_tree::do_clear()` calls `m_mapped_memory.clear()`
-- `src/hash-tree.cpp:717-728`: `hash_tree::clear()` clears every dense tree and marks every page dirty
-- `src/hash-tree.cpp:310-320`: `hash_tree::return_updated_dirty_pages`, where the fault fires (the `std::ranges::equal` / `copy` on the dense node in the punched `.dht` mapping)
-
-**Evidence**: The test mounts a 96 MiB tmpfs. It stores a machine with 16 MiB of RAM there using `SHARING_ALL`, then runs a child process that does the following:
-1. Loads the machine with `SHARING_ALL` and calls `get_root_hash`, which allocates every `.dht` block.
-2. Fills the filesystem to ENOSPC.
-3. Calls `get_root_hash` again. This still works.
-4. Calls `clear_hash_tree()`. Free space goes from 0 to 376832 bytes, about the total size of the `.dht` files, which shows the punch really freed the blocks.
-5. Fills the filesystem again, the way another process would.
-6. Calls `get_root_hash`.
-
-The child dies with SIGBUS. In the control run, which skips step 5, the child succeeds with the same root hash. A gdb backtrace places the fault in `std::__memcmp` under `cartesi::hash_tree::return_updated_dirty_pages(...)._omp_fn.0` at `hash-tree.cpp:317`.
-```
-$ eval $(make -s env); lua5.4 bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/test_clear_punch_sigbus.lua
-child: avail after clear:  376832 (blocks freed by PUNCH_HOLE)
-child: get_root_hash after clear ok
-control (no refill): true exit 0
-...
-child: avail after clear:  376832 (blocks freed by PUNCH_HOLE)
-child: avail after refill: 0
-Bus error
-refill case: nil exit 135
-BUG: get_root_hash after clear_hash_tree on a full filesystem killed the process with SIGBUS (...)
-```
-On tmpfs, a read fault on a hole also needs a page, so the fault comes at the `memcmp` read. On ext4 or xfs, a read of a hole maps the zero page and the SIGBUS comes at the first write, when `page_mkwrite` fails. The result is the same crash.
-
-**Scenario**: A PRT/Dave validator or a Rollups Node keeps its machine stored with `SHARING_ALL` on a volume that is nearly full. It suspects a damaged hash tree and calls `cm_clear_hash_tree`, or reloads with runtime `clear_hash_tree=true`. While that runs, logs, snapshots or another machine use up the blocks the punch just freed. On the next `cm_get_root_hash` or `cm_get_proof`, the node is killed by SIGBUS in the middle of a dispute or epoch, and it gets no error it could handle. A CLI user running `cartesi-machine` on a shared stored machine on a full disk sees "Bus error" with no explanation.
-
-**Possible solution**: Drop the punch for dense hash trees and zero the shared mapping in place (`std::ranges::fill(data, 0)`), so blocks that are already allocated are reused. If space reclamation is wanted, make the punch opt-in and call `fallocate(0, ...)` (plain allocate, without `PUNCH_HOLE`) right after it to reserve the blocks again. That turns ENOSPC into an `errno` that can be reported as an error from `clear()`. The function is currently `noexcept`/`void`, so it would need to be made able to fail. This touches the same code as B04/`api-07` (the dense tree is cleared before its pages are marked dirty). A fill through the shared mapping has the same ordering problem as the punch, so this change should go together with the mark-dirty-first fix described there. In general, a shared mapping on a full disk can SIGBUS on any hole. A broader fix would preallocate (`posix_fallocate`) shared backing files at load time, or handle SIGBUS, but that is outside the scope of this branch's regression.
-
-**Severity**: low. Triggering it needs four things at once: `SHARING_ALL` storage, a full disk or used-up quota, a call to the rare `clear_hash_tree` recovery path, and another consumer taking the freed blocks before the next hash update. The result is a hard process kill with no wrong hash, wrong proof or corruption, and a restart after space is freed recovers. Both reviewers rated it low. The prover said low/medium, because it is a silent kill on a recovery path. The final rating is low: shared-mmap SIGBUS on a full disk already exists before the branch, and the branch only widens it slightly.
-
-**Risks**: Bug: a validator or node can be killed without warning while computing a root hash or proof after a hash-tree reset, which can cost it time in a dispute. Disk pressure is common exactly when operators reach for recovery tools. Fix: replacing the punch with a fill means the cleared `.dht` files keep their full allocation. They are rewritten right away anyway, so space use does not change. A zero-fill of a large dense tree costs more CPU and dirty page writeback than a punch, but the next update rewrites all of it regardless. Adding `fallocate` preallocation changes the API contract of `clear()` (it can now fail), and that error has to be passed through `hash_tree::clear` and `cm_clear_hash_tree`.
-
-**Proof of concept**: `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/test_clear_punch_sigbus.lua`. It needs root, because it mounts a 96 MiB tmpfs at `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/mnt` and unmounts it afterwards. Run it from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/test_clear_punch_sigbus.lua
-```
-Exit 1 with `BUG: ... SIGBUS` means the bug reproduced. Exit 0 means fixed (no crash, or an error reported instead). Exit 77 means skipped (not root), and exit 2 means an unexpected result.
-
-**ID**: `w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc`
-
-**Related**: [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages), B04 (fixed).
+**Related**: B64 (fixed).
 
 ### B83. Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail
 

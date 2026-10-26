@@ -104,14 +104,6 @@
 #define HAVE_UNIFIED_PAGE_CACHE
 #endif
 
-#if !defined(NO_FALLOCATE) && defined(__linux__) && defined(HAVE_MMAP)
-#define HAVE_FALLOCATE
-#endif
-
-#if !defined(NO_F_PUNCHHOLE) && defined(__APPLE__) && defined(HAVE_MMAP)
-#define HAVE_F_PUNCHHOLE
-#endif
-
 #if !defined(NO_DUP) && !defined(__wasi__)
 #define HAVE_DUP
 #endif

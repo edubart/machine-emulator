@@ -2848,6 +2848,15 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
             throw std::runtime_error{"update hash tree failed"};
         }
         reset_dirty_words.clear();
+        // The shortcut above restores only the words the uarch wrote, so fall back to a full reset
+        // when the uarch state was not pristine before the mcycle (e.g., custom uarch RAM image)
+        if (get_node_hash(UARCH_STATE_START_ADDRESS, UARCH_STATE_LOG2_SIZE, skip_hash_tree_update) !=
+            get_uarch_pristine_hash()) {
+            reset_uarch();
+            if (!update_hash_tree()) {
+                throw std::runtime_error{"update hash tree failed"};
+            }
+        }
 
         mcycle_reached = read_reg(reg::mcycle);
 

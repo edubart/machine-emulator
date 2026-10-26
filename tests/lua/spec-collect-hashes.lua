@@ -2001,6 +2001,18 @@ describe("collect hashes", function()
                         machine:collect_uarch_cycle_root_hashes(1, 0, pristine_revert_uarch_tail)
                     end, "microarchitecture did not reach the target mcycle")
                 end)
+
+                it("should fully reset a microarchitecture whose state is not pristine", function()
+                    local machine <close> = cartesi.machine(empty_machine_config)
+                    local compare_machine <close> = cartesi.machine(empty_machine_config)
+                    -- the uarch never writes the middle of its RAM, so only a full reset restores it
+                    local address = cartesi.UARCH_RAM_START_ADDRESS + cartesi.UARCH_RAM_LENGTH // 2
+                    machine:write_memory(address, "\xaa")
+                    compare_machine:write_memory(address, "\xaa")
+                    local collected = machine:collect_uarch_cycle_root_hashes(1, 0, pristine_revert_uarch_tail)
+                    expect.equal(collected, expect_uarch_cycle_root_hashes(compare_machine, 1, 0))
+                    expect.equal(machine:get_root_hash(), compare_machine:get_root_hash())
+                end)
             else
                 it("should fail when collecting uarch cycles", function()
                     local machine <close> = cartesi.machine(empty_machine_config)

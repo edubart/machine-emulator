@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-33 confirmed issues: 2 high, 8 medium, 23 low.
+32 confirmed issues: 2 high, 7 medium, 23 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -29,7 +29,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B91](#b91-read-only-queries-after-sync_stored-rewrite-the-shared-page-cache-so-a-host-crash-leaves-a-synced-machine-unloadable-or-with-wrong-proofs) | high | pre-existing | Hash tree (page cache), stored machines | Read-only queries after sync_stored rewrite the shared page cache, so a host crash leaves a synced machine unloadable or with wrong proofs | `bugs/u1-03-post-sync-phtc-writes-torn-lru-or-wrong-proofs-host-cr/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
-| [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image) | medium | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image | `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
 | [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
@@ -481,58 +480,6 @@ BUG: log2_root_size=2 (< word) silently returns the full-word hash
 **Proof of concept**: `bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. Run from the repo root: `eval $(make -s env); lua5.4 bugs/lua-16-get-data-root-hash-empty-nil/test.lua`. It needs no machine images: it builds a RAM-only machine with a flash drive.
 
 **ID**: `lua-16-get-data-root-hash-empty-nil`
-
-### B35. collect_uarch_cycle_* reset shortcut diverges from reset_uarch when uarch RAM is not the built-in image
-
-**Title**: collect_uarch_cycle_root_hashes / collect_uarch_cycle_bundle restore only dirty uarch RAM words on reset, so reset leaves (and all later leaves) differ from reset_uarch / verify_reset_uarch when uarch RAM is not the built-in image
-
-**Problem**: After each mcycle, `machine::collect_uarch_cycle_root_hashes` does not call `reset_uarch()`. As an optimization it resets the uarch registers to `uarch_registers_state{}`, then copies the library's built-in `uarch_pristine_ram` (or zeros past its end) back only into the uarch RAM words written during that mcycle (`reset_dirty_words`). It then rehashes only those words with `m_ht.update_words`. The real reset is different. `reset_uarch()`, `log_reset_uarch`/`verify_reset_uarch` and the on-chain reset they model all write the whole built-in image over uarch RAM and zero-fill the rest. The shortcut is equivalent only when every word the uarch did not write already equals the built-in image, and nothing checks this: the only uarch precondition is `uarch_cycle == 0`. If the machine's uarch RAM differs from the built-in image anywhere, the collected reset leaf comes from a mixed state that no reset proof can produce. Every later leaf is then wrong as well, and the machine is left in that mixed state. `collect_uarch_cycle_bundle` calls `collect_uarch_cycle_root_hashes`, so it has the same defect.
-
-**Origin**: pre-existing. The same shortcut is in `origin/main` (v0.22.0) at `src/machine.cpp:2794`.
-
-**Area**: microarchitecture root-hash collection for PRT: `collect_uarch_cycle_root_hashes` and `collect_uarch_cycle_bundle` (C API `cm_collect_uarch_cycle_root_hashes`/bundle, Lua bindings, JSON-RPC).
-
-**Category**: correctness (wrong commitment hashes / state divergence).
-
-**Location**:
-- `src/machine.cpp:2797-2824`: shortcut reset in `machine::collect_uarch_cycle_root_hashes` (registers reset, dirty-word restore, `update_words`).
-- `src/machine.cpp:2677-2679`: precondition checks only `uarch_cycle == 0`, not that uarch RAM is pristine.
-- `src/machine.cpp:2051-2068`: `machine::reset_uarch`, the full reset (whole image plus zero fill) that `log_reset_uarch`/`verify_reset_uarch` replay.
-- `src/machine.cpp:2894`: `collect_uarch_cycle_bundle` reuses `collect_uarch_cycle_root_hashes`.
-
-**Evidence**: The test creates a uarch RAM backing file through config `uarch.ram.backing_store.data_filename`, the mechanism behind CLI `--uarch-ram-image`. The file equals the built-in image except its last 4 KiB page, which is filled with `0xaa` and which the uarch never touches. The test compares `collect_uarch_cycle_root_hashes(3, 0, tail)` against a reference loop: `run_uarch(UARCH_CYCLE_MAX)`, then `get_root_hash` (halt leaf), then `log_reset_uarch` + `verify_reset_uarch` (reset leaf). It also checks the machine root after `collect_uarch_cycle_bundle`. The control run with the built-in uarch RAM matches everywhere. With the custom image, the reset leaf of mcycle 1 differs from what `verify_reset_uarch` returns, and every later leaf diverges:
-```
-[built-in uarch ram] mcycle 1: halt leaf ok (64dcb7ade907f069 vs 64dcb7ade907f069), reset leaf ok (beafc583c3a41063 vs verify_reset_uarch beafc583c3a41063)
-[custom uarch ram] mcycle 1: halt leaf ok (ca0120065f62a44c vs ca0120065f62a44c), reset leaf MISMATCH (370c69331539f6a7 vs verify_reset_uarch beafc583c3a41063)
-[custom uarch ram] mcycle 2: halt leaf MISMATCH (ef9c969db160a639 vs 38f993e746476dad), reset leaf MISMATCH (4e87a0c3654bd578 vs verify_reset_uarch 5169efe4d5f24b00)
-[custom uarch ram] machine root after collect == root after reference: false
-[custom uarch ram] machine root after collect_uarch_cycle_bundle == reference reset of mcycle 1: false
-BUG: collect_uarch_cycle_root_hashes/collect_uarch_cycle_bundle reset leaves differ from reset_uarch/verify_reset_uarch when uarch RAM is not the built-in pristine image
-```
-Run: `eval $(make -s env); lua5.4 bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/test-collect-nonpristine-uarch-ram.lua` (exit 1). On the custom machine, the reference reset hash after mcycle 1 equals the built-in machine's reset hash (`beafc5...`). This confirms that the real reset restores the built-in image.
-
-**Scenario**: A template or snapshot holds uarch RAM that is not byte-identical to the built-in image of the libcartesi the validator links. Ways this happens:
-- the machine was built with `--uarch-ram-image` or a `uarch.ram.backing_store`;
-- the snapshot was stored by a different build;
-- uarch RAM was changed through `write_memory`.
-
-A PRT validator (Dave, the Rollups Node, or another node) that builds its uarch-level commitment with `collect_uarch_cycle_root_hashes` or `collect_uarch_cycle_bundle` then commits reset leaves that `verify_reset_uarch` and the on-chain reset step cannot reproduce. Every later leaf is wrong too. In a dispute that reaches the reset step or any later uarch step, the honest player cannot prove its leaf and loses to an opponent that commits the full-reset leaves. If the differing words were uarch code or data that is read, later mcycles would even run different uarch code than a real reset gives. With the default config (built-in uarch RAM), the shortcut is correct.
-
-**Possible solution**: At the start of collection, or before each shortcut reset, check that the uarch state is pristine: compare the uarch RAM range hash or the uarch state hash with `get_uarch_pristine_hash()`. If it is not pristine, either fall back to a full `reset_uarch()` (full write plus full hash-tree update) for that mcycle, or throw a clear error that rejects the machine. A cheaper and stricter variant: do the full `reset_uarch()` once on the first mcycle, so every later state is pristine and the dirty-word shortcut becomes valid.
-
-**Severity**: medium. When it triggers, the impact is critical: the committed reset leaf and every later leaf cannot be proven, so an honest player loses. Both reviewers rated it medium because it needs a uarch RAM that differs from the library's built-in image, which default templates from the same release never have. A validator whose built-in image differs from the on-chain one would also fail through other paths.
-
-**Risks**: Bug: silent wrong commitments, with no error, for machines with a custom or stale uarch RAM image. The machine is also left in a mixed state, so any later `get_root_hash`, proof or snapshot of it is wrong. Fix: a pristine check adds one hash comparison per collection (cheap). A full-reset fallback costs a full uarch RAM write and rehash per mcycle, but only on the non-pristine path. Rejecting such machines could break existing users of `--uarch-ram-image`; this is acceptable, since their commitments are unprovable today. Whatever the fix, it must keep the leaves byte-identical to `log_reset_uarch`/`verify_reset_uarch` in the pristine case.
-
-**Proof of concept**: `bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/test-collect-nonpristine-uarch-ram.lua`. The test needs no machine images. It writes a temporary uarch RAM image next to itself (or in the directory given as its first argument) and removes it afterwards. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram/test-collect-nonpristine-uarch-ram.lua
-```
-Exit 1 means the bug is present, 0 means fixed, and 2 means the built-in-image control unexpectedly failed.
-
-**ID**: `api-08-uarch-collect-shortcut-reset-nonpristine-uarch-ram`
-
-**Related**: B39 (fixed).
 
 ### B49. Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes
 
@@ -1065,7 +1012,7 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 
 **ID**: `p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo`
 
-**Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
+**Related**: B35 (fixed).
 
 ### B71. fromjson rewrites strings that match a key of a struct, array or tuple schema
 

@@ -8222,6 +8222,10 @@ structure returned by `machine:get_proof()`:
 
 ``` lua
 local function verify_slice(proof, hash_type)
+    local log2_target_size, log2_root_size = proof.log2_target_size, proof.log2_root_size
+    assert(log2_target_size >= 0 and log2_target_size <= log2_root_size, "invalid proof sizes")
+    assert(#proof.sibling_hashes == log2_root_size - log2_target_size, "wrong number of siblings")
+    assert(proof.target_address & ((1 << log2_target_size) - 1) == 0, "target address is not aligned")
     assert(roll_hash_up_tree(proof, proof.target_hash, hash_type) == proof.root_hash, "target node not in tree")
 end
 ```

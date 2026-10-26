@@ -1576,6 +1576,36 @@ describe("hash-tree.lua", function()
                 hash_tree.verify_slice(proof)
             end)
         end)
+
+        it("rejects a proof with a malformed shape", function()
+            local proof = hash_tree.frontier_next_proofs(hash_tree.frontier(4, "keccak256"), make_leaves(4))[3]
+            -- The node over leaves 2 and 3, proven by the rest of the leaf proof.
+            local function node_proof(target_address)
+                return {
+                    target_address = target_address,
+                    log2_target_size = 1,
+                    target_hash = cartesi.keccak256(proof.target_hash, proof.sibling_hashes[1]),
+                    log2_root_size = 4,
+                    root_hash = proof.root_hash,
+                    sibling_hashes = { table.unpack(proof.sibling_hashes, 2) },
+                }
+            end
+            hash_tree.verify_slice(node_proof(2))
+            expect.fail(function()
+                hash_tree.verify_slice(node_proof(3))
+            end, "target address is not aligned")
+            local padded = node_proof(2)
+            padded.sibling_hashes[#padded.sibling_hashes + 1] = leaf(0)
+            expect.fail(function()
+                hash_tree.verify_slice(padded)
+            end, "wrong number of siblings")
+            local degenerate = node_proof(2)
+            degenerate.log2_target_size, degenerate.target_hash = 5, proof.root_hash
+            degenerate.sibling_hashes = {}
+            expect.fail(function()
+                hash_tree.verify_slice(degenerate)
+            end, "invalid proof sizes")
+        end)
     end)
 end)
 

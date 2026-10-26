@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-17 confirmed issues: 2 high, 4 medium, 11 low.
+16 confirmed issues: 2 high, 4 medium, 10 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -31,7 +31,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
-| [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
@@ -216,77 +215,6 @@ The data is intact: reloading with `clear_hash_tree=true` rebuilds the correct r
 - `api-07-clear-hash-tree-zeroes-before-marking-dirty`: run with `eval $(make -s env); sh bugs/api-07-clear-hash-tree-zeroes-before-marking-dirty/run.sh`.
 
 **Related**: [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong).
-
-### B16. verify_slice and verify_splice accept malformed proofs
-
-**Title**: Lua `verify_slice`/`verify_splice` accept malformed proofs (address beyond root, unaligned address, extra siblings, target size above root size), and `frontier_next_proofs` on a full tree returns one
-
-**Problem:** `roll_hash_up_tree` loops only over `log2_size = log2_target_size .. log2_root_size - 1`. It reads only those bits of `target_address` and only the first `log2_root_size - log2_target_size` entries of `sibling_hashes`. `verify_slice` and `verify_splice` only compare the rolled-up hash with `root_hash`, and check nothing about the shape of the proof. As a result, a valid proof also verifies when:
-- (a) `k * 2^log2_root_size` is added to `target_address`, which puts it outside the tree;
-- (b) address bits below `log2_target_size` are set, so the address is unaligned;
-- (c) extra trailing siblings are appended;
-- (d) `log2_target_size > log2_root_size`. The loop then never runs, so any proof with `target_hash == root_hash` "verifies" at any address.
-
-The C++ `hash_tree_proof` (`src/hash-tree-proof.hpp:43-55`) rejects non-positive root sizes and a target size above the root size, and it sizes the sibling vector exactly. The Lua verifier enforces none of this.
-
-Separately, `frontier_next_proofs` has no capacity check, unlike `frontier_push_back` and `frontier_append`, which assert "too many leaves". On a full frontier it returns a proof with `target_address == 2^height`, a leaf that cannot exist. Bit `height` is ignored, so the proof verifies as index 0.
-
-**Origin:** Pre-existing. `roll_hash_up_tree`, `verify_slice`, `verify_splice` and `frontier_next_proofs` are identical on `origin/main` (v0.22.0, the merge base).
-
-**Area:** Lua hash-tree library (`cartesi.hash-tree`): proof verification and output-frontier proofs.
-
-**Category:** API contract / input validation.
-
-**Location:**
-- `src/cartesi/hash-tree.lua:9-23` (`roll_hash_up_tree`)
-- `src/cartesi/hash-tree.lua:27-29` (`verify_slice`)
-- `src/cartesi/hash-tree.lua:33-36` (`verify_splice`)
-- `src/cartesi/hash-tree.lua:310-359` (`frontier_next_proofs`, no `leaf_count + #next_output_hashes <= 2^log2_max_leaves` check)
-
-**Evidence:** The test builds proofs that are valid at first: a height-63 outputs-tree proof from `frontier_next_proofs`, and a 32-byte word proof from `machine:get_proof`. It then mutates each proof into a non-canonical form and calls `verify_slice`/`verify_splice`. It also calls `frontier_next_proofs` on a full height-2 frontier. All 6 non-canonical cases are accepted. The one rejected case (address bit 63 with `log2_root_size` 64) is rejected only because that bit falls inside the range the verifier reads.
-```
-$ eval $(make -s env); lua5.4 bugs/lua-06-verify-slice-noncanonical-address/test_verify_slice_noncanonical.lua
-baseline: index	2	verifies
-BUG: verify_slice accepted target_address beyond tree (0x8000000000000002 >= 2^63)
-BUG: verify_slice accepted proof with 2 extra trailing siblings (65 vs 63)
-BUG: verify_slice accepted log2_target_size > log2_root_size with target_hash == root_hash (arbitrary address 12345)
-BUG: verify_slice accepted unaligned memory proof target_address 0x80000007 (log2_target_size 5)
-ok: rejected memory proof target_address 0x8000000080000000 beyond 2^64 address space root (log2_root_size 64)
-BUG: verify_slice accepted verify_splice with unaligned target_address
-BUG: verify_slice accepted frontier_next_proofs(full height-2 frontier) proof at target_address 4 (tree has 4 leaves)
-BUG: 6 non-canonical proofs accepted
-```
-The test exits with status 1 while the bug is present.
-
-**Scenario:** A third-party Lua validator, or any tool built on `cartesi.hash-tree`, receives an output proof or state proof from an untrusted party. It calls `verify_slice(proof)`, then records the claim at `proof.target_address`, or derives the depth from `#proof.sibling_hashes`. An adversary can make it accept a claim at an index that does not exist (beyond the outputs tree, which has 2^63 leaves, or unaligned), or accept a degenerate "proof" in which the target is the root.
-
-The bits that are actually read stay bound by the hashes. An attacker therefore cannot prove a false hash at a different valid, in-range, aligned position. The address only aliases the true position.
-
-The reference `doc/recipes/prt.lua` is not affected, because it checks `target_address` exactly before calling `verify_slice` (lines 207-212 and 318-324). The Rollups Node and Dave are not affected either: they use the C API, which does not expose proof verification.
-
-The `frontier_next_proofs` overflow cannot be reached with the real outputs tree (height 63). It occurs only with small custom heights that are deliberately filled.
-
-**Possible solution:**
-- In `verify_slice` and `verify_splice` (or in `roll_hash_up_tree`), require all of the following:
-  - integer sizes with `0 <= log2_target_size <= log2_root_size <= 64`;
-  - `#sibling_hashes == log2_root_size - log2_target_size`;
-  - `target_address & ((1 << log2_target_size) - 1) == 0`;
-  - `target_address >> log2_root_size == 0` when `log2_root_size < 64`.
-- In `frontier_next_proofs`, assert `leaf_count + #next_output_hashes <= 1 << log2_max_leaves`, with the message "too many leaves".
-
-**Severity:** Low. Both reviewers rated it low; the original suspicion was medium. The emulator never produces a wrong or nondeterministic hash, root or proof for valid inputs. The PRT reference node and the C API consumers are not affected. Harm requires a Lua caller that skips its own shape checks and trusts the free address bits or the sibling count. Even then it cannot prove a false hash at a real position.
-
-**Risks:**
-- *Of the bug:* Lua validators built on this API may silently accept claims at fabricated indices, out of range or unaligned. This can mislead bookkeeping, for example output indexes or leaf positions, or a decision to dispute. A full-frontier misuse yields a "valid" proof for a leaf that does not exist.
-- *Of the fix:* Stricter checks could reject proofs that callers build by hand with non-canonical fields. Examples are `log2_root_size` 64 with `target_address` near 2^64, which needs care because Lua integers are signed, and callers that pad `sibling_hashes`. The new assertions must not break the proofs from `machine:get_proof` or the uarch/mcycle proofs that `prt.lua` builds. Both are canonical today.
-
-**Proof of concept:** `bugs/lua-06-verify-slice-noncanonical-address/test_verify_slice_noncanonical.lua`. It needs no machine images: it builds a RAM-only machine. Run it from the repo root:
-`eval $(make -s env); lua5.4 bugs/lua-06-verify-slice-noncanonical-address/test_verify_slice_noncanonical.lua`
-Exit status 1 with `BUG:` lines means the bug reproduces. Exit status 0 with "all non-canonical proofs rejected" means it is fixed.
-
-**ID**: `lua-06-verify-slice-noncanonical-address`
-
-**Related**: B20 (fixed).
 
 ### B25. --clear-hash-tree is reapplied on every stored-mode revert
 

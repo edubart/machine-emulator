@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-85 confirmed issues: 5 high, 17 medium, 63 low.
+86 confirmed issues: 5 high, 17 medium, 64 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -110,6 +110,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B81](#b81-load-or-create-on-a-non-empty-local-machine-object-leaks-the-previous-machine-and-its-locks) | low | pre-existing | C API (local machine) | load or create on a non-empty local machine object leaks the previous machine and its locks | `bugs/p1-01-local-load-create-on-nonempty-object-leaks-machine-and/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
+| [B86](#b86-set_runtime_config-reports-a-new-hash-tree-concurrency-that-is-never-applied) | low | pre-existing | Runtime config, hash tree | set_runtime_config reports a new hash-tree concurrency that is never applied | `bugs/u3-02-set-runtime-config-ignores-hash-tree-concurrency/` |
 
 ## Issues
 
@@ -4905,6 +4906,56 @@ It generates its uarch RAM images and snapshots in a fresh temporary directory (
 **ID**: `c1-01-uarch-write-tlb-set-index-oob-host-write`
 
 **Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
+
+### B86. set_runtime_config reports a new hash-tree concurrency that is never applied
+
+**Title**: set_runtime_config stores concurrency.update_hash_tree and reports it back, but the hash tree keeps the concurrency it was built with
+
+**Problem**: `machine::set_runtime_config` only reconfigures the console (`m_console.set_config(r.console)`) and then stores the config in `m_r`. `hash_tree::m_concurrency` is set once, in the `hash_tree` constructor, from `m_r.concurrency.update_hash_tree` at create or load time, and nothing updates it afterwards. After `set_runtime_config({concurrency={update_hash_tree=N}})`, `get_runtime_config()` returns N, but every hash-tree update keeps the old thread count and batch size. Callers get no error or warning. The header marks only `clear_hash_tree` as "(create or load only)". `concurrency` carries no such note, and `cm.h` says only that the call "changes the machine runtime configuration". The C API, Lua bindings and JSON-RPC `machine.set_runtime_config` all forward to this function, so all of them are affected. Forked JSON-RPC servers inherit the parent's hash tree and cannot be retuned either.
+
+**Origin**: Pre-existing. `origin/main` has the same `set_runtime_config` body and the same `m_concurrency` handling.
+
+**Area**: Machine runtime config and hash tree (`cm_set_runtime_config`, Lua and JSON-RPC `set_runtime_config`).
+
+**Category**: api-contract
+
+**Location**:
+- `src/machine.cpp:391-397`: `set_runtime_config` updates only the console, then does `m_r = std::move(r)`.
+- `src/machine.cpp:303`: the only place that uses `m_r.concurrency.update_hash_tree`. It passes the value to the `hash_tree` constructor.
+- `src/hash-tree.cpp:956`: `m_concurrency{get_concurrency(...)}`, set once.
+- `src/hash-tree.hpp:228`: `int m_concurrency;`. Its consumers are the OpenMP thread counts at `src/hash-tree.cpp:286` and `:444`, and the dense-update batch size at `:468`.
+- `src/jsonrpc-remote-machine.cpp:1659-1665`: the JSON-RPC handler forwards the call to `machine::set_runtime_config`.
+- `src/machine-runtime-config.hpp:77-88`: `concurrency` is not documented as create/load only.
+
+**Evidence**: The test does not depend on timing. It counts the OS threads in `/proc/<pid>/task` before and after a hash-tree update that dirties every page of a 64 MiB RAM, and runs each scenario in its own child process. As a control, a machine created with `update_hash_tree=4` goes from 1 thread to 4. A machine created with 1 and then given `set_runtime_config{concurrency={update_hash_tree=4}}` reports 4, but its update stays single-threaded:
+```
+$ eval $(make -s env); lua5.4 bugs/u3-02-set-runtime-config-ignores-hash-tree-concurrency/test.lua
+created4 reported=4 threads_before=1 threads_after=4
+set4 reported=4 threads_before=1 threads_after=1
+BUG: set_runtime_config reports concurrency.update_hash_tree=4, but the hash tree update ran single-threaded (threads 1 -> 1), while a machine created with 4 spawned threads (1 -> 4)
+exit=1
+```
+The test checks raising the value to 4 because OpenMP pool threads persist once they are spawned. Lowering it, for example from 0 (all cores) to 1, goes through the same code path: `m_concurrency` keeps its construction value. A timing run with the candidate script `omp-set.lua` matches this. `collect_mcycle_root_hashes` took 6.01 s before `set_runtime_config{concurrency={update_hash_tree=1}}` and 5.81 s after it. A machine loaded with the setting took 0.09 s.
+
+**Scenario**: The operator of a PRT validator, Rollups Node or Dave deployment hits OpenMP oversubscription during collects on a many-core host. They call `set_runtime_config` on the running JSON-RPC servers, including forked or cached ones, to set `concurrency.update_hash_tree=1`. `get_runtime_config` confirms the new value, but collects stay just as slow. The operator may conclude the setting does not help and spend time tuning elsewhere, when only a reload would apply it. CLI or app users who retune a machine they already loaded hit the same silent no-op.
+
+**Possible solution**: Make the setting take effect at run time. Add `hash_tree::set_concurrency(uint64_t)`, which applies `get_concurrency` and assigns `m_concurrency`. Call it from `machine::set_runtime_config` before `m_r = std::move(r)`, and validate the value first so a failure leaves `m_r` unchanged. The field is a plain `int` that is read only at the start of each update, so no locking is needed beyond the machine's usual single-caller rule. If run-time retuning is not wanted, the alternative is to document `concurrency` as "(create or load only)" and have `set_runtime_config` either reject a changed value with an error, or keep and report the effective value instead of the requested one.
+
+**Severity**: Low. Both reviewers agreed. The only effect is that a performance-tuning setting is silently ignored while being reported as applied. Hashes, proofs and step logs do not depend on the thread count. Nothing crashes or hangs, and no state is corrupted. Passing the value at create or load is an easy workaround, and validators usually do that anyway. The other load-only fields (`skip_version_check`, `no_reserve`, `clear_hash_tree`) suggest the design may be partly intentional, but the field is undocumented and the reported value is wrong.
+
+**Risks**:
+- Of the bug: operators lose time chasing performance problems, because the API confirms a setting that has no effect. Forked servers cannot be retuned at all without reloading.
+- Of the fix: changing `m_concurrency` in the middle of a session changes only scheduling and batching. Hash results do not change, but test coverage should confirm that dense-update batching gives identical roots for every value. Rejecting changed values instead would break callers that round-trip `get_runtime_config`, edit the `console` field, and send the config back with a different `concurrency`.
+
+**Proof of concept**: `bugs/u3-02-set-runtime-config-ignores-hash-tree-concurrency/test.lua`. It re-invokes itself through `arg[0]` for each child scenario, needs no machine images, and requires an OpenMP build on a host with at least 2 CPUs. Without those it exits with code 2 (inconclusive). Run it from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/u3-02-set-runtime-config-ignores-hash-tree-concurrency/test.lua
+```
+Exit code 1 means the bug reproduced. Exit code 0 means the setting took effect, so the bug is fixed.
+
+**ID**: `u3-02-set-runtime-config-ignores-hash-tree-concurrency`
+
+**Related**: [B56](#b56-out-of-range-concurrencyupdate_hash_tree-makes-every-hash-tree-update-throw).
 
 ## Candidates that were not confirmed
 

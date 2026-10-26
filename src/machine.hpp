@@ -78,6 +78,8 @@ private:
 
     std::unordered_map<std::string, uint64_t> m_counters; ///< Counters used for statistics collection
 
+    std::optional<machine_config> m_stored_c; ///< Config to store, when m_c has load-time sharing overrides
+
     /// \brief Returns offset that converts between machine host addresses and target physical addresses
     /// \param pma_index Index of the memory PMA for the desired offset
     host_addr get_hp_offset(uint64_t pma_index) const {

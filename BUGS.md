@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-21 confirmed issues: 2 high, 6 medium, 13 low.
+20 confirmed issues: 2 high, 5 medium, 13 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -31,7 +31,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image) | medium | pre-existing | Machine API (replace_memory_range, store) | replace_memory_range leaves the config stale, so store persists the old flash image | `bugs/w2b-11-replace-memory-range-stale-config-store/` |
 | [B67](#b67-memory-ranges-inside-the-uarch-state-hash-node-are-accepted-and-make-uarch-reset-unprovable) | medium | pre-existing | Machine config validation, uarch reset | Memory ranges inside the uarch-state hash node are accepted and make uarch reset unprovable | `bugs/p2-02-memory-range-inside-uarch-state-node-breaks-reset-proo/` |
-| [B82](#b82-storing-a-sharing_all-loaded-machine-saves-sharedtrue-for-everything-so-later-sharing_config-loads-modify-the-snapshot) | medium | pre-existing | Stored machine API (store, machine config) | Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot | `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/` |
 | [B92](#b92-queries-after-sync_stored-rewrite-the-shared-dense-trees-with-no-write-ordering-so-a-host-crash-can-leave-a-wrong-root-hash) | medium | pre-existing | Hash tree (dense trees, dirty-page trees), stored machines | Queries after sync_stored rewrite the shared dense trees with no write ordering, so a host crash can leave a wrong root hash | `bugs/u1-02-post-sync-hash-tree-writes-dpt-clean-before-dht-host-c/` |
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
@@ -830,64 +829,6 @@ Run: `eval $(make -s env); lua5.4 bugs/p2-02-memory-range-inside-uarch-state-nod
 **ID**: `p3-08-tojson-uint64-written-as-negative`
 
 **Related**: B69 (fixed).
-
-### B82. Storing a SHARING_ALL-loaded machine saves shared:true for everything, so later SHARING_CONFIG loads modify the snapshot
-
-**Title**: store() of a SHARING_ALL-loaded machine writes `shared:true` into config.json, so a later SHARING_CONFIG load changes the snapshot in place
-
-**Problem**: `machine_config::load(dir, sharing_mode::all)` overrides the configuration the machine keeps. It sets `shared=true` on every address range and on the hash tree, sets `create=false`, and points every filename into the loaded directory. That adjusted config becomes `machine::m_c`. `machine::store(dir, sharing)` then calls `m_c.store(dir)` without passing `sharing`, so `machine_config::store` runs `adjust_backing_stores(".", sharing_mode::config)`, which keeps the flags it is given. The result is that a load-time sharing override is saved as the snapshot's own configuration: the stored config.json says RAM, DTB, flash drives, processor shadow state, CMIO buffers, PMAs, uarch state and the hash tree are all shared, even though the original config shared nothing. Any later `SHARING_CONFIG` load of that snapshot therefore behaves like `SHARING_ALL`: it maps every file `MAP_SHARED`, and running the machine changes the snapshot on disk. The same goes for `get_initial_config()` of a SHARING_ALL-loaded machine. It reports `shared=true` and `create=false` with absolute filenames inside the loaded directory, so a machine created from that config writes into the original stored directory.
-
-**Origin**: pre-existing (origin/main has the same code).
-
-**Area**: stored machine lifecycle (`machine::store`, `machine_config::load`/`store`/`adjust_backing_stores`, `machine::get_initial_config`).
-
-**Category**: corrupted-stored-state.
-
-**Location**:
-- `src/machine-config.cpp:69-92`: `adjust_ar_backing_store_config` forces `shared=true` under `sharing_mode::all`.
-- `src/machine-config.cpp:94-113`: `adjust_ht_backing_store_config` does the same for the hash tree.
-- `src/machine-config.cpp:138-164`: `machine_config::load` applies the override to the config the machine keeps.
-- `src/machine-config.cpp:166-178`: `machine_config::store` defaults to `sharing_mode::config`, which keeps the flags.
-- `src/machine.cpp:399-415`: `machine::store` calls `m_c.store(dir)` without its `sharing` argument.
-- `src/machine.cpp:381`: `get_initial_config` returns the adjusted `m_c` as-is.
-
-**Evidence**: The test does five things:
-1. Creates a 32 MiB Linux machine with default, non-shared backing stores and stores it in `A`.
-2. Loads `A` with `SHARING_ALL`, runs 2M cycles and calls `store(S)`. This is the PRT `store_checkpoint` pattern.
-3. Checks `S/config.json`.
-4. Loads `S` with `SHARING_CONFIG` and runs to 4M cycles.
-5. Reloads `S` with the default load (no sharing) and compares the result with what was stored.
-
-Run with `eval $(make -s env); lua5.4 bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/test.lua`. Output (exit=1):
-```
-original ram.shared=	false	 hash_tree.shared=	false
-get_initial_config of SHARING_ALL-loaded: ram.shared=	true	 ram.data_filename=	/tmp/lua_EByO2K/A/0000000080000000-2000000.bin	 hash_tree.shared=	true
-A config ram:	"ram":{"backing_store":{...,"shared":false,"truncate":false},"length":33554432}
-S config ram:	"ram":{"backing_store":{...,"shared":true,"truncate":false},"length":33554432}
-A hash_tree:	"hash_tree":{...,"shared":false,...}
-S hash_tree:	"hash_tree":{...,"shared":true,...}
-stored: mcycle=	2000000	 hash=	c48c153c28292d520fdbe63fbcebdacca88601d1d5eb6f2df7ed59b2144699c0
-reload: mcycle=	4000000	 hash=	75cb1cac0ae1410a0801502e7a1c6e506cce68488cc023911f8dd3ee4f1a1f52
-BUG: S/config.json persists ram shared:true from the load-time SHARING_ALL override (original config has shared:false)
-BUG: SHARING_CONFIG load + run modified the stored snapshot S in place (mcycle 2000000 -> 4000000, root hash changed=true)
-```
-
-**Scenario**: The PRT node's `store_checkpoint` (doc/recipes/prt.lua:2563-2575) calls `machine:store(tmp)` on an epoch machine loaded with `SHARING_ALL`, then `sync_stored` and `rename_stored`. The resulting checkpoint or template has a config.json where everything is marked shared. Later, an operator runs `cartesi-machine --load=<checkpoint>,sharing:config`, or another validator stack (Rollups Node, Dave, an app tool) loads it with `CM_SHARING_CONFIG` and runs it. The checkpoint is then changed on disk without any warning. Its root hash no longer matches the one recorded in epoch.json or on chain, and later bootstraps from that checkpoint fail their hash assertion. The same thing happens with CLI snapshots made via `--load=dir,sharing:all ... --store=out`. A tool that clones a SHARING_ALL-loaded machine from `get_initial_config()` would write into the source directory.
-
-**Possible solution**: Keep the original, unadjusted config (or at least the original `shared`/`create`/`truncate` flags) alongside `m_c`, and use it in `machine::store` and `get_initial_config()`. Alternatively, have `machine::store` pass an explicit sharing mode to `m_c.store()` that resets the load-time override, so the persisted config records what the user configured and not the runtime mapping mode. This is unrelated to how data files are written: shared ranges are already modified on disk, so the data-copy logic in `machine::store` can stay as it is.
-
-**Severity**: medium. Both reviewers rated it medium. Storing a SHARING_ALL-loaded machine is the normal PRT and CLI path, and it silently corrupts stored state. However, no hash, proof or step log is wrong, PRT itself only loads with SHARING_ALL or no sharing, and the damage needs a later SHARING_CONFIG consumer (or a machine created from `get_initial_config()`) to run the snapshot.
-
-**Risks**: The bug turns snapshots that should be immutable into mutable ones for SHARING_CONFIG users, which leads to checkpoint/hash mismatches, failed bootstraps and hard-to-debug "my snapshot changed" reports. The fix changes what `get_initial_config()` returns for loaded machines and what `store()` writes:
-- Callers that relied on the adjusted config (absolute filenames, `create=false`) to find the loaded files may break.
-- If the original `shared` flags are restored while the data-copy logic still assumes shared ranges were left in place, `store` could write a snapshot whose files do not match its config.
-- Snapshots already on disk keep `shared:true` until they are re-stored.
-
-**Proof of concept**: `bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/test.lua`. Run from the repo root with `eval $(make -s env); lua5.4 bugs/p1-02-store-persists-load-time-sharing-all-as-config-shared-/test.lua`. It needs `CARTESI_IMAGES_PATH` (default `/usr/share/cartesi-machine/images`) with `linux.bin` and `rootfs.ext2`. It exits 1 with `BUG:` lines while the bug is present and exits 0 once it is fixed.
-
-**ID**: `p1-02-store-persists-load-time-sharing-all-as-config-shared-`
-
-**Related**: [B59](#b59-replace_memory_range-leaves-the-config-stale-so-store-persists-the-old-flash-image), B01 (fixed).
 
 ### B83. Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail
 

@@ -337,7 +337,12 @@ void machine::init_console() {
 // ??D It is best to leave the std::move() on r because it may one day be necessary!
 machine::machine(const std::string &dir, machine_runtime_config r, sharing_mode sharing) :
     // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-    machine{machine_config::load(dir, sharing), std::move(r)} {}
+    machine{machine_config::load(dir, sharing), std::move(r)} {
+    // Keep the stored sharing flags, so store() does not persist the load-time sharing override
+    if (sharing != sharing_mode::config) {
+        m_stored_c = machine_config::load(dir);
+    }
+}
 
 void machine::prepare_virtio_devices_select(os::select_fd_sets *fds, uint64_t *timeout_us) {
     for (auto &v : m_ars.virtio_view()) {
@@ -416,7 +421,7 @@ void machine::store(const std::string &dir, sharing_mode sharing) const {
     remover.add_directory(dir);
 
     // Store config
-    remover.add_file(m_c.store(dir));
+    remover.add_file(m_stored_c.value_or(m_c).store(dir));
 
     // Store all address ranges
     auto store_address_range = [&](const backing_store_config &c, const address_range &ar, bool read_only) {

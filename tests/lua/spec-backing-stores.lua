@@ -242,6 +242,34 @@ describe("backing stores", function()
         end
     end)
 
+    it("should not persist the load-time sharing mode on store", function()
+        local stored_dirname = filesystem.temp_pathname()
+        local cloned_dirname = filesystem.temp_pathname()
+        local _ <close> = tests_util.scope_exit(function()
+            pcall(cartesi.machine.remove_stored, cartesi.machine, cloned_dirname)
+            cartesi.machine:remove_stored(stored_dirname)
+        end)
+        local expected_root_hash
+        do -- store new machine
+            local machine <close> = cartesi.machine(base_machine_config)
+            machine:store(stored_dirname)
+        end
+        do -- load stored machine with all backing stores shared and store a clone
+            local machine <close> = cartesi.machine(stored_dirname, {}, cartesi.SHARING_ALL)
+            machine:store(cloned_dirname)
+            expected_root_hash = machine:get_root_hash()
+        end
+        do -- the clone has no backing stores marked as shared, so this must not change it
+            local machine <close> = cartesi.machine(cloned_dirname, {}, cartesi.SHARING_CONFIG)
+            machine:run()
+        end
+        do -- check cloned machine
+            local machine <close> = cartesi.machine(cloned_dirname, {}, cartesi.SHARING_NONE)
+            expect.equal(machine:read_reg("mcycle"), 0)
+            expect.equal(machine:get_root_hash(), expected_root_hash)
+        end
+    end)
+
     for _, hash_function in ipairs({ "keccak256", "sha256" }) do
         for _, operation in ipairs({ "store", "close" }) do
             it(

@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -262,6 +263,21 @@ BOOST_AUTO_TEST_CASE_NOLINT(spawn_closes_inherited_sockets_test) {
     BOOST_REQUIRE_EQUAL(err, CM_ERROR_OK);
     listener.close();
     BOOST_CHECK_NO_THROW(boost::asio::ip::tcp::acceptor(ioc, endpoint));
+}
+
+// What: a failed spawn must return even when the caller has SIGTERM blocked.
+// How:  block SIGTERM, then spawn with a zero timeout so the version check fails and the server is terminated.
+BOOST_AUTO_TEST_CASE_NOLINT(spawn_failure_with_sigterm_blocked_test, *boost::unit_test::timeout(10)) {
+    sigset_t sigterm{};
+    sigset_t old_mask{};
+    sigemptyset(&sigterm);
+    sigaddset(&sigterm, SIGTERM);
+    BOOST_REQUIRE_EQUAL(pthread_sigmask(SIG_BLOCK, &sigterm, &old_mask), 0);
+    cm_machine *server{};
+    const auto err = cm_jsonrpc_spawn_server("127.0.0.1:0", 0, &server, nullptr, nullptr);
+    pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
+    BOOST_CHECK_NE(err, CM_ERROR_OK);
+    BOOST_CHECK(server == nullptr);
 }
 
 // ---------------------------------------------------------------------------

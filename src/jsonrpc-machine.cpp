@@ -492,9 +492,20 @@ jsonrpc_machine::jsonrpc_machine(const std::string &address, int64_t spawn_timeo
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
     char *const args[] = {const_cast<char *>(bin), server_fd, nullptr};
 
+    // Clear the child signal mask, so signals blocked by the caller, such as SIGTERM, can still stop it
+    posix_spawnattr_t attr{};
+    if (posix_spawnattr_init(&attr) != 0) {
+        throw std::runtime_error{"posix_spawnattr_init() failed"};
+    }
+    auto attr_destroyer = make_scope_exit([&] { std::ignore = posix_spawnattr_destroy(&attr); });
+    sigset_t sigmask{};
+    std::ignore = sigemptyset(&sigmask);
+    std::ignore = posix_spawnattr_setsigmask(&attr, &sigmask);
+    std::ignore = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK);
+
     // Spawn the remote machine as a child process
     pid_t child_pid{};
-    if (posix_spawnp(&child_pid, bin, nullptr, nullptr, args, environ) != 0) {
+    if (posix_spawnp(&child_pid, bin, nullptr, &attr, args, environ) != 0) {
         throw std::system_error{errno, std::generic_category(), "posix_spawnp() failed to spawn server process"};
     }
 

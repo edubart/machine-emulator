@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-15 confirmed issues: 2 high, 4 medium, 9 low.
+14 confirmed issues: 2 high, 4 medium, 8 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -36,7 +36,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
 | [B49](#b49-lua-hash-functions-ignore-an-empty-second-argument-and-frontier-functions-accept-non-32-byte-hashes) | low | pre-existing | Lua cartesi (hash functions), cartesi.hash-tree | Lua hash functions ignore an empty second argument and frontier functions accept non-32-byte hashes | `bugs/lua-15-concat-hash-empty-second-arg/` |
 | [B52](#b52-a-full-disk-kills-a-sharing_all-machine-with-sigbus-on-writes-to-sparse-pages) | low | pre-existing | Memory mapping (os-mapped-memory), stored machines | A full disk kills a SHARING_ALL machine with SIGBUS on writes to sparse pages | `bugs/w2b-04-sharing-all-enospc-sigbus/` |
-| [B55](#b55-spawn_server-hangs-on-its-error-path-when-the-caller-has-sigterm-blocked) | low | pre-existing | JSON-RPC client (spawn_server) | spawn_server hangs on its error path when the caller has SIGTERM blocked | `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/` |
 | [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus) | low | introduced by branch | Memory mapping (mapped_memory::clear) | clear_hash_tree punches holes in shared hash files, so a full disk later kills the process with SIGBUS | `bugs/w2a-06-mapped-memory-clear-punch-hole-sigbus-enospc/` |
 | [B83](#b83-rollback-frees-the-working-servers-port-before-rebinding-so-a-bind-in-the-gap-makes-revert-fail) | low | pre-existing | JSON-RPC remote machine (rollback, rebind_server) | Rollback frees the working server's port before rebinding, so a bind in the gap makes revert fail | `bugs/p1-05-rml-03-rollback-rebind-to-released-ephemeral-port-race/` |
 | [B84](#b84-the-json-rpc-client-cannot-use-ipv6-server-addresses) | low | pre-existing | JSON-RPC client and server (addresses) | The JSON-RPC client cannot use IPv6 server addresses | `bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/` |
@@ -447,66 +446,6 @@ Recovering from SIGBUS inside the library (`siglongjmp`) is fragile and is not r
 **ID**: `w2b-04-sharing-all-enospc-sigbus`
 
 **Related**: [B64](#b64-clear_hash_tree-punches-holes-in-shared-hash-files-so-a-full-disk-later-kills-the-process-with-sigbus).
-
-### B55. spawn_server hangs on its error path when the caller has SIGTERM blocked
-
-**Title**: cm_jsonrpc_spawn_server hangs forever on its error path when the caller has SIGTERM blocked
-
-**Problem:** `jsonrpc_machine` starts the server with `posix_spawnp(&child_pid, bin, nullptr, nullptr, args, environ)`. It passes no `posix_spawnattr_t`, so `POSIX_SPAWN_SETSIGMASK` is not set and the child inherits the calling thread's signal mask. The server's `install_signal_handlers()` resets the SIGINT/SIGTERM dispositions to `SIG_DFL` and later adds them to an asio `signal_set`. Nothing in the server calls `sigprocmask` or `pthread_sigmask`, so a SIGTERM that was blocked in the caller stays blocked in the server. If anything fails after the spawn, the `child_waiter` scope-exit sends `kill(child_pid, SIGTERM)` once and then loops on `waitpid(child_pid, nullptr, 0)` with no time limit. It escalates to SIGILL only on `EINTR`, which never happens here. The SIGTERM stays pending, the server never exits, and `cm_jsonrpc_spawn_server` never returns its error. The server process also leaks. Failures that lead here: version check failure or timeout, and failure of the `fork`, `shutdown` or `rebind` requests. On the success path the direct child exits through the `shutdown` RPC, so the call returns. Servers spawned that way still ignore SIGTERM/SIGINT for their whole life, but this was not tested. A secondary claim was also not tested: the waiter always SIGTERMs `child_pid`, even after the child may have been auto-reaped under `SIGCHLD=SIG_IGN`, so a narrow race could signal a reused pid.
-
-**Origin:** pre-existing. The spawn and waiter logic is the same before this branch.
-
-**Area:** libcartesi_jsonrpc spawn (`jsonrpc-machine.cpp`) / server signal setup (`jsonrpc-remote-machine.cpp`).
-
-**Category:** hang
-
-**Location:**
-- `src/jsonrpc-machine.cpp:491`: `posix_spawnp` with null file actions and null attrs, so the signal mask is inherited.
-- `src/jsonrpc-machine.cpp:505-545`: `child_waiter` sends `kill(child_pid, SIGTERM)`, then `waitpid` with no bound; SIGILL is sent only on `EINTR`.
-- `src/jsonrpc-machine.cpp:559-586`: post-spawn steps that can throw (`check_server_version`, `fork`, `shutdown`, `rebind`).
-- `src/jsonrpc-remote-machine.cpp:170-182`: `install_signal_handlers()` resets dispositions only and never unblocks the signals.
-- `src/jsonrpc-remote-machine.cpp:325-327`: `signals.add(SIGINT/SIGTERM)` cannot fire while the signals are blocked.
-
-**Evidence:** The test forks a helper into its own process group. The helper calls the public C API `cm_jsonrpc_spawn_server("127.0.0.1:0", 0, ...)`. A timeout of 0 forces the version check to time out, which takes the error path.
-- Baseline, SIGTERM unblocked: the call returns -6 at once.
-- After `pthread_sigmask(SIG_BLOCK, {SIGTERM})`: the call does not return within 5s. `/proc` shows the caller sleeping in `waitpid`. The spawned `cartesi-jsonrpc-machine` has `SigBlk=0x4000` (SIGTERM inherited as blocked) and `ShdPnd=0x4000` (the waiter's SIGTERM is stuck pending). The test then SIGKILLs the group.
-
-Run command:
-```
-eval $(make -s env); sh bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/run.sh
-```
-Output excerpt:
-```
-pid 24806 test_spawn_sigt: State:	S (sleeping) ShdPnd:	0000000000000000 SigBlk:	0000000000004000
-pid 24807 cartesi-jsonrpc: State:	S (sleeping) ShdPnd:	0000000000004000 SigBlk:	0000000000004000
-baseline (SIGTERM unblocked): spawn returned -6 (error, as expected for timeout 0)
-BUG: cm_jsonrpc_spawn_server did not return within 5s when caller has SIGTERM blocked (spawned server inherited mask, ignores SIGTERM, waitpid blocks forever)
-```
-(exit status 1)
-
-**Scenario:** A C/C++ host such as a PRT validator, a custom node or an app harness follows the common daemon pattern: it blocks SIGTERM/SIGINT in `main` and handles them in a dedicated `sigwait`/`signalfd` thread. Every thread created afterwards inherits that mask, including the one that calls `cm_jsonrpc_spawn_server`. When a spawn fails, the worker thread freezes forever instead of getting an error code, and an orphaned `cartesi-jsonrpc-machine` stays alive holding its listening socket. Typical failures are a version mismatch between libcartesi_jsonrpc and the installed server binary, a server that starts too slowly under load and exceeds `spawn_timeout_ms`, or a failed fork, shutdown or rebind. The validator cannot retry or report the failure. Rust/Go hosts such as the Rollups Node and Dave usually do not block these signals, so they are less likely to be affected.
-
-**Possible solution:**
-- In `jsonrpc-machine.cpp`, pass a `posix_spawnattr_t` with `POSIX_SPAWN_SETSIGMASK` (empty mask) and `POSIX_SPAWN_SETSIGDEF` (at least SIGINT, SIGTERM and SIGCHLD reset to default). Rust's `std::process::Command` resets the child's mask the same way.
-- As defense in depth, make the server unblock SIGINT/SIGTERM at startup (`pthread_sigmask(SIG_UNBLOCK, ...)` in `install_signal_handlers`).
-- Optionally bound the waiter: after SIGTERM, poll `waitpid(..., WNOHANG)` for a short grace period, then escalate to SIGKILL.
-- Skip the unconditional SIGTERM once the child has acknowledged `shutdown`, to avoid signalling a possibly reused pid.
-
-**Severity:** low. Both reviewers rated it low, at most borderline medium. Two uncommon conditions must hold at once: the caller has SIGTERM blocked, and a spawn fails after `posix_spawnp`. When they do, the result is a permanent hang plus a leaked server process instead of an error code. Hashes, proofs and stored state are never affected, and successful spawns work.
-
-**Risks:**
-- Of the bug: a host thread deadlocks forever on a spawn failure. Servers accumulate as leaked processes holding ports, and supervisors cannot terminate spawned servers with SIGTERM/SIGINT.
-- Of the fix: resetting the mask and dispositions in the child is standard and low-risk. A hard SIGKILL escalation must keep the coverage-build rule of not signalling a child that is already flushing gcov counters after `shutdown`. Callers that relied on spawned servers ignoring SIGTERM (unlikely, and undocumented) would see different behaviour.
-
-**Proof of concept:** `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/test_spawn_sigterm_blocked.cpp`, built and run by `bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/run.sh`. From the repo root:
-```
-eval $(make -s env); sh bugs/w2b-07-spawn-server-hangs-when-sigterm-blocked/run.sh
-```
-The test exits 1 and prints a `BUG:` line while the defect is present, and exits 0 once it is fixed.
-
-**ID**: `w2b-07-spawn-server-hangs-when-sigterm-blocked`
-
-**Related**: B10 (fixed).
 
 ### B59. replace_memory_range leaves the config stale, so store persists the old flash image
 

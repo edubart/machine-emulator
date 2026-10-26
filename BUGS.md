@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-57 confirmed issues: 3 high, 11 medium, 43 low.
+56 confirmed issues: 3 high, 11 medium, 42 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -51,7 +51,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B30](#b30-verify_hash_tree-returns-true-when-inner-nodes-or-the-root-are-corrupted) | low | pre-existing | Hash tree (verify_hash_tree) | verify_hash_tree returns true when inner nodes or the root are corrupted | `bugs/api-03-verify-hash-tree-misses-inner-nodes/` |
 | [B33](#b33-lua-bindings-call-lual_error-inside-c-catch-handlers-and-leak-the-exception) | low | both | Lua bindings (clua-*.cpp) | Lua bindings call luaL_error inside C++ catch handlers and leak the exception | `bugs/lua-22-lual-error-in-catch-leaks-exceptions/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
-| [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
 | [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
 | [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
 | [B46](#b46-abi-integer-encoders-wrap-values-of-2512-or-more-instead-of-rejecting-them) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI integer encoders wrap values of 2^512 or more instead of rejecting them | `bugs/lua-31-evmu-encode-int-wraps-mod-2-512/` |
@@ -1195,51 +1194,6 @@ The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is 
 **ID**: `lua-28-evmu-lenient-dirty-bits-padding`
 
 **Related**: B18 (fixed).
-
-### B41. collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount
-
-**Title**: `collect_uarch_cycle_root_hashes` accepts `log2_bundle_uarch_cycle_count` 21..63, hits a negative shift (UB) and returns a malformed layout
-
-**Problem:** `machine::collect_uarch_cycle_root_hashes` never checks that `log2_bundle_uarch_cycle_count` is in `0..ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE` (0..20). The only bound comes from the `back_merkle_tree` constructor, which accepts 0..63. For values from 21 to 63, `append_uarch_reset_root_hash` computes `UINT64_C(1) << (20 - log2_bundle_uarch_cycle_count)`. That is a shift by a negative amount, which is undefined behavior, and the `assert` after it is compiled out in release builds. Instead of an argument error, the call returns 3 entries per mcycle (a padded execution bundle, the halt pad hash and the reset bundle), and each entry claims to cover 2^log2 > 2^20 leaves. The sibling API `collect_uarch_cycle_bundle` rejects the same values with `log2_bundle_uarch_cycle_count must be in {0, ..., 20}`.
-
-**Origin:** pre-existing. `origin/main` has the same unguarded shift and no range check.
-
-**Area:** `collect_uarch_cycle_root_hashes` in the C++ machine, used by the C API (`cm_collect_uarch_cycle_root_hashes`), the Lua binding and the JSON-RPC server/client.
-
-**Category:** api-contract / input validation (undefined behavior)
-
-**Location:**
-- `src/machine.cpp:2657-2713`: `machine::collect_uarch_cycle_root_hashes` has no range check, and the `back_merkle_tree` is built at line 2713
-- `src/machine.cpp:2604-2606`: the negative shift in `append_uarch_reset_root_hash`
-- `src/back-merkle-tree.hpp:47-52`: the only check, which allows 0..63
-- `src/machine.cpp:2878-2881`: the check in `collect_uarch_cycle_bundle`, for comparison
-- `src/cm.cpp:789`, `src/clua-i-machine.cpp:1300`, `src/jsonrpc-remote-machine.cpp:1014`: these pass the value through unchanged
-
-**Evidence:** The test makes a fresh machine (local, then remote through JSON-RPC). On each one it calls `collect_uarch_cycle_root_hashes(2, L, tail)` with L = 20 as a control, then with L = 21, 32, 40 and 63. It also calls `collect_uarch_cycle_bundle(0, 21, tail)`.
-```
-local	log2=20 ok:	4	entries, offsets	1,3,5
-local	collect_uarch_cycle_bundle(0,21):	rejected: log2_bundle_uarch_cycle_count must be in {0, ..., 20}
-BUG: local collect_uarch_cycle_root_hashes accepted log2_bundle_uarch_cycle_count=21 (valid range 0..20): 6 entries, offsets 1,4,7 ...
-BUG: local collect_uarch_cycle_root_hashes accepted log2_bundle_uarch_cycle_count=63 (valid range 0..20): 6 entries, offsets 1,4,7 ...
-jsonrpc	collect_uarch_cycle_bundle(0,21):	rejected: log2_bundle_uarch_cycle_count must be in {0, ..., 20}
-BUG: jsonrpc collect_uarch_cycle_root_hashes accepted log2_bundle_uarch_cycle_count=21 (valid range 0..20): 6 entries, offsets 1,4,7 ...
-BUG: 8 out-of-range log2_bundle_uarch_cycle_count values accepted
-```
-To run it: `eval $(make -s env); lua5.4 bugs/api-11-collect-uarch-log2-bundle-unbounded/test-uarch-log2-bound.lua`. The exit status is 1 while the bug is present. L = 64 is rejected, but only by the back tree's `log2_max_leaves is too large` check.
-
-**Scenario:** A validator node, a remote JSON-RPC client or a tool built on the C/Lua API passes the height of a different tree level, for example 21 or a whole-mcycle level, or reads a misconfigured constant. It does not get a clear argument error. The call succeeds with a malformed layout, so the caller builds a wrong uarch commitment or computation hash and may store or publish it. Because the shift is undefined behavior, the result could also differ across compilers, optimization levels or architectures. Correct PRT callers only use levels 0..20 and are not affected. A malformed commitment cannot match a valid on-chain one, so the most likely outcome is a mismatch or a wasted dispute, not an honest player being silently misled.
-
-**Possible solution:** At the top of `machine::collect_uarch_cycle_root_hashes`, before any work, add the same check that `collect_uarch_cycle_bundle` uses: `if (log2 < 0 || static_cast<uint64_t>(log2) > ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE) throw std::runtime_error{"log2_bundle_uarch_cycle_count must be in {0, ..., 20}"};`. Once that check exists, the redundant check in `collect_uarch_cycle_bundle` can stay or be removed.
-
-**Severity:** low. Both reviewers agree. Only callers that pass invalid arguments (21..63) are affected. The outcome is UB and a meaningless result rather than a crash, a hang or memory corruption (the back tree stays within its own bounds). Correct PRT nodes never pass values above 20.
-
-**Risks:** The bug lets a misconfigured validator produce commitments that look plausible but are invalid and that depend on the platform, with no error. The fix carries almost no risk. It only rejects inputs that never had a defined meaning. A caller that relied on values above 20 being accepted, which none should, would now get an error.
-
-**Proof of concept:** `bugs/api-11-collect-uarch-log2-bundle-unbounded/test-uarch-log2-bound.lua` (uses the local machine and a spawned JSON-RPC server, and takes about 2 s). From the repo root: `eval $(make -s env); lua5.4 bugs/api-11-collect-uarch-log2-bundle-unbounded/test-uarch-log2-bound.lua`. Exit status 1 with `BUG:` lines means the bug reproduced. Exit status 0 with `OK:` means it is fixed.
-
-**ID**: `api-11-collect-uarch-log2-bundle-unbounded`
-
-**Related**: B40 (fixed).
 
 ### B42. filesystem.rename_file does not replace existing files on Windows
 

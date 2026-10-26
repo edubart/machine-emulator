@@ -2670,6 +2670,11 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
     if (mcycle_end < mcycle_start) {
         throw std::runtime_error{"mcycle is past"};
     }
+    if (log2_bundle_uarch_cycle_count < 0 ||
+        static_cast<uint64_t>(log2_bundle_uarch_cycle_count) > ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE) {
+        throw std::runtime_error{"log2_bundle_uarch_cycle_count must be in {0, ..., " +
+            std::to_string(ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE) + "}"};
+    }
     if (is_unreproducible()) {
         throw std::runtime_error{"cannot collect hashes from unreproducible machines"};
     }

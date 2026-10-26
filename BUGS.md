@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-84 confirmed issues: 4 high, 17 medium, 63 low.
+85 confirmed issues: 5 high, 17 medium, 63 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -29,6 +29,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B03](#b03-crash-during-hash-tree-update-makes-a-sharing_all-machine-unloadable-or-silently-wrong) | high | introduced by branch | Hash tree (page cache, dense trees, crash consistency) | Crash during hash-tree update makes a SHARING_ALL machine unloadable or silently wrong | `bugs/ht-01-phtc-crash-borrowed-unloadable-clear-cannot-recover/` |
 | [B06](#b06-frontier_forest_store-and-fssync_file-ignore-write-errors-and-commit-truncated-files) | high | introduced by branch | Lua cartesi.hash-tree and cartesi.filesystem (durable writes) | frontier_forest_store and fs.sync_file ignore write errors and commit truncated files | `bugs/ht-07-hashtree-lua-write-file-ignores-write-error/` |
 | [B32](#b32-interrupted-store-or-clone_stored-leaves-a-torn-page-cache-that-loads-silently-and-gives-wrong-hashes) | high | pre-existing | Hash tree (page cache), stored machine API | Interrupted store or clone_stored leaves a torn page cache that loads silently and gives wrong hashes | `bugs/api-05-torn-phtc-silent-wrong-hash/` |
+| [B85](#b85-uarch-write_tlb-never-range-checks-set_index-so-a-crafted-template-writes-host-memory-out-of-bounds) | high | pre-existing | uarch (shadow TLB ECALL) | uarch WRITE_TLB never range-checks set_index, so a crafted template writes host memory out of bounds | `bugs/c1-01-uarch-write-tlb-set-index-oob-host-write/` |
 | [B02](#b02-crash-in-sparse-tree-update-freezes-the-root-hash-of-a-shared-hash-tree) | medium | pre-existing | Hash tree (sparse tree, crash consistency) | Crash in sparse-tree update freezes the root hash of a shared hash tree | `bugs/ht-03-persisted-sparse-marked-flag-stale-root/` |
 | [B04](#b04-crash-during-clear_hash_tree-leaves-zeroed-hashes-on-clean-pages) | medium | introduced by branch | Hash tree (clear_hash_tree) | Crash during clear_hash_tree leaves zeroed hashes on clean pages | `bugs/ht-04-clear-hash-tree-zeroes-before-marking-dirty/` |
 | [B07](#b07-interrupted-remove_stored-leaves-a-directory-that-blocks-the-name-forever) | medium | pre-existing | Stored machine API | Interrupted remove_stored leaves a directory that blocks the name forever | `bugs/ht-09-remove-stored-not-idempotent/` |
@@ -4843,6 +4844,63 @@ The sandbox has no IPv6 networking, so the full `spawn_server("::1:0")` path (bi
 `eval $(make -s env); lua5.4 bugs/p1-07-rml-05-ipv6-endpoint-format-unparseable/test.lua` (exits 1 while the bug is present, 0 once fixed).
 
 **ID**: `p1-07-rml-05-ipv6-endpoint-format-unparseable`
+
+### B85. uarch WRITE_TLB never range-checks set_index, so a crafted template writes host memory out of bounds
+
+**Title**: uarch WRITE_TLB ECALL never range-checks set_index: large values corrupt host memory (SIGSEGV) in run_uarch/log_step_uarch/collect_uarch_cycle_root_hashes, and set_index=3 writes the shadow TLB padding that verify_step_uarch accepts but store/load rejects
+
+**Problem**: The uarch `WRITE_TLB` ECALL takes `set_index` straight from uarch register `a0` and never validates it. `executeECALL(UARCH_ECALL_FN_WRITE_TLB)` reads `set_index = a0`, `slot_index = a1`, `vaddr_page = a2`, `vp_offset = a3`, `pma_index = a4`, then `writeTlbECALL` casts `set_index` to `TLB_set_index` with no range check. Every host-side uarch state access forwards the value to `machine::write_unverified_tlb`, which checks only `slot_index >= TLB_SET_SIZE` and never `set_index`. It then indexes `m_s->penumbra.tlb[set_index][slot_index]` and `m_s->shadow.tlb[set_index][slot_index]`; both are `std::array` with `TLB_NUM_SETS_ = 3` entries, accessed through unchecked `operator[]`. For a large `set_index` (e.g. `0x40000`) the store lands `set_index*0x2000` bytes past the shadow/penumbra TLB — a wild, attacker-controlled host write that crashes with SIGSEGV. For `set_index=3` the write lands in `shadow_state.tlb_padding_` (state offset `0x7000`, just past the shadow TLB `[0x1000,0x7000)`), and on the host side past the end of `penumbra`; construction requires that padding to be pristine, so the state is silently corrupted. `write_verified_tlb` and `init_hot_tlb_slot` index the same arrays with no check (latent: their native callers pass only the compile-time constants `TLB_CODE`/`TLB_READ`/`TLB_WRITE`).
+
+**Origin**: pre-existing. `origin/main` has the same unchecked `write_unverified_tlb` / `writeTlbECALL` / `executeECALL` path; not introduced by this branch.
+
+**Area**: uarch / shadow TLB — `machine::write_unverified_tlb`, `write_verified_tlb`, `init_hot_tlb_slot`, and the uarch-step `WRITE_TLB` ECALL as reached by `run_uarch`, `log_step_uarch`, `collect_uarch_cycle_root_hashes`, `verify_step_uarch` and the on-chain step.
+
+**Category**: memory-safety (out-of-bounds host write; crash / heap corruption / unloadable snapshot).
+
+**Location**:
+- `src/machine.hpp:719-734` — `write_unverified_tlb` checks only `slot_index`, then indexes `tlb[set_index]` unchecked.
+- `src/uarch-solidity-compat.hpp:163-166` — `writeTlbECALL` casts `set_index` to `TLB_set_index` with no range check.
+- `src/uarch-step.cpp:883-891` — `executeECALL` reads `set_index` from `a0` and passes it through.
+- `src/uarch-state-access.hpp:104` — `do_write_tlb` (run_uarch host path).
+- `src/uarch-record-state-access.hpp:254-266` — `do_write_tlb` (log_step_uarch) computes `shadow_tlb_get_abs_addr(set_index, slot_index)`.
+- `src/collect-uarch-cycle-hashes-state-access.hpp:106-112` — `do_write_tlb` (collect path).
+- `src/uarch-replay-state-access.hpp:373-378` — replay checks only the logged write at the computed address; `set_index` never validated.
+- Latent: `src/machine.hpp:696-711` `write_verified_tlb`; `src/machine.cpp:262` `init_hot_tlb_slot`.
+
+**Evidence**: `test_write_tlb_set_index.lua` builds a tiny RV64I uarch program (`a7=4` WRITE_TLB, `a0=set_index`, `a1=0`, `a2=0x1000`, ecall, then halt) with an in-Lua encoder (no toolchain needed), builds a machine with `uarch.ram.backing_store.data_filename` pointing at it, and drives three host entry points. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/c1-01-uarch-write-tlb-set-index-oob-host-write/test_write_tlb_set_index.lua
+```
+Output excerpt (defect present, exit 1):
+```
+[set_index=0x40000] run      exit=139 out=Segmentation fault
+[set_index=0x40000] log      exit=139 out=Segmentation fault
+[set_index=0x40000] collect  exit=139 out=Segmentation fault
+[set_index=3] logged write at 0x7000 (log2 5); shadow TLB is [0x1000,0x7000)
+[set_index=3] verify_step_uarch:	true	accepted (hash matches)
+BUG: verify_step_uarch accepts a WRITE_TLB with set_index=3 that wrote outside the shadow TLB (shadow padding)
+[set_index=3] load stored machine:	false	shadow padding bytes are corrupt
+BUG: machine stored after WRITE_TLB set_index=3 cannot be loaded back: shadow padding bytes are corrupt
+```
+So `set_index=0x40000` kills the process (SIGSEGV, exit 139) in `run_uarch`, `log_step_uarch` and `collect_uarch_cycle_root_hashes`; `set_index=3` writes the shadow TLB padding, which `verify_step_uarch` still accepts (record and replay agree), but the stored machine then fails to load with "shadow padding bytes are corrupt" (`src/machine.cpp:223`).
+
+**Scenario**: The guest cannot write uarch RAM (it is registered with `pmas=false`), and the stock uarch image only ever passes set indices 0..2, so this needs a non-pristine uarch RAM image. Such an image enters through `config.uarch.ram.backing_store.data_filename` or a stored/loaded machine, and construction/load never compares it to the pristine image (same precondition class as B35). For PRT the uarch RAM is part of the template hash committed on-chain, so a dapp or template author can ship a template whose uarch code issues this ECALL. A PRT validator (Dave, Rollups Node, or the Lua PRT node) stepping such a template at mcycle 0 either crashes in `run_uarch`/`log_step_uarch`/`collect_uarch_cycle_root_hashes`, suffers attacker-controlled host heap corruption (target and written bytes come from `a0`/`a2`-`a4`, enough to threaten code execution on the validator), or ends up with snapshots it cannot reload. It cannot produce its proof and the honest player loses on timeout. An arbitrary dispute opponent or the app inside the machine cannot inject it; record, replay and the Solidity step stay mutually consistent, so this is a crash/corruption defect, not a hash-disagreement one.
+
+**Possible solution**: Reject `set_index > TLB_LAST_` (and keep rejecting out-of-range `slot_index`) in `write_unverified_tlb`, `write_verified_tlb` and `init_hot_tlb_slot`, or earlier in `executeECALL`/`writeTlbECALL` as a uarch runtime error. Make the record path (`uarch_record_state_access`), the replay path (`uarch_replay_state_access::do_write_tlb`) and the Solidity step reject it identically (e.g. as a uarch abort in both) so record and verify stay consistent.
+
+**Severity**: high. A crafted template makes every emulator-based validator crash or corrupt its heap inside the emulator's own APIs (`run_uarch`, `log_step_uarch`, `collect_uarch_cycle_root_hashes`), and leaves stored snapshots unloadable; the large-index case is a host write whose address and data the attacker controls, so possibly RCE on the validator. One reviewer rated it medium, citing the same malicious-template precondition as B35 (medium); the other rated it high because the impact is memory corruption and possible code execution rather than a mere divergence, and only the template author — not an arbitrary opponent — can set it up. Reconciling: the attacker-controlled host memory write and crash of all validators lift this above B35's benign divergence, so high, short of critical because the precondition is a malicious template/config (not reachable by an app inside the machine or a dispute opponent) and record/verify remain consistent.
+
+**Risks**: Bug — validator process crash (DoS), attacker-controlled host heap write (possible RCE) and unloadable snapshots from a crafted template, all inside the emulator APIs the PRT stack relies on. Fix — low risk: a range check only rejects a `set_index` that is already invalid for the 3-set TLB; the native interpreter passes only compile-time constants, so valid flows are unaffected, provided record, replay and the on-chain step adopt the same rejection to stay consistent.
+
+**Proof of concept**: `bugs/c1-01-uarch-write-tlb-set-index-oob-host-write/test_write_tlb_set_index.lua`. Run from the repo root:
+```
+eval $(make -s env); lua5.4 bugs/c1-01-uarch-write-tlb-set-index-oob-host-write/test_write_tlb_set_index.lua
+```
+It generates its uarch RAM images and snapshots in a fresh temporary directory (removed on exit), exits 1 and prints `BUG:` lines while the defect is present, and prints `OK` once out-of-range `set_index` is rejected/handled.
+
+**ID**: `c1-01-uarch-write-tlb-set-index-oob-host-write`
+
+**Related**: [B35](#b35-collect_uarch_cycle_-reset-shortcut-diverges-from-reset_uarch-when-uarch-ram-is-not-the-built-in-image).
 
 ## Candidates that were not confirmed
 

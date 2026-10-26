@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-68 confirmed issues: 4 high, 12 medium, 52 low.
+67 confirmed issues: 4 high, 12 medium, 51 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -46,7 +46,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B16](#b16-verify_slice-and-verify_splice-accept-malformed-proofs) | low | pre-existing | Lua cartesi.hash-tree (proof verification) | verify_slice and verify_splice accept malformed proofs | `bugs/lua-06-verify-slice-noncanonical-address/` |
 | [B19](#b19-abi-type-parser-mangles-parameter-names-starting-with-memory-storage-or-calldata) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI type parser mangles parameter names starting with memory, storage or calldata | `bugs/lua-11-evmu-param-name-data-location-prefix-mangled/` |
 | [B23](#b23-json-rpc-protocol-version-not-bumped-for-the-new-clear_hash_tree-api) | low | introduced by branch | JSON-RPC client and server | JSON-RPC protocol version not bumped for the new clear_hash_tree API | `bugs/rpc-04-jsonrpc-protocol-version-not-bumped/` |
-| [B24](#b24-temporary-and-frontier-files-are-created-with-mode-0600-and-without-atomic-o_cloexec) | low | introduced by branch | Lua cartesi.filesystem and cartesi.hash-tree, CLI | Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC | `bugs/rpc-07-frontier-files-mode-0600/` |
 | [B25](#b25---clear-hash-tree-is-reapplied-on-every-stored-mode-revert) | low | introduced by branch | CLI | --clear-hash-tree is reapplied on every stored-mode revert | `bugs/rpc-08-clear-hash-tree-reapplied-every-stored-revert/` |
 | [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines) | low | introduced by branch | CLI | --clear-hash-tree is silently ignored for existing remote machines | `bugs/rpc-09-clear-hash-tree-ignored-existing-remote/` |
 | [B27](#b27---dump-memory-ranges-runs-mkdir-through-the-shell-with-an-unquoted-path) | low | pre-existing | CLI | --dump-memory-ranges runs mkdir through the shell with an unquoted path | `bugs/rpc-10-dump-memory-ranges-shell-mkdir/` |
@@ -792,62 +791,6 @@ Exit code 1 means the bug reproduced. Exit code 0 means it is fixed: the handsha
 **ID**: `rpc-04-jsonrpc-protocol-version-not-bumped`
 
 **Related**: [B26](#b26---clear-hash-tree-is-silently-ignored-for-existing-remote-machines).
-
-### B24. Temporary and frontier files are created with mode 0600 and without atomic O_CLOEXEC
-
-**Title**: Frontier files from `hash_tree.frontier_store` and `frontier_forest_store`, including the CLI's `outputs_frontier` and computation `frontier` files, are created 0600 and ignore umask
-
-**Problem:** `cartesi.hash-tree` writes its files through a local `write_file` helper. The helper creates a temporary file with `fs.new_temporary_file`, then syncs it and renames it over the target. `fs.new_temporary_file` calls `os::create_temporary_file`, which creates the file with `mkstemp` on POSIX (always 0600) or with `S_IRUSR|S_IWUSR` on Windows. `open_temporary_file` never calls `fchmod`, so every file this path writes is owner-only, whatever the umask is. Because the temporary file is renamed over the target, an existing 0644 file is also replaced by a 0600 one, and its mode is lost. On `main`, the CLI's `store_frontier` used `util.write_file` (`io.open`, mode 0666 & ~umask). It now calls `hash_tree.frontier_store`. As a result the CLI's `outputs_frontier` and `--mcycle-computation-hash=...,frontier:` files are 0600, while `state_hash`, `output_hashes` and the other epoch files written next to them stay 0644. Elsewhere `os-filesystem.cpp` creates files with `S_CREATE_FILE` (0644 before umask), so 0600 here is inconsistent with the rest of the code. It looks like an accidental side effect of switching to atomic writes, not a chosen contract.
-
-**Origin:** Introduced by this branch. `os::create_temporary_file`, `fs.new_temporary_file`, `hash_tree.frontier_store`, `frontier_forest_store` and the hash-tree `write_file` are all new. The CLI change from `util.write_file` to `hash_tree.frontier_store` is in the branch diff.
-
-**Area:** The `cartesi-machine` CLI's resumable epoch files, and the Lua library `cartesi.hash-tree` (`frontier_store`, `frontier_forest_store` and stored-tree files). The underlying `os::create_temporary_file` / `cartesi.filesystem.new_temporary_file` is also affected.
-
-**Category:** API contract / file permissions (operational regression).
-
-**Location:**
-- `src/os-filesystem.cpp:647-663` (`open_temporary_file`: no `fchmod`)
-- `src/os-filesystem.cpp:665-692` (`create_temporary_file`: `mkstemp` at 687, `S_IRUSR | S_IWUSR` at 676 on Windows)
-- `src/cartesi/filesystem.lua:66-67` (`new_temporary_file`)
-- `src/cartesi/hash-tree.lua:509-514` (`write_file`), callers at 592 (stored trees), 935-936 (`frontier_store`) and 967-988 (`frontier_forest_store`)
-- `src/cartesi-machine.lua:3274-3277` (`store_frontier`), called at 3283 (`outputs_frontier`) and 4109 (computation `frontier`)
-
-**Evidence:** `test_frontier_file_mode.lua` runs itself under `umask 022`. It writes a baseline file with `fs.write_file` and checks the mode of files written by `hash_tree.frontier_store` (to a new file and over an existing 0644 file) and by `frontier_forest_store`. It also runs the real CLI with `resumable:true` epoch files and a computation-hash `frontier`:
-```
-$ eval $(make -s env); lua5.4 bugs/rpc-07-frontier-files-mode-0600/test_frontier_file_mode.lua
-fs.write_file (baseline)                                     mode 644 (expected 644)
-hash_tree.frontier_store, new file                           mode 600 (expected 644)
-hash_tree.frontier_store, overwriting existing 0644 file     mode 600 (expected 644)
-hash_tree.frontier_forest_store, frontier file               mode 600 (expected 644)
-hash_tree.frontier_forest_store, tree file 0x0aa7d3e8df...   mode 600 (expected 644)
-CLI state_hash file                                          mode 644 (expected 644)
-CLI output_hashes file                                       mode 644 (expected 644)
-CLI outputs_frontier file                                    mode 600 (expected 644)
-CLI computation frontier file                                mode 600 (expected 644)
-...
-BUG: frontier files are created mode 0600 (mkstemp) instead of honoring umask like other output files
-```
-The test exits 1 while the bug is present.
-
-**Scenario:** A deployment runs `cartesi-machine` with resumable epoch files (`--cmio-advance-state=...,resumable:true,outputs_frontier:...` and/or `--mcycle-computation-hash=...,frontier:...`) as one uid. Another process reads them as a different uid, for example a sidecar container, a monitoring or verification tool, or a later run under a different service account on a shared volume. After the upgrade, the reader gets `EACCES` on the frontier files but can still read `state_hash`, so resuming or verifying the epoch fails. Lua tools that persist `hash_tree` frontiers or forests for a separate reader hit the same failure. An existing file that an operator deliberately made group- or world-readable silently becomes 0600 on its next rewrite. Hashes, proofs and determinism are not affected. The Rollups Node and Dave use the C API, which does not go through this path.
-
-**Possible solution:** Give the temporary file the permissions a normal create would have before it is renamed. In `os::create_temporary_file` (or `open_temporary_file`), call `fchmod(fd, S_CREATE_FILE & ~current_umask)` or `0666 & ~umask`. The umask can be read with `m = umask(0); umask(m)` (not thread-safe, so read it once or under a lock) or from `/proc/self/status`. Alternatively, when the destination already exists, copy its mode with `fstat` + `fchmod`, so the rename keeps the original permissions. Fixing it in the C++ helper covers every caller (`frontier_store`, forest store, stored trees and any user of `fs.new_temporary_file`). If some caller does need private temporary files, add an explicit mode parameter instead of relying on mkstemp's default.
-
-**Severity:** Low. Both reviewers agree. It is a real regression new on this branch, but it only affects operations. It needs a multi-uid deployment, fails loudly with `EACCES` rather than corrupting data, can be worked around with `chmod`/umask/uid changes, and cannot change any hash or proof or make an honest player lose a dispute.
-
-**Risks:** Of the bug: resumable-epoch workflows split across users or containers break after the upgrade, and operator-set permissions on existing frontier files are silently narrowed. Of the fix: reading the umask with `umask()` is process-global and racy in multithreaded hosts, so it should be read once or replaced by a mode taken from the destination. Making the files readable again (0644) is the old behaviour and exposes only public hash data. Any caller that relies on `new_temporary_file` for private scratch files would need an opt-in private mode.
-
-**Proof of concept:** `bugs/rpc-07-frontier-files-mode-0600/test_frontier_file_mode.lua` (self-contained; it re-executes itself under `umask 022`, creates its own temporary directory and small machine, and needs `cartesi-machine.lua` on `PATH`). Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/rpc-07-frontier-files-mode-0600/test_frontier_file_mode.lua
-```
-Exit code 1 means the bug is present; it prints `OK: all files honor umask` and exits 0 once fixed.
-
-**ID**: `rpc-07-frontier-files-mode-0600`
-
-**Independent reproductions**: other hunters found, reproduced and confirmed the same root cause separately:
-
-- `lua-23-temp-file-cloexec-race-and-mode`: run with `eval $(make -s env); sh bugs/lua-23-temp-file-cloexec-race-and-mode/run.sh`. It also shows that `os::create_temporary_file` gets its fd from `mkstemp` without `O_CLOEXEC` and sets `FD_CLOEXEC` with a later `fcntl`, so a fork and exec on another thread in between inherits the fd. Use `mkostemp(..., O_CLOEXEC)` and `fchmod` to `0666 & ~umask`.
 
 ### B25. --clear-hash-tree is reapplied on every stored-mode revert
 

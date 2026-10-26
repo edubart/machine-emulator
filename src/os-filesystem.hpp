@@ -146,7 +146,7 @@ void clone_file(const std::string &from, const std::string &to);
 /// so it may be locked by a running machine that maps it.
 void sync_file(const std::string &filename);
 
-/// \brief Creates a new file with a unique name, readable and writable only by its owner.
+/// \brief Creates a new file with a unique name, with the same permissions as other created files.
 /// \param dirname Directory to create the file in, must exist.
 /// \param prefix Start of the file name, which random characters complete.
 /// \returns File opened for reading and writing, closed on exec, and the path of the new file.

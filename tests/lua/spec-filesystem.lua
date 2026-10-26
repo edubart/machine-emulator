@@ -143,6 +143,18 @@ describe("filesystem", function()
         end, "an earlier write to it failed")
     end)
 
+    it("creates temporary files readable like other files", function()
+        local scope <close>, dirname = new_scope_directory() -- luacheck: ignore 211
+        local function get_permissions(path)
+            local p <close> = assert(io.popen("ls -ld '" .. path .. "'"))
+            -- io.open asks for 0666 and temporary files for 0644, so only read bits match
+            return (p:read("l"):sub(1, 10):gsub("w", "-"))
+        end
+        filesystem.write_file("contents", dirname .. "/file")
+        local temporary <close> = filesystem.new_temporary_file(dirname, "file.tmp.")
+        expect.equal(get_permissions(temporary.path), get_permissions(dirname .. "/file"))
+    end)
+
     it("reports missing paths", function()
         local missing = filesystem.temp_pathname()
         expect.falsy(filesystem.exists(missing))

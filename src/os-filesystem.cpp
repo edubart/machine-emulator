@@ -39,9 +39,11 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <random>
 #include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <tuple>
 #include <utility>
@@ -649,11 +651,6 @@ static std::pair<FILE *, std::string> open_temporary_file(int fd, const std::str
         std::ignore = retry_on_eintr([&] { return close(fd); });
         std::ignore = unlink(path.c_str());
     });
-#ifndef _WIN32
-    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
-        throw make_path_system_error(errno, "unable to create temporary file"s, path, "fcntl() failed"s);
-    }
-#endif
     auto *file = fdopen(fd, "w+b");
     if (file == nullptr) {
         throw make_path_system_error(errno, "unable to create temporary file"s, path, "fdopen() failed"s);
@@ -664,16 +661,26 @@ static std::pair<FILE *, std::string> open_temporary_file(int fd, const std::str
 
 std::pair<FILE *, std::string> create_temporary_file(const std::string &dirname, const std::string &prefix) {
     const auto template_path = dirname + "/"s + prefix + "XXXXXX"s;
-#ifdef _WIN32
-    // _mktemp_s only picks a name, so creation retries until an exclusive open succeeds
+#ifndef _WIN32
+    std::random_device device;
+#endif
+    // mkstemp makes owner-only files that stay open on exec, so pick a name and retry until an
+    // exclusive open with the usual mode and O_CLOEXEC succeeds
     for (int attempt = 0; attempt < 100; ++attempt) {
         auto path = template_path;
+#ifdef _WIN32
         if (_mktemp_s(path.data(), path.size() + 1) != 0) {
             throw make_path_system_error(errno, "unable to create temporary file"s, template_path,
                 "_mktemp_s() failed"s);
         }
+#else
+        constexpr std::string_view chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for (auto &c : std::span{path}.last(6)) {
+            c = chars[device() % chars.size()];
+        }
+#endif
         const auto fd = open(path.c_str(), O_CREAT | O_EXCL | O_RDWR | O_BINARY | O_CLOEXEC, // NOLINT
-            S_IRUSR | S_IWUSR);
+            S_CREATE_FILE);
         if (fd >= 0) {
             return open_temporary_file(fd, path);
         }
@@ -682,14 +689,6 @@ std::pair<FILE *, std::string> create_temporary_file(const std::string &dirname,
         }
     }
     throw make_path_system_error(EEXIST, "unable to create temporary file"s, template_path);
-#else
-    auto path = template_path;
-    const auto fd = mkstemp(path.data());
-    if (fd < 0) {
-        throw make_path_system_error(errno, "unable to create temporary file"s, template_path, "mkstemp() failed"s);
-    }
-    return open_temporary_file(fd, path);
-#endif
 }
 
 #ifndef HAVE_UNIFIED_PAGE_CACHE

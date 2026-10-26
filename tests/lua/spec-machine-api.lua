@@ -227,6 +227,7 @@ for _, variant in ipairs(variants) do
                 local dht_filename = string.format("%s/%016x-%x.dht", dirname, cartesi.AR_RAM_START, 0x2000)
                 local sht_filename = dirname .. "/hash_tree.sht"
                 -- Overwrite the RAM dense tree root and the sparse tree root
+                -- (loading rehashes sparse inner nodes, so only the dense tree stays corrupted)
                 for _, filename in ipairs({ dht_filename, sht_filename }) do
                     local data = filesystem.read_file(filename)
                     local offset = filename == dht_filename and cartesi.HASH_SIZE
@@ -236,7 +237,7 @@ for _, variant in ipairs(variants) do
                         data:sub(1, offset) .. corrupted .. data:sub(offset + #corrupted + 1),
                         filename
                     )
-                    expect.falsy(verify())
+                    expect.equal(verify(), filename == sht_filename)
                     filesystem.write_file(data, filename)
                 end
             end)

@@ -21,7 +21,7 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 
 ## Summary
 
-65 confirmed issues: 4 high, 12 medium, 49 low.
+64 confirmed issues: 4 high, 12 medium, 48 low.
 
 | # | Severity | Origin | Area | Issue | Proof of concept |
 |---|---|---|---|---|---|
@@ -57,7 +57,6 @@ A test exits non-zero and prints a `BUG:` line while the bug is present.
 | [B36](#b36-temporary-files-from-killed-stores-are-never-cleaned-up) | low | introduced by branch | Lua cartesi.hash-tree (frontier store) | Temporary files from killed stores are never cleaned up | `bugs/lua-25-leftover-temp-files/` |
 | [B37](#b37-filesystemtemp_pathname-returns-a-deleted-tmp-name-that-another-user-can-claim) | low | introduced by branch | Lua cartesi.filesystem | filesystem.temp_pathname returns a deleted /tmp name that another user can claim | `bugs/lua-27-temp-pathname-toctou/` |
 | [B38](#b38-abi-decoder-accepts-dirty-address-bits-and-non-zero-padding) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder accepts dirty address bits and non-zero padding | `bugs/lua-28-evmu-lenient-dirty-bits-padding/` |
-| [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree) | low | pre-existing | Machine API (uarch cycle collection) | Over-long revert_uarch_tail aborts on an assert or yields an invalid mcycle subtree | `bugs/api-10-collect-uarch-revert-tail-length-unvalidated/` |
 | [B41](#b41-collect_uarch_cycle_root_hashes-accepts-bundle-sizes-above-220-and-shifts-by-a-negative-amount) | low | pre-existing | Machine API (uarch cycle collection) | collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount | `bugs/api-11-collect-uarch-log2-bundle-unbounded/` |
 | [B42](#b42-filesystemrename_file-does-not-replace-existing-files-on-windows) | low | introduced by branch | Lua cartesi.filesystem | filesystem.rename_file does not replace existing files on Windows | `bugs/lua-26-rename-not-replacing-on-windows/` |
 | [B45](#b45-abi-decoder-amplifies-memory-use-through-aliased-dynamic-offsets) | low | pre-existing | Lua cartesi.evmu (ABI) | ABI decoder amplifies memory use through aliased dynamic offsets | `bugs/lua-30-evmu-aliased-offsets-quadratic-memory/` |
@@ -1502,68 +1501,6 @@ The test exits 1 while the bug is present and prints `PASS` (exit 0) once it is 
 
 **Related**: B18 (fixed).
 
-### B40. Over-long revert_uarch_tail aborts on an assert or yields an invalid mcycle subtree
-
-**Title**: Over-long `revert_uarch_tail` (more than 2^20 entries) is accepted: with `log2_bundle > 0` it aborts the process (local or JSON-RPC server) on an assert, otherwise it returns an mcycle group with more than 2^20 leaves
-
-**Problem**: The caller supplies `revert_uarch_tail` to `collect_uarch_cycle_root_hashes` and `collect_uarch_cycle_bundle` (in `cm_*`, as a JSON array; over JSON-RPC it comes from the client). `machine::collect_uarch_cycle_root_hashes` checks three things only: the tail is non-empty, has `size() >= 2`, and has `back() == read_revert_root_hash()`. Nothing bounds its length by `2^ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE` (2^20). `append_revert_uarch_tail_period` pushes `tail[0..n-3]` as leaves, then calls `append_uarch_reset_root_hash`. The outcome depends on bundling and build type:
-- `log2_bundle > 0`: `append_uarch_reset_root_hash` executes `assert(execution_bundle_count < bundle_capacity)`. The default `relwithdebinfo` build leaves asserts on outside `interpret.cpp`, so the process aborts with SIGABRT.
-- `log2_bundle > 0` in a `release` build (NDEBUG): the assert is compiled out, and the call silently emits more than `2^(20-log2)` bundles for that mcycle.
-- `log2_bundle == 0`: the call returns one mcycle group with more than 2^20 leaves, which is not a valid mcycle subtree.
-
-So a bad argument produces either an abort or malformed output, never the `runtime_error` that the other tail checks raise.
-
-**Origin**: pre-existing. The same validation and assert are on `origin/main`. The branch only changes `clear_hash_tree` in `machine.cpp`. The experimental PRT node does use this API, so it is in scope.
-
-**Area**: microarchitecture root-hash collection for PRT, specifically the revert-tail handling of `collect_uarch_cycle_root_hashes` / `collect_uarch_cycle_bundle`. Exposed through the C API (`cm_collect_uarch_cycle_root_hashes`), the Lua bindings and JSON-RPC (`cartesi-jsonrpc-machine`).
-
-**Category**: crash (assert abort, remote DoS of the JSON-RPC server) / input validation (malformed output).
-
-**Location**:
-- `src/machine.cpp:2700-2709`: tail validation in `machine::collect_uarch_cycle_root_hashes`, with no upper bound on the length.
-- `src/machine.cpp:2645-2655`: `append_revert_uarch_tail_period` pushes every entry except the last two as leaves.
-- `src/machine.cpp:2606`: `assert(execution_bundle_count < bundle_capacity)` in `append_uarch_reset_root_hash`.
-- `src/machine.cpp:2718` (machine already at an rx-rejected yield, `start_rejected`) and `src/machine.cpp:2849` (machine reaches that state during collection): the two call sites.
-- `src/Makefile:211`: the default `relwithdebinfo` build sets `-DNDEBUG` only for `interpret.cpp`, so the assert is live in `machine.cpp`.
-
-**Evidence**: The test sets `iflags_Y=1` and an rx-rejected manual-yield `htif_tohost`, then passes a tail of 2^20+8 entries whose last entry is `read_revert_root_hash()`. It runs three cases:
-- Case A: in-process, `log2_bundle=0`.
-- Case B: child process, `log2_bundle=4`.
-- Case C: `cartesi-jsonrpc-machine` server, `log2_bundle=4`.
-```
-case A (log2_bundle=0): accepted tail of 1048584 entries, group has 1048584 leaves (max 1048576)
-BUG: over-long revert_uarch_tail accepted; mcycle group has more than 2^20 leaves
-lua5.4: machine.cpp:2606: void cartesi::append_uarch_reset_root_hash(...): Assertion `execution_bundle_count < bundle_capacity' failed.
-case B (local, log2_bundle=4): child exit code 134
-cartesi-jsonrpc-machine: machine.cpp:2606: ... Assertion `execution_bundle_count < bundle_capacity' failed.
-child-jsonrpc: call returned	false	jsonrpc error: post error contacting 127.0.0.1:44027 (end of stream ...)
-child-jsonrpc: server alive after call:	false
-BUG: case C (jsonrpc server, log2_bundle=4): process aborted on assert(execution_bundle_count < bundle_capacity)
-```
-Run: `eval $(make -s env); lua5.4 bugs/api-10-collect-uarch-revert-tail-length-unvalidated/test-tail-length.lua` (exit 1, about 18 s).
-
-**Scenario**: A validator or tooling built on the C/Lua/JSON-RPC API passes a wrong tail, for example:
-- groups from several mcycles concatenated together;
-- a tail taken from a machine that is not at the manual-yield fixed point.
-
-The machine is at, or reaches, an rx-rejected manual yield, and the caller uses `log2_bundle > 0`. The node process aborts instead of getting an error. If the machine is remote, the shared `cartesi-jsonrpc-machine` server aborts, so one bad request from any client kills that server and every machine it hosts. Without bundling, or in a release build, the caller instead silently receives an invalid commitment group. A correct caller builds the tail with `collect_uarch_cycle_root_hashes(MCYCLE_MAX, 0)` on the reverted machine, as `prt.lua` does. That returns exactly one mcycle group of at most 2^20 entries, so honest validators that use the API correctly are not affected.
-
-**Possible solution**: In `machine::collect_uarch_cycle_root_hashes`, next to the existing tail checks and before anything executes, add `if (revert_uarch_tail.size() > (UINT64_C(1) << ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE)) throw std::runtime_error{"revert uarch tail is too long"};`. Optionally also require the size to be a valid one-mcycle period. Replace the `assert` at line 2606 (and the related `assert(!back_tree.full())`) with runtime checks, so that internal invariants guarding caller-controlled sizes cannot abort the process or be silently skipped under NDEBUG.
-
-**Severity**: low. Both reviewers agree. Only a buggy or malicious caller can trigger it: correctly built tails never exceed 2^20 entries, so an honest player cannot lose a dispute and no correct node crashes. The impact is a process abort (including a remote JSON-RPC server DoS) or malformed output from bad input instead of a clean error.
-
-**Risks**: Bug: abort of the node or of a shared JSON-RPC server on one malformed request; in release builds, silently malformed bundles that a caller might commit. Fix: very low risk. The new bound rejects only tails that can never be valid, and changing asserts into runtime errors does not change behaviour for valid inputs.
-
-**Proof of concept**: `bugs/api-10-collect-uarch-revert-tail-length-unvalidated/test-tail-length.lua`. The test needs no machine images. It spawns itself as child processes for the abort cases and spawns a local `cartesi-jsonrpc-machine` for case C. Run from the repo root:
-```
-eval $(make -s env); lua5.4 bugs/api-10-collect-uarch-revert-tail-length-unvalidated/test-tail-length.lua
-```
-Exit 1 means the bug is present. Exit 0 means all three cases reject the over-long tail with a normal error.
-
-**ID**: `api-10-collect-uarch-revert-tail-length-unvalidated`
-
-**Related**: B39 (fixed).
-
 ### B41. collect_uarch_cycle_root_hashes accepts bundle sizes above 2^20 and shifts by a negative amount
 
 **Title**: `collect_uarch_cycle_root_hashes` accepts `log2_bundle_uarch_cycle_count` 21..63, hits a negative shift (UB) and returns a malformed layout
@@ -1607,7 +1544,7 @@ To run it: `eval $(make -s env); lua5.4 bugs/api-11-collect-uarch-log2-bundle-un
 
 **ID**: `api-11-collect-uarch-log2-bundle-unbounded`
 
-**Related**: [B40](#b40-over-long-revert_uarch_tail-aborts-on-an-assert-or-yields-an-invalid-mcycle-subtree).
+**Related**: B40 (fixed).
 
 ### B42. filesystem.rename_file does not replace existing files on Windows
 

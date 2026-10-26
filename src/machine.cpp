@@ -2712,6 +2712,9 @@ uarch_cycle_root_hashes machine::collect_uarch_cycle_root_hashes(uint64_t mcycle
         if (revert_uarch_tail.size() < 2) {
             throw std::runtime_error{"revert uarch tail is too short"};
         }
+        if (revert_uarch_tail.size() > (UINT64_C(1) << ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE)) {
+            throw std::runtime_error{"revert uarch tail is too long"};
+        }
         if (revert_uarch_tail.back() != read_revert_root_hash()) {
             throw std::runtime_error{"revert uarch tail does not end with the revert root hash"};
         }

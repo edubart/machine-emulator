@@ -791,6 +791,16 @@ describe("collect hashes", function()
                     machine:collect_uarch_cycle_root_hashes(mcycle_end)
                 end, "revert uarch tail is required")
 
+                -- a tail longer than one mcycle period is rejected
+                local long_revert_uarch_tail = {}
+                for i = 1, (1 << cartesi.ROLLUP_LOG2_MAX_UARCH_CYCLES_PER_MCYCLE) do
+                    long_revert_uarch_tail[i] = revert_uarch_tail[1]
+                end
+                long_revert_uarch_tail[#long_revert_uarch_tail + 1] = revert_root_hash
+                expect.fail(function()
+                    machine:collect_uarch_cycle_root_hashes(mcycle_end, 4, long_revert_uarch_tail)
+                end, "revert uarch tail is too long")
+
                 -- the machine is not touched, the period comes entirely from the tail
                 expect.equal(machine:collect_uarch_cycle_root_hashes(mcycle_end, 0, revert_uarch_tail), {
                     hashes = revert_uarch_tail,

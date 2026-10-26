@@ -1008,6 +1008,31 @@ describe("backing stores", function()
         expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
     end)
 
+    it("should rehash sparse nodes left marked and stale by an interrupted update", function()
+        local directory = filesystem.temp_pathname()
+        do
+            local machine <close> = cartesi.machine({ ram = { length = 0x10000 } }, {}, directory)
+            machine:get_root_hash()
+        end
+        local _ <close> = tests_util.scope_exit(function()
+            cartesi.machine:remove_stored(directory)
+        end)
+        -- Leave the root node queued with a stale hash, as an interrupted update would.
+        -- Nodes take 64 bytes, the root is node 1, and its marked flag and hash start at offsets 28 and 32.
+        local filename = directory .. "/hash_tree.sht"
+        local data = filesystem.read_file(filename)
+        local root_offset = 64
+        data = data:sub(1, root_offset + 28)
+            .. string.pack("<I4", 1)
+            .. string.rep("\0", 32)
+            .. data:sub(root_offset + 65)
+        filesystem.write_file(data, filename)
+        local machine <close> = cartesi.machine(directory, {}, cartesi.SHARING_NONE)
+        expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
+        machine:write_memory(cartesi.AR_RAM_START, "hello")
+        expect.equal(machine:get_root_hash(), tests_util.calculate_emulator_hash(machine))
+    end)
+
     describe("page hash-tree cache eviction", function()
         local drive_start = 0x90000000
         local retained_start = 0xa0000000

@@ -1020,6 +1020,16 @@ hash_tree::hash_tree(const hash_tree_config &config, uint64_t concurrency, const
                 throw std::runtime_error{"inconsistent sparse hash tree nodes"};
             }
         }
+        // An interrupted update may have left nodes marked or inner node hashes stale, so clear marks and rehash.
+        // Inner nodes are created after their parents, so visiting nodes in reverse order rehashes children first.
+        variant_hasher h{m_hash_function};
+        for (auto &node : m_sparse_nodes | std::views::drop(1) | std::views::reverse) {
+            node.marked = 0;
+            if (!is_ar_node(node)) {
+                get_concat_hash(h, get_sparse_node_hash_view(node.left, static_cast<int>(node.log2_size) - 1),
+                    get_sparse_node_hash_view(node.right, static_cast<int>(node.log2_size) - 1), node.hash);
+            }
+        }
     }
 }
 
